@@ -109,53 +109,36 @@ def _partition_dimension(partition):
 
 def block_stabilizer_sum(block, generators, dimension):
     """Return ``S_block = sum_{tau in Sym(block)} D(tau^-1)`` for one contiguous
-    block of positions, via a breadth-first walk of the block's local
-    permutations instead of one reduced-word decomposition per element.
+    block of positions, using an exact subgroup-chain factorization.
 
-    ``block`` must be a contiguous range of positions -- true for every
-    block of a content class's canonical sorted word (the only way this is
-    ever called). Local adjacent transposition ``k`` (swap local positions
-    ``k, k+1`` of the block) then coincides with the *global*
-    adjacent-transposition generator at index ``block[0] + k``, so the same
-    breadth-first construction ``canonical_irrep_matrices_native`` uses for
-    the whole group applies unchanged, restricted to this block's local
-    elements. ``D`` is real orthogonal (Young's orthogonal form), so
-    ``D(tau^-1) = D(tau)^T`` and ``sum_tau D(tau^-1) = (sum_tau D(tau))^T``,
-    which avoids a second walk for the inverses.
+    For H_r = Sym(a,...,p), left-coset representatives of H_(r-1) are
+    rho_j = s_j o ... o s_(p-1), j=a,...,p (rho_p=e). The anti-homomorphism
+    D(x o y)=D(y)D(x) gives D((rho_j o h)^-1)=D(rho_j^-1)D(h^-1), hence
+    S_r=(I+G_(p-1)+G_(p-2)G_(p-1)+...+G_a...G_(p-1)) S_(r-1).
+    This needs O(len(block)^2) matrix products and constant matrix storage;
+    it never enumerates the factorial-size subgroup or changes its gauge.
     """
 
     sp = _sympy()
     block = tuple(block)
     size = len(block)
     identity = sp.eye(dimension)
-    if size <= 1:
+    if size == 0:
         return identity
     start = block[0]
-    local_identity = tuple(range(size))
-    walked = {local_identity: identity}
-    queue = [local_identity]
-    while queue:
-        current = queue.pop(0)
-        current_matrix = walked[current]
-        for local_adjacent in range(size - 1):
-            neighbor = list(current)
-            neighbor[local_adjacent], neighbor[local_adjacent + 1] = (
-                neighbor[local_adjacent + 1],
-                neighbor[local_adjacent],
-            )
-            neighbor = tuple(neighbor)
-            if neighbor in walked:
-                continue
-            walked[neighbor] = generators[start + local_adjacent] * current_matrix
-            queue.append(neighbor)
-    if len(walked) != factorial(size):
-        raise RuntimeError(
-            "Coset block-stabilizer walk did not reach every local permutation."
-        )
-    total = sp.zeros(dimension, dimension)
-    for matrix in walked.values():
-        total += matrix
-    return total.T
+    if start < 0 or block != tuple(range(start, start+size)) or block[-1] > len(generators):
+        raise ValueError("Stabilizer block must be a contiguous, in-range sequence of positions.")
+    if size == 1:
+        return identity
+    total = identity
+    for length in range(2, size+1):
+        tail = identity
+        coset_sum = identity
+        for index in range(start+length-2, start-1, -1):
+            tail = generators[index]*tail
+            coset_sum = coset_sum+tail
+        total = (coset_sum*total).applyfunc(sp.simplify)
+    return total
 
 
 def class_stabilizer_sum(w0, dimension, generators):

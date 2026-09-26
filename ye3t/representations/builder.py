@@ -626,6 +626,56 @@ def _angular_scalar_vectors_coset(
     return scalar_vectors, multiplicity
 
 
+def _exact_single_factor_weight_vectors(nin, lin, permutation_irrep, output_L):
+    """Exact requested-L carrier from a coset image and raising nullspace.
+
+    This uses only the highest-weight raising block and successive lowering
+    blocks. It does not build full magnetic projectors or unrelated L sectors.
+    The highest-weight copy gauge is the exact coset pivot convention; lowering
+    preserves that gauge rather than independently normalizing each M.
+    """
+    from .young_sectors import generalized_sector_counts
+
+    sp = _sympy()
+    nin, lin = tuple(map(int, nin)), tuple(map(int, lin))
+    output_L = int(output_L)
+    if output_L < 0 or len(permutation_irrep.subgroup.factors) != 1 or len(permutation_irrep.partitions) != 1:
+        raise ValueError("Requested-L coset construction requires one Young factor and L>=0.")
+    slots = _slot_groups_for_subgroup(nin, lin, permutation_irrep.subgroup)[0]
+    if tuple(slots) != tuple(range(len(lin))) or len(set(lin)) != 1:
+        raise ValueError("Requested-L coset construction requires one homogeneous full-slot block.")
+    partition = permutation_irrep.partitions[0]
+    basis_states = _raw_tensor_basis_states(lin)
+    weights = {weight: tuple(state for state in basis_states if sum(state) == weight)
+               for weight in range(-output_L, output_L+2)}
+    highest_states = weights[output_L]
+    raising = _weight_raising_matrix(lin, highest_states, weights[output_L+1])
+    highest, multiplicity = _angular_scalar_vectors_coset(
+        highest_states, raising, slots, lin[0], partition, int(partition.dimension))
+    expected = generalized_sector_counts(nin, lin, permutation_irrep=permutation_irrep,
+                                        count_only=True, spatial_symmetry="O3")
+    if int(expected.counts_by_L.get(output_L, 0)) != multiplicity:
+        raise RuntimeError("Requested-L coset multiplicity disagrees with exact representation counting.")
+    full_index = {state: index for index, state in enumerate(basis_states)}
+    lowering = {magnetic: _weight_raising_matrix(lin, weights[magnetic-1], weights[magnetic]).T
+                for magnetic in range(-output_L+1, output_L+1)}
+    vectors = {}
+    for (copy_index, tableau), highest_vector in highest.items():
+        if any(sp.simplify(value) != 0 for value in raising*highest_vector):
+            raise RuntimeError("Requested-L vector is not highest weight.")
+        current = highest_vector
+        for magnetic in range(output_L, -output_L-1, -1):
+            embedded = sp.zeros(len(basis_states), 1)
+            for state, value in zip(weights[magnetic], current, strict=True):
+                if value != 0:
+                    embedded[full_index[state], 0] = value
+            vectors[(copy_index, tableau, magnetic)] = embedded
+            if magnetic > -output_L:
+                scale = sp.sqrt((output_L+magnetic)*(output_L-magnetic+1))
+                current = (lowering[magnetic]*current/scale).applyfunc(sp.simplify)
+    return basis_states, vectors, multiplicity
+
+
 def _exact_single_factor_scalar_vectors(nin, lin, permutation_irrep):
     """Return the exact L=0 carrier using only the M=0 and M=1 spaces."""
     nin = tuple(int(value) for value in nin)

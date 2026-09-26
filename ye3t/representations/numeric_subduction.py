@@ -482,8 +482,9 @@ def _nullspace_basis(
     vectors = vh[rank:, :]
     if vectors.numel() == 0:
         return torch.empty((0, int(target_dim), int(child_dim)), dtype=constraints.dtype, device=constraints.device)
-    q, _r = torch.linalg.qr(vectors.T.contiguous(), mode="reduced")
-    columns = q.T.contiguous()
+    # Right singular vectors are already orthonormal. A second QR changes
+    # their gauge without improving the nullspace or its rank certificate.
+    columns = vectors.contiguous()
     return columns.reshape(columns.shape[0], int(child_dim), int(target_dim)).transpose(1, 2).contiguous()
 
 

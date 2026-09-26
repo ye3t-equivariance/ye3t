@@ -12,7 +12,7 @@ independent and reuses YE3T's exact Young matrix-unit and generalized angular
 compiler APIs; no external source code is adapted.
 """
 
-from collections import Counter, defaultdict
+from collections import Counter, OrderedDict, defaultdict
 from collections.abc import Mapping
 from dataclasses import field
 from functools import lru_cache
@@ -20,6 +20,7 @@ from itertools import product
 import hashlib
 import json
 from math import factorial, isfinite, prod
+from threading import RLock
 
 from ye3t._record import recordclass
 from ye3t.cache.artifacts import YE3TArtifactStore, artifact_hash
@@ -27,6 +28,7 @@ from ye3t.exact_scalars import ExactRadical, exact_scalar
 from ye3t.representations.builder import (
     GeneralizedExactSymbolicLabeler,
     _exact_single_factor_scalar_vectors,
+    _exact_single_factor_weight_vectors,
 )
 from ye3t.representations.generalized_irreps import (
     Partition,
@@ -50,6 +52,17 @@ LIFTED_CAUCHY_SCALAR_SCHEMA = "ye3t_linear_lifted_cauchy_scalar_v1"
 LIFTED_CAUCHY_SCALAR_CONVENTION = (
     "complex_condon_shortley_x_young_orthogonal_metric_dual_v1"
 )
+LIFTED_CAUCHY_WEIGHT_SPACE_CONVENTION = "complex_condon_shortley_x_young_coset_highest_weight_metric_dual_v1"
+
+
+def _request_convention(request):
+    backend = request.get("angular_basis_backend", "legacy_exact")
+    if backend not in {"legacy_exact", "exact_weight_space_v1"}:
+        raise ValueError("Unknown lifted-Cauchy angular basis backend.")
+    return (LIFTED_CAUCHY_WEIGHT_SPACE_CONVENTION if backend == "exact_weight_space_v1"
+            else LIFTED_CAUCHY_SCALAR_CONVENTION)
+
+
 LIFTED_CAUCHY_REAL_FORM_CONVENTION = (
     "real_tesseral_from_complex_condon_shortley_young_orthogonal_v1"
 )
@@ -1044,6 +1057,9 @@ def _normalize_request(request):
             request.get("maximum_loader_symbolic_cells", 20000000)
         ),
     }
+    if "angular_basis_backend" in request:
+        normalized["angular_basis_backend"] = str(request["angular_basis_backend"])
+        _request_convention(normalized)
     if raw_manual_labels is not None:
         manual_labels = []
         for descriptor_index, value in enumerate(parsed_manual_labels):
@@ -1344,7 +1360,7 @@ def _manual_labels_from_request(request):
             or int(supplied.target_L) != int(request["target"]["L"])
             or int(supplied.target_parity)
             != int(request["target"]["o3_parity"])
-            or str(supplied.convention_id) != LIFTED_CAUCHY_SCALAR_CONVENTION
+            or str(supplied.convention_id) != _request_convention(request)
         ):
             raise ValueError("manual_labels contains an inconsistent descriptor label.")
         parity_degree = sum(
@@ -1602,6 +1618,9 @@ def _validate_normalized_request_payload(request):
     }
     if "manual_labels" in request:
         expected_request_keys.add("manual_labels")
+    if "angular_basis_backend" in request:
+        expected_request_keys.add("angular_basis_backend")
+        _request_convention(request)
     _require_exact_keys(request, expected_request_keys, "normalized request")
     if str(request["family"]) != LIFTED_CAUCHY_SCALAR_FAMILY:
         raise ValueError("Lifted-Cauchy normalized request family is invalid.")
@@ -1730,7 +1749,7 @@ def _validate_lifted_cauchy_identity(value, verify_resources=True):
                 != tuple(int(block[2]) for block in family["blocks"])
                 or int(label.target_L) != 0
                 or int(label.target_parity) != 1
-                or str(label.convention_id) != LIFTED_CAUCHY_SCALAR_CONVENTION
+                or str(label.convention_id) != _request_convention(value.request)
             ):
                 raise ValueError("Lifted-Cauchy descriptor label is inconsistent.")
             channel_indices = tuple(int(item) for item in label.block_channel_indices)
@@ -1809,6 +1828,13 @@ def _validate_lifted_cauchy_identity(value, verify_resources=True):
             derived_key = "generated_family_channel_assignment_upper_bound"
             if derived_key not in stored_resources:
                 expected_resources.pop(derived_key, None)
+            # Early requested-weight artifacts recorded the conservative
+            # eight-slot ceiling. Their stricter report remains valid for an
+            # actually <=8-slot plan; all other resource checks are unchanged.
+            if (value.report.request.get("angular_basis_backend") == "exact_weight_space_v1"
+                    and stored_resources.get("exact_matrix_unit_maximum_block_size") == 8
+                    and expected_resources["maximum_block_size"] <= 8):
+                expected_resources["exact_matrix_unit_maximum_block_size"] = 8
             if _freeze_json(stored_resources) != _freeze_json(expected_resources):
                 raise ValueError("Lifted-Cauchy compiler resource report is stale.")
         if value.resource_report.get("within_limit") is not True:
@@ -2236,7 +2262,7 @@ def _build_lifted_cauchy_scalar_count(request):
             for block in family["blocks"]
         )
     )
-    if maximum_block_size > 8:
+    if maximum_block_size > 8 and request.get("angular_basis_backend") != "exact_weight_space_v1":
         raise MemoryError(
             "Lifted-Cauchy exact compiler resource preflight rejected: "
             "exact_matrix_unit_rank_limit"
@@ -2492,7 +2518,7 @@ def _build_lifted_cauchy_scalar_count(request):
                             outer_copy_index=int(outer_copy),
                             target_L=int(request["target"]["L"]),
                             target_parity=int(request["target"]["o3_parity"]),
-                            convention_id=LIFTED_CAUCHY_SCALAR_CONVENTION,
+                            convention_id=_request_convention(request),
                         )
                         labels.append(label)
                         counts_by_family[str(family["group_id"])] += 1
@@ -2562,9 +2588,11 @@ def _basis_inventory_request(request):
     semantic = {key: request[key] for key in keys}
     if "manual_labels" in request:
         semantic["manual_labels"] = request["manual_labels"]
+    if "angular_basis_backend" in request:
+        semantic["angular_basis_backend"] = request["angular_basis_backend"]
     return {
         "exactness": "exact",
-        "mathematical_convention": LIFTED_CAUCHY_SCALAR_CONVENTION,
+        "mathematical_convention": _request_convention(request),
         "coordinate_semantics": "complete_compiler_multiplicity_labels_v1",
         "request": semantic,
     }
@@ -2792,7 +2820,7 @@ def _enforce_basis_inventory_resource_limits(request, payload):
             _family_assignment_upper_bound(request, family)
             for family in request["families"]
         )
-    if maximum_block_size > 8:
+    if maximum_block_size > 8 and request.get("angular_basis_backend") != "exact_weight_space_v1":
         raise MemoryError(
             "Lifted-Cauchy exact compiler resource preflight rejected: "
             "exact_matrix_unit_rank_limit"
@@ -2935,14 +2963,14 @@ def lifted_cauchy_scalar_count(request):
         dependency_hashes={
             "label_enumerator_contract": artifact_hash(
                 {
-                    "convention": LIFTED_CAUCHY_SCALAR_CONVENTION,
+                    "convention": _request_convention(normalized),
                     "formula": "hook_content_x_exact_generalized_angular_x_outer_CG",
                     "coordinate_schema": "complete_compiler_multiplicity_labels_v1",
                 }
             )
         },
         producer={
-            "compiler_convention": LIFTED_CAUCHY_SCALAR_CONVENTION,
+            "compiler_convention": _request_convention(normalized),
             "implementation": "lifted_cauchy_basis_inventory_v1",
         },
     )
@@ -3539,7 +3567,8 @@ def _resource_report(report):
     estimated_static_bytes = int(estimated_cells) * 64
     within_basis = maximum_ordered <= int(request["maximum_ordered_basis_states"])
     within_bytes = estimated_static_bytes <= int(request["maximum_static_bytes"])
-    within_exact_rank = maximum_block_size <= 8
+    resource_governed_cosets = request.get("angular_basis_backend") == "exact_weight_space_v1"
+    within_exact_rank = resource_governed_cosets or maximum_block_size <= 8
     within_loader_cells = estimated_cells <= int(
         request["maximum_loader_symbolic_cells"]
     )
@@ -3629,7 +3658,7 @@ def _resource_report(report):
         "configured_maximum_parent_shuffle_count": int(
             request["maximum_parent_shuffle_count"]
         ),
-        "exact_matrix_unit_maximum_block_size": 8,
+        "exact_matrix_unit_maximum_block_size": None if resource_governed_cosets else 8,
         "within_limit": bool(
             within_basis
             and within_bytes
@@ -3799,7 +3828,27 @@ def _equivalence_certificate(payload):
     return {**body, "certificate_hash": _stable_hash(_freeze_json(body))}
 
 
+_PHYSICAL_SCALAR_REALITY_CACHE = OrderedDict()
+_PHYSICAL_SCALAR_REALITY_CACHE_LOCK = RLock()
+
+
 def _physical_scalar_reality_report(payload):
+    # Chemical names do not enter this indexed polynomial. Bind every consumed
+    # algebraic input, preserving sequence order (including residual-path ties).
+    cache_key = _stable_hash(_freeze_json({
+        "schema": "ye3t_exact_scalar_reality_cache_v1",
+        "basis": LIFTED_CAUCHY_REAL_FORM_CONVENTION,
+        "real_forms": payload["real_forms"],
+        "channel_real_form_ids": payload["channel_real_form_ids"],
+        "descriptors": tuple({"descriptor_index": descriptor["descriptor_index"],
+                              "canonical_terms": descriptor["canonical_terms"]}
+                             for descriptor in payload["descriptors"]),
+    }))
+    with _PHYSICAL_SCALAR_REALITY_CACHE_LOCK:
+        cached = _PHYSICAL_SCALAR_REALITY_CACHE.get(cache_key)
+        if cached is not None:
+            _PHYSICAL_SCALAR_REALITY_CACHE.move_to_end(cache_key)
+            return dict(cached)
     sp = _sympy()
     forms = {
         str(record["real_form_id"]): _exact_matrix_from_payload(
@@ -3848,7 +3897,7 @@ def _physical_scalar_reality_report(payload):
                     str(int(descriptor["descriptor_index"])),
                     repr(tuple(physical_coordinates)),
                 )
-    return {
+    report = {
         "exactly_real": bool(exactly_real),
         "maximum_absolute_imaginary_scalar_residual": float(maximum_imaginary),
         "maximum_residual_path": tuple(maximum_path),
@@ -3857,6 +3906,14 @@ def _physical_scalar_reality_report(payload):
         "basis": LIFTED_CAUCHY_REAL_FORM_CONVENTION,
         "proof": "exact_canonical_polynomial_realification",
     }
+    # Report values are immutable scalars and tuples. Keep only hashes/reports,
+    # not the potentially large polynomial payloads, and copy on both boundaries.
+    with _PHYSICAL_SCALAR_REALITY_CACHE_LOCK:
+        _PHYSICAL_SCALAR_REALITY_CACHE[cache_key] = dict(report)
+        _PHYSICAL_SCALAR_REALITY_CACHE.move_to_end(cache_key)
+        if len(_PHYSICAL_SCALAR_REALITY_CACHE) > 128:
+            _PHYSICAL_SCALAR_REALITY_CACHE.popitem(last=False)
+    return report
 
 
 def lifted_cauchy_scalar_plan(request):
@@ -4880,7 +4937,7 @@ def _role_schur_vectors(role_dimension, size, partition):
     return _role_schur_vectors_coset(role_dimension, size, partition)
 
 
-def _angular_schur_vectors(size, angular_l, partition, output_L):
+def _angular_schur_vectors(size, angular_l, partition, output_L, angular_basis_backend="legacy_exact"):
     if int(output_L) == 0:
         labeler = GeneralizedExactSymbolicLabeler(
             tuple(0 for _ in range(int(size))),
@@ -4901,6 +4958,10 @@ def _angular_schur_vectors(size, angular_l, partition, output_L):
                 f"Partition {tuple(partition)!r} has no Lambda=0 copy."
             )
         return magnetic_states, vectors, multiplicity
+    if angular_basis_backend == "exact_weight_space_v1":
+        labeler = GeneralizedExactSymbolicLabeler((0,)*size, (angular_l,)*size, spatial_symmetry="O3")
+        return _exact_single_factor_weight_vectors((0,)*size, (angular_l,)*size,
+            labeler.permutation_irrep((Partition(tuple(partition)),)), output_L)
     labeler = GeneralizedExactSymbolicLabeler(
         tuple(0 for _ in range(int(size))),
         tuple(int(angular_l) for _ in range(int(size))),
@@ -5558,9 +5619,11 @@ def _validate_outer_template(payload):
             raise ValueError("Lifted-Cauchy outer metric analysis is invalid.")
 
 
-def _build_block_template(key):
+def _build_block_template(key, angular_basis_backend="legacy_exact"):
     sp = _sympy()
     role_dimension, size, partition, angular_l, output_L = key
+    if int(output_L) == 0:
+        angular_basis_backend = "legacy_exact"  # Identical scalar gauge/cache.
     role_states, role_vectors, role_units = _role_schur_vectors(
         role_dimension,
         size,
@@ -5571,6 +5634,7 @@ def _build_block_template(key):
         angular_l,
         partition,
         output_L,
+        angular_basis_backend=angular_basis_backend,
     )
     tableau_count = int(Partition(tuple(partition)).dimension)
     role_count = _hook_content_dimension(partition, role_dimension)
@@ -5726,7 +5790,7 @@ def _build_block_template(key):
             "partition": partition,
             "angular_l": angular_l,
             "output_L": output_L,
-            "convention": LIFTED_CAUCHY_SCALAR_CONVENTION,
+            "convention": _request_convention({"angular_basis_backend": angular_basis_backend}),
         }
     )[:16]
     symmetric_power_plan = _symmetric_power_plan(template_id, canonical_rows)
@@ -5763,7 +5827,9 @@ def _build_block_template(key):
         "validation_report": {
             "passed": True,
             "matrix_unit_algebra_source": "ye3t.representations.projectors.subgroup_matrix_units_for_factor",
-            "angular_source": "ye3t.representations.builder.GeneralizedExactSymbolicLabeler",
+            "angular_source": ("ye3t.representations.builder.requested_weight_space_coset"
+                if angular_basis_backend == "exact_weight_space_v1" and output_L > 0
+                else "ye3t.representations.builder.GeneralizedExactSymbolicLabeler"),
             "pairing_invariance_exact": True,
             "all_copy_actions_retained": True,
             "copy_specific_pairings": True,
@@ -5893,11 +5959,11 @@ def _template_cache_certificate(payload):
     }
 
 
-def _block_cache_request(key):
+def _block_cache_request(key, angular_basis_backend="legacy_exact"):
     role_dimension, size, partition, angular_l, output_L = key
     return {
         "exactness": "exact",
-        "mathematical_convention": LIFTED_CAUCHY_SCALAR_CONVENTION,
+        "mathematical_convention": _request_convention({"angular_basis_backend": angular_basis_backend}),
         "scalar_encoding": "ye3t_exact_radical_json_v1",
         "role_dimension": int(role_dimension),
         "tensor_order": int(size),
@@ -5937,7 +6003,7 @@ def _block_cache_dependencies(request):
     }
 
 
-def _validate_cached_block_template(payload, key, verify_construction=False):
+def _validate_cached_block_template(payload, key, verify_construction=False, angular_basis_backend="legacy_exact"):
     role_dimension, size, partition, angular_l, output_L = key
     expected = {
         "role_dimension": int(role_dimension),
@@ -5959,7 +6025,7 @@ def _validate_cached_block_template(payload, key, verify_construction=False):
     _validate_hash_record(payload, "template_hash", "block-template")
     _validate_block_template(payload)
     if verify_construction:
-        expected = _build_block_template(key)["payload"]
+        expected = _build_block_template(key, angular_basis_backend=angular_basis_backend)["payload"]
         if _freeze_json(expected) != _freeze_json(payload):
             raise ValueError(
                 "Cached lifted-Cauchy block differs from exact reconstruction."
@@ -5986,7 +6052,7 @@ def _block_template_from_payload(payload):
     }
 
 
-def _compile_block_template(key):
+def _compile_block_template(key, angular_basis_backend="legacy_exact"):
     key = (
         int(key[0]),
         int(key[1]),
@@ -5994,15 +6060,17 @@ def _compile_block_template(key):
         int(key[3]),
         int(key[4]),
     )
-    request = _block_cache_request(key)
+    if key[4] == 0:
+        angular_basis_backend = "legacy_exact"
+    request = _block_cache_request(key, angular_basis_backend=angular_basis_backend)
     store = YE3TArtifactStore()
     result = store.resolve(
         "lifted_cauchy_block_template",
         LIFTED_CAUCHY_BLOCK_CACHE_SCHEMA,
         request,
-        lambda: _build_block_template(key)["payload"],
+        lambda: _build_block_template(key, angular_basis_backend=angular_basis_backend)["payload"],
         validator=lambda payload: _validate_cached_block_template(
-            payload, key, verify_construction=store.verify == "full"
+            payload, key, verify_construction=store.verify == "full", angular_basis_backend=angular_basis_backend
         ),
         certificate=_template_cache_certificate,
         required_certificate_checks=(
@@ -6014,7 +6082,7 @@ def _compile_block_template(key):
         ),
         dependency_hashes=_block_cache_dependencies(request),
         producer={
-            "compiler_convention": LIFTED_CAUCHY_SCALAR_CONVENTION,
+            "compiler_convention": request["mathematical_convention"],
             "implementation": "lifted_cauchy_joint_block_v1",
         },
     )
@@ -6657,7 +6725,8 @@ def compile_lifted_cauchy_scalar(request):
                 int(Lambda),
             )
             if key not in by_key:
-                by_key[key] = _compile_block_template(key)
+                by_key[key] = _compile_block_template(key,
+                    angular_basis_backend=request_payload.get("angular_basis_backend", "legacy_exact"))
     outer_by_key = {}
     descriptors = []
     shared_block_nodes = {}

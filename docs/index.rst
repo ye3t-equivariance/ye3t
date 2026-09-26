@@ -60,5 +60,9 @@ certification requirements for linear lifted-Cauchy descriptors are available
 as :download:`linear_lifted_cauchy_basis.md
 <linear_lifted_cauchy_basis.md>`.
 
+The general chemically resolved tagged physical-image construction, exact
+pivot certificates and coordinate conventions are documented in
+:download:`general_tagged_physical_image.md <general_tagged_physical_image.md>`.
+
 The covariant Cauchy basis derivation used by ``ye3t.couplings.covariant_cauchy``
 is available as :download:`covariant_cauchy_basis.md <covariant_cauchy_basis.md>`.

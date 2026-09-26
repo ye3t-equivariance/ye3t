@@ -23,6 +23,7 @@ implementation and does not adapt external source code.
 from collections import Counter
 from collections.abc import Mapping
 from fractions import Fraction
+from functools import lru_cache
 from itertools import permutations, product
 from math import factorial
 
@@ -979,7 +980,7 @@ def _moment_term_records(terms):
             "coefficient": _exact_scalar_payload(coefficient),
         }
         for monomial, coefficient in sorted(terms.items(), key=repr)
-        if _sympy().simplify(coefficient) != 0
+        if not exact_scalar(coefficient).is_zero()
     )
 
 
@@ -1051,7 +1052,7 @@ def _moment_generator_record(generator):
 def _compile_moment_schedule(image_terms):
     """Compile one exact sparse forward row and division-free adjoint."""
 
-    sp = _sympy()
+    image_terms = {monomial: exact_scalar(coefficient) for monomial, coefficient in image_terms.items()}
     generators = tuple(
         sorted({generator for monomial in image_terms for generator in monomial})
     )
@@ -1073,13 +1074,11 @@ def _compile_moment_schedule(image_terms):
             remaining = list(monomial)
             remaining.remove(generator)
             key = (generator, tuple(remaining))
-            adjoint[key] = sp.simplify(
-                adjoint.get(key, 0) + int(multiplicity) * coefficient
-            )
+            adjoint[key] = adjoint.get(key, ExactRadical.rational(0)) + int(multiplicity) * coefficient
     adjoint = {
-        key: sp.simplify(coefficient)
+        key: coefficient
         for key, coefficient in adjoint.items()
-        if sp.simplify(coefficient) != 0
+        if not coefficient.is_zero()
     }
     reverse = tuple(
         {
@@ -1091,23 +1090,16 @@ def _compile_moment_schedule(image_terms):
         }
         for key, coefficient in sorted(adjoint.items(), key=repr)
     )
-    symbols = sp.symbols("x0:" + str(len(generators)))
-    expression = sum(
-        coefficient
-        * sp.prod(symbols[generator_index[value]] for value in monomial)
-        for monomial, coefficient in image_terms.items()
-    )
-    reverse_by_source = {index: sp.Integer(0) for index in range(len(generators))}
-    for (generator, remaining), coefficient in adjoint.items():
-        index = generator_index[generator]
-        reverse_by_source[index] += coefficient * sp.prod(
-            symbols[generator_index[value]] for value in remaining
-        )
-    adjoint_exact = all(
-        sp.simplify(sp.diff(expression, symbols[index]) - reverse_by_source[index])
-        == 0
-        for index in range(len(generators))
-    )
+    # Independently differentiate each factor position. Exact sparse polynomial
+    # arithmetic certifies the same derivative without expression expansion or
+    # repeated general-purpose symbolic simplification.
+    positional = {}
+    for monomial, coefficient in image_terms.items():
+        for position, generator in enumerate(monomial):
+            key = (generator, monomial[:position]+monomial[position+1:])
+            positional[key] = positional.get(key, ExactRadical.rational(0))+coefficient
+    positional = {key: value for key, value in positional.items() if not value.is_zero()}
+    adjoint_exact = positional == adjoint
     if not adjoint_exact:
         raise RuntimeError("The tagged moment schedule adjoint is inconsistent.")
     body = {
@@ -1140,21 +1132,10 @@ def _runtime_generator_base(generator):
     )
 
 
-def _expand_real_source_indices(indices, generators, matrices, real_index):
+def _expand_real_source_indices(source_factors):
     sp = _sympy()
     terms = {(): sp.Integer(1)}
-    for source_index in indices:
-        generator = generators[int(source_index)]
-        base = _runtime_generator_base(generator)
-        angular_l = int(generator["l"])
-        magnetic = int(generator["m"])
-        matrix = matrices[angular_l]
-        row = magnetic + angular_l
-        factors = []
-        for component in range(2 * angular_l + 1):
-            coefficient = matrix[row, component]
-            if coefficient != 0:
-                factors.append((real_index[(base, component)], coefficient))
+    for factors in source_factors:
         next_terms = {}
         for monomial, coefficient in terms.items():
             for index, factor in factors:
@@ -1226,14 +1207,26 @@ def _compile_tagged_cauchy_real_schedule_core(payload):
     forward_exact = {}
     transformed_adjoint = {}
     schedule_hashes = []
+    # The same monomial occurs in multiple forward/adjoint rows and features.
+    # Cache exact expansions only within this compile, keyed by every real
+    # index and exact coefficient. No certificate or algebraic check is skipped.
+    expand_sources = lru_cache(maxsize=4096)(_expand_real_source_indices)
+    sparse_rows = {
+        (angular_l, row): tuple((component, matrix[row, component])
+            for component in range(2*angular_l+1) if matrix[row, component] != 0)
+        for angular_l, matrix in matrices.items() for row in range(2*angular_l+1)
+    }
     for feature_index, schedule in enumerate(payload["moment_schedules"]):
         schedule_hashes.append(str(schedule["schedule_hash"]))
         generators = tuple(schedule["source_generators"])
+        factors_by_source = tuple(tuple(
+            (real_index[(_runtime_generator_base(generator), component)], coefficient)
+            for component, coefficient in sparse_rows[(int(generator["l"]),
+                                                       int(generator["m"])+int(generator["l"]))])
+            for generator in generators)
         for term in schedule["forward_terms"]:
             coefficient = _exact_scalar_from_payload(term["coefficient"])
-            expansion = _expand_real_source_indices(
-                term["source_indices"], generators, matrices, real_index
-            )
+            expansion = expand_sources(tuple(factors_by_source[int(index)] for index in term["source_indices"]))
             for monomial, factor in expansion.items():
                 key = (int(feature_index), monomial)
                 forward_exact[key] = (
@@ -1241,22 +1234,10 @@ def _compile_tagged_cauchy_real_schedule_core(payload):
                 )
 
         for term in schedule["adjoint_terms"]:
-            target = generators[int(term["source_index"])]
-            base = _runtime_generator_base(target)
-            angular_l = int(target["l"])
-            row = int(target["m"]) + angular_l
-            remaining = _expand_real_source_indices(
-                term["remaining_source_indices"],
-                generators,
-                matrices,
-                real_index,
-            )
+            remaining = expand_sources(tuple(factors_by_source[int(index)]
+                for index in term["remaining_source_indices"]))
             coefficient = _exact_scalar_from_payload(term["coefficient"])
-            for component in range(2 * angular_l + 1):
-                pullback = matrices[angular_l][row, component]
-                if pullback == 0:
-                    continue
-                target_index = real_index[(base, component)]
+            for target_index, pullback in factors_by_source[int(term["source_index"])]:
                 for monomial, factor in remaining.items():
                     key = (int(feature_index), int(target_index), monomial)
                     transformed_adjoint[key] = (
@@ -1382,7 +1363,6 @@ def _compile_tagged_cauchy_real_schedule_core(payload):
 
 
 def _validate_tagged_cauchy_real_schedule_core(payload):
-    sp = _sympy()
     core = dict(payload.get("real_schedule_core", {}))
     supplied = str(payload.get("real_schedule_core_hash", ""))
     if not supplied or supplied != _stable_hash(_freeze_json(core)):
@@ -1458,7 +1438,7 @@ def _validate_tagged_cauchy_real_schedule_core(payload):
         key = (feature, tuple(sorted(monomial)))
         if key in forward:
             raise ValueError("Tagged-Cauchy forward schedule has duplicate terms.")
-        forward[key] = coefficient
+        forward[key] = exact_scalar(coefficient)
 
     supplied_adjoint = {}
     for term in core.get("adjoint_terms", ()):
@@ -1485,7 +1465,7 @@ def _validate_tagged_cauchy_real_schedule_core(payload):
         key = (feature, source, tuple(sorted(remaining)))
         if key in supplied_adjoint:
             raise ValueError("Tagged-Cauchy adjoint schedule has duplicate terms.")
-        supplied_adjoint[key] = coefficient
+        supplied_adjoint[key] = exact_scalar(coefficient)
 
     derived_adjoint = {}
     for (feature, monomial), coefficient in forward.items():
@@ -1493,12 +1473,11 @@ def _validate_tagged_cauchy_real_schedule_core(payload):
             remaining = list(monomial)
             remaining.remove(source)
             key = (feature, int(source), tuple(remaining))
-            derived_adjoint[key] = sp.simplify(
-                derived_adjoint.get(key, 0)
-                + int(multiplicity) * coefficient
-            )
+            derived_adjoint[key] = (
+                derived_adjoint.get(key, ExactRadical.rational(0))
+                + int(multiplicity) * coefficient)
     if set(derived_adjoint) != set(supplied_adjoint) or any(
-        sp.simplify(derived_adjoint[key] - supplied_adjoint[key]) != 0
+        derived_adjoint[key] != supplied_adjoint[key]
         for key in derived_adjoint
     ):
         raise ValueError(
@@ -1525,12 +1504,12 @@ def _validate_tagged_cauchy_real_schedule_core(payload):
     return True
 
 
-def tagged_cauchy_real_schedule(compiled):
+def tagged_cauchy_real_schedule(compiled, compiler_validation="full"):
     """Return the compiler-owned binary64 real runtime schedule."""
 
     if not isinstance(compiled, CompiledTaggedCauchyImage):
-        compiled = CompiledTaggedCauchyImage.from_dict(compiled)
-    _validate_tagged_cauchy_image_identity(compiled)
+        compiled = CompiledTaggedCauchyImage.from_dict(compiled, compiler_validation=compiler_validation)
+    _validate_tagged_cauchy_image_identity(compiled, compiler_validation=compiler_validation)
     core = _freeze_json(compiled.payload["real_schedule_core"])
     return {
         **core,
@@ -3499,7 +3478,11 @@ class CompiledTaggedCauchyImage:
 
     def to_dict(self):
         body = {
-            "schema": TAGGED_CAUCHY_IMAGE_SCHEMA,
+            "schema": (
+                "ye3t_linear_tagged_cauchy_image_v4"
+                if self.payload.get("coordinate_policy") == "exact_physical_pivots_v1"
+                else TAGGED_CAUCHY_IMAGE_SCHEMA
+            ),
             "plan": self.plan.to_dict(),
             "payload": _freeze_json(self.payload),
             "validation_report": _freeze_json(self.validation_report),
@@ -3508,7 +3491,13 @@ class CompiledTaggedCauchyImage:
         return {**body, "self_hash": str(self.self_hash)}
 
     @classmethod
-    def from_dict(cls, payload):
+    def from_dict(cls, payload, compiler_validation="full"):
+        """Load an artifact with full replay or trusted-certificate checks.
+
+        ``certificate`` retains integrity and executable-adjoint checks, but
+        trusts the stored V4 symmetry/physical-image proof. Use ``full`` to
+        independently reconstruct that proof. Hashes are not authentication.
+        """
         payload = dict(payload)
         _require_exact_keys(
             payload,
@@ -3522,7 +3511,7 @@ class CompiledTaggedCauchyImage:
             },
             "artifact",
         )
-        if str(payload["schema"]) != TAGGED_CAUCHY_IMAGE_SCHEMA:
+        if str(payload["schema"]) not in {TAGGED_CAUCHY_IMAGE_SCHEMA, "ye3t_linear_tagged_cauchy_image_v4"}:
             raise ValueError("Unsupported tagged-Cauchy image artifact schema.")
         expected = str(payload["self_hash"])
         body = {key: value for key, value in payload.items() if key != "self_hash"}
@@ -3594,7 +3583,7 @@ class CompiledTaggedCauchyImage:
             validation_report=_freeze_json(payload["validation_report"]),
             provenance=_freeze_json(payload["provenance"]),
         )
-        _validate_tagged_cauchy_image_identity(compiled)
+        _validate_tagged_cauchy_image_identity(compiled, compiler_validation=compiler_validation)
         return compiled
 
 
@@ -3741,9 +3730,11 @@ def _bounded_n4_dimension_certificate(source_keys, selected_raw_tag_counts):
 
 
 def tagged_cauchy_image_request(
-    source_product_algebra,
-    angular_product_plan,
+    source_product_algebra=None,
+    angular_product_plan=None,
     *,
+    catalogue=None,
+    species=None,
     source_key=None,
     source_keys=None,
     tensor_order=4,
@@ -3764,6 +3755,11 @@ def tagged_cauchy_image_request(
     coefficients are materialized here.
     """
 
+    if catalogue is not None:
+        if source_product_algebra is not None or angular_product_plan is not None:
+            raise ValueError("General catalogues own their source-product lowering.")
+        from ye3t.couplings.tagged_cauchy_general import _general_request
+        return _general_request(catalogue, species or ())
     source_product_algebra = _freeze_json(source_product_algebra)
     angular_product_plan = _freeze_json(angular_product_plan)
     _validate_racah_harmonic_product_plan(angular_product_plan)
@@ -3897,6 +3893,9 @@ def tagged_cauchy_image_count(request):
     if isinstance(request, CompiledTaggedCauchyImage):
         _validate_tagged_cauchy_image_identity(request)
         return request.plan.report
+    if request.get("schema") == "ye3t_tagged_cauchy_general_request_v1":
+        from ye3t.couplings.tagged_cauchy_general import _general_count
+        return _general_count(request)
     product_report = _validate_tagged_cauchy_request(request)
     request = _freeze_json(request)
     selected_raw_tag_counts = _selected_raw_tag_counts(request)
@@ -4094,6 +4093,9 @@ def tagged_cauchy_image_plan(request):
         else tagged_cauchy_image_count(request)
     )
     _validate_tagged_cauchy_image_identity(report)
+    if report.request.get("schema") == "ye3t_tagged_cauchy_general_request_v1":
+        from ye3t.couplings.tagged_cauchy_general import _general_plan
+        return _general_plan(report)
     selected_raw_tag_counts = _selected_raw_tag_counts(report.request)
     steps = []
     if set(selected_raw_tag_counts).intersection({0, 1}):
@@ -4155,6 +4157,9 @@ def compile_tagged_cauchy_image(request):
     )
     _validate_tagged_cauchy_image_identity(plan)
     normalized = plan.report.request
+    if normalized.get("schema") == "ye3t_tagged_cauchy_general_request_v1":
+        from ye3t.couplings.tagged_cauchy_general import _general_compile
+        return _general_compile(plan)
     source_keys = tuple(normalized["source_keys"])
     selected_raw_tag_counts = _selected_raw_tag_counts(normalized)
     companions = (
@@ -4298,7 +4303,22 @@ def compile_tagged_cauchy_image(request):
     return compiled
 
 
-def _validate_tagged_cauchy_image_identity(value):
+def _validate_tagged_cauchy_image_identity(value, compiler_validation="full"):
+    if compiler_validation not in {"full", "certificate"}:
+        raise ValueError("compiler_validation must be full or certificate.")
+    request = (
+        value.request if isinstance(value, TaggedCauchyImageMultiplicityReport)
+        else value.report.request if isinstance(value, TaggedCauchyImageCompilerPlan)
+        else value.plan.report.request if isinstance(value, CompiledTaggedCauchyImage)
+        else {}
+    )
+    if request.get("schema") == "ye3t_tagged_cauchy_general_request_v1":
+        from ye3t.couplings.tagged_cauchy_general import _validate_general, _validate_general_certificate
+        if compiler_validation == "certificate":
+            return _validate_general_certificate(value)
+        return _validate_general(value)
+    if compiler_validation != "full":
+        raise ValueError("Certificate-only loading requires a general tagged-Cauchy V4 artifact.")
     if isinstance(value, TaggedCauchyImageMultiplicityReport):
         _validate_tagged_cauchy_request(value.request)
         if str(value.schema) != TAGGED_CAUCHY_IMAGE_REPORT_SCHEMA:
