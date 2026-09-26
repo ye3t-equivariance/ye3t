@@ -1,6 +1,6 @@
 # Authors
 
-`ye3t` is written and maintained by the YE3T authors:
+Copyright holder and author of `ye3t`:
 
 - James M. Goff (Sandia National Laboratories)
 

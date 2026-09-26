@@ -1,6 +1,6 @@
 project = "ye3t"
-author = "James M. Goff and the YE3T authors"
-copyright = "2026, The YE3T authors"
+author = "James M. Goff"
+copyright = "2026, James M. Goff"
 version = "0.1.0"
 release = "0.1.0"
 

@@ -183,7 +183,7 @@ Bounded benchmarks and diagnostics live in `examples/benchmarks/`:
 
 ## License and authors
 
-BSD-3-Clause; see `LICENSE`. The authors are listed in `AUTHORS.md`.
+BSD-3-Clause, copyright (c) 2026 James M. Goff; see `LICENSE` and `AUTHORS.md`.
 
 ## Citation
 
