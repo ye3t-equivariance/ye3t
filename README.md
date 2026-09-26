@@ -51,7 +51,7 @@ runtime.
 
 ## Installation
 
-Install from a source clone:
+`ye3t` is not yet published on PyPI; install it from a source clone:
 
 ```bash
 git clone https://github.com/ye3t-equivariance/ye3t.git
@@ -78,10 +78,11 @@ runtime with:
 python -c "from ye3t.runtime import native_execution_plan_capabilities as c; print(c())"
 ```
 
-Optional accelerator extras: `accelerators` (Triton kernels and the
-OpenEquivariance bridge), or individually `triton`, `oeq`, and `cueq` (the
-cuEquivariance IR export). They load lazily, and the native/PyTorch paths
-remain available without them; `dependency_matrix.md` lists every extra.
+Optional accelerator extras: `accelerators` (Triton, OpenEquivariance, and
+cuEquivariance together), or individually `triton` (Triton kernels), `oeq`
+(the OpenEquivariance bridge), and `cueq` (the cuEquivariance IR export).
+They load lazily, and the native/PyTorch paths remain available without
+them; `dependency_matrix.md` lists every extra.
 
 ```bash
 python -m pip install -e ".[accelerators]" --no-build-isolation
@@ -100,12 +101,13 @@ python cmake/smoke_installed_package.py
 ### Standalone C++ runtime
 
 The native runtime under `ye3t/runtime/csrc` also builds as a standalone
-CMake project, which is how `ye3t-lammps` consumes it:
+CMake project (`ye3t-lammps` compiles the same runtime source from a `ye3t`
+checkout):
 
 ```bash
 cmake -S . -B build -DYE3T_TORCH_DISCOVERY=PYTHON
 cmake --build build
-ctest --test-dir build --output-on-failure
+(cd build && ctest --output-on-failure)
 ```
 
 `YE3T_BUILD_TORCH_ADAPTER` (default `ON`) adds the PyTorch adapter and
@@ -122,8 +124,8 @@ describes the options and the install layout.
 | `YE3T_CACHE_DIR` | root directory of the on-disk artifact cache |
 | `YE3T_CACHE_MODE` | `auto` (default), `read_only`, `rebuild`, or `off` |
 | `YE3T_CACHE_VERIFY` | `hash` (default) or `full` verification of cached artifacts |
-| `YE3T_DISABLE_TRITON=1` | never dispatch to Triton kernels |
-| `YE3T_DISABLE_OPENEQUIVARIANCE=1` | never dispatch to the OpenEquivariance bridge |
+| `YE3T_DISABLE_TRITON=1` | disable the Triton coupling kernels in `ye3t.backends`; the native/PyTorch paths are used instead |
+| `YE3T_DISABLE_OPENEQUIVARIANCE=1` | skip the OpenEquivariance bridge in automatic packed-CG dispatch (an explicit `backend="openequivariance"` still uses it) |
 | `YE3T_REQUIRE_NATIVE=1` | raise instead of falling back to reference implementations |
 | `YE3T_DEBUG_TRITON=1` | verbose Triton diagnostics |
 
@@ -148,7 +150,8 @@ describes the options and the install layout.
 - `ye3t.api`: a lazy facade over the compilers, runtime, and accelerators.
   `import ye3t` exposes `YE3TAPI`, `ExactProductExpansionEngine`,
   `PermutationIrrep`, `CoupledIrrepLabel`, `enumerate_rank_labels`, and
-  `format_ye3t_basis` without importing Torch-heavy or optional modules.
+  `format_ye3t_basis` without importing the native runtime modules or the
+  optional accelerator packages.
 
 ## Examples
 

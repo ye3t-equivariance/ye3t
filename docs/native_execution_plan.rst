@@ -66,7 +66,7 @@ CMake configuration:
      -DYE3T_BUILD_CUDA_ADAPTER=OFF \
      -DYE3T_TORCH_DISCOVERY=PYTHON
    cmake --build build-torch --target ye3t_runtime_torch
-   ctest --test-dir build-torch --output-on-failure
+   (cd build-torch && ctest --output-on-failure)
 
 This mode queries the wheel's include/library paths, CPython extension suffix,
 C++ ABI, and pybind11 ABI from the selected ``Python3_EXECUTABLE``.
@@ -92,7 +92,7 @@ machines:
      -DYE3T_TORCH_DISCOVERY=PYTHON \
      -DCMAKE_CUDA_ARCHITECTURES=89
    cmake --build build-torch-cuda --target ye3t_runtime_torch
-   ctest --test-dir build-torch-cuda --output-on-failure
+   (cd build-torch-cuda && ctest --output-on-failure)
 
 Replace ``89`` with the CUDA architecture list for the target systems. A
 setuptools source build auto-enables CUDA when the build interpreter has
