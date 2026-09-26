@@ -1,48 +1,57 @@
 # ye3t
 
-General `G_N x SO(3)` / E(3) equivariance infrastructure.
+`ye3t` is a representation-theory compiler for `G_N x SO(3)` / E(3)
+equivariant bases. Given the content of a product of atomic (or other)
+factors, it enumerates the valid permutation- and rotation-symmetry-adapted
+labels, counts their multiplicities exactly, materializes the coupling
+coefficients with a validation certificate, and lowers the result to
+execution plans that run on its native CPU/CUDA runtime or through optional
+accelerator kernels. The ordinary symmetric sector of that basis is the
+linear Atomic Cluster Expansion (ACE); the nontrivial Young sectors extend it.
 
-This package is the stable core for:
+## Quick start
 
-- permutation-representation and angular representation labels,
-- fast multiplicity and basis-count enumeration,
-- exact/full/primitive coupling catalogs,
-- Clebsch-Gordan tensor products,
-- backend schedules and runtime lowering,
-- optional accelerator bridges.
+```python
+from ye3t.couplings import count, plan, compile
 
-The stable API should preserve the descriptive mathematical metadata carried by
-the combined research package: permutation representation, Young-diagram labels,
-angular targets, multiplicity provenance, exact/full/primitive distinctions,
-count sources, and backend fallback reasons.
+report = count(content=(1, 1, 1), input_Ls=(0, 1, 1), target_L=0)
+labels = report.labels_for_target(0)
+report.require_label(labels[0], target_L=0)
+
+coupler_plan = plan(report)
+compiled = compile(coupler_plan)
+print(len(labels), coupler_plan.backend, compiled.convention_hash)
+```
+
+`count` returns the exact multiplicity report, `plan` records the backend and
+count provenance, and `compile` materializes the coefficients and attaches the
+validation report. Every result carries its convention hash and provenance.
+The pages under `docs/` walk through fixed-content couplers, pure rotation and
+pure permutation cases, validation reports, execution plans, and the native
+runtime.
 
 ## Related packages
 
 - [ye3t-lammps](https://github.com/ye3t-equivariance/ye3t-lammps) provides
   LAMMPS inference (`pair_style ye3t` and `ye3t/kk`) for models compiled with
   this package.
-- `ye3t-ace` is the separate application package for ACE and YE3T-equivariant
-  message-passing model construction, fitting, and ASE calculators. It is not
-  yet publicly released; references to it in this repository describe how it
-  consumes the `ye3t` API and are not part of this package.
+- `ye3t-ace` is the separate application package for descriptor
+  construction, model fitting, and ASE calculators. It is not yet publicly
+  released; the documentation here mentions it where it consumes the `ye3t`
+  API.
 
 ## Requirements
 
-- Python 3.11 or newer.
-- A C++20 compiler; the editable and wheel builds compile the tracked C++
-  sources.
+- Python 3.11 or 3.12 (the versions exercised by CI).
+- A C++20 compiler; the source install compiles the tracked C++ sources.
 - `torch` and `numpy`.
 - Optional: a CUDA toolkit matching a CUDA-enabled Torch wheel for the CUDA
-  runtime, `patchelf` for relocatable Linux wheels, and `sympy` for
-  `examples/exact_full_primitive_catalog.py` and
-  `examples/tagged_cauchy_image_catalogue.py` (`pip install ".[reference]"`).
-
-Set `YE3T_DISABLE_TRITON=1` to force the native/PyTorch paths when Triton is
-installed but should not be used.
+  runtime, `patchelf` for relocatable Linux wheels, and `sympy` for the
+  exact symbolic examples and benchmarks (`pip install ".[reference]"`).
 
 ## Installation
 
-Source install from a clone:
+Install from a source clone:
 
 ```bash
 git clone https://github.com/ye3t-equivariance/ye3t.git
@@ -51,17 +60,16 @@ python -m pip install "setuptools>=77,<82" torch wheel
 python -m pip install -e . --no-build-isolation
 ```
 
-Use `-e ".[dev]"` to add the test dependencies and `".[reference]"` for the
-sympy-based exact examples. The package is not yet published on PyPI; source
-install is the supported route for now.
+The first `pip install` provides the build tools and the Torch headers the
+extension build needs; Torch is intentionally absent from
+`build-system.requires`, so the install must use `--no-build-isolation`. Both
+commands must use the same interpreter. On a machine without CUDA, add
+`--extra-index-url https://download.pytorch.org/whl/cpu` to the first
+command to get the CPU-only Torch wheel. Use `-e ".[dev]"` for the test
+dependencies, `".[reference]"` for sympy, and `".[docs]"` for Sphinx.
 
-The first `pip install` is required because the editable build compiles the
-tracked C++ and optional CUDA sources. Both commands must use the same Python
-interpreter. Torch is intentionally absent from `build-system.requires`, so a
-native source install must use `--no-build-isolation`.
-
-When that interpreter has CUDA-enabled Torch and a visible CUDA toolkit, the
-CUDA runtime is built automatically. Set `YE3T_BUILD_CUDA_EXTENSION=0` only for
+When the interpreter has CUDA-enabled Torch and a visible CUDA toolkit, the
+CUDA runtime is built automatically. Set `YE3T_BUILD_CUDA_EXTENSION=0` for
 an intentional CPU-only build, or `YE3T_BUILD_CUDA_EXTENSION=1` to require a
 CUDA build and fail if its toolchain is unavailable. Confirm the installed
 runtime with:
@@ -70,116 +78,119 @@ runtime with:
 python -c "from ye3t.runtime import native_execution_plan_capabilities as c; print(c())"
 ```
 
-Optional accelerators are grouped for convenience:
+Optional accelerator extras: `accelerators` (Triton kernels and the
+OpenEquivariance bridge), or individually `triton`, `oeq`, and `cueq` (the
+cuEquivariance IR export). They load lazily, and the native/PyTorch paths
+remain available without them; `dependency_matrix.md` lists every extra.
 
 ```bash
 python -m pip install -e ".[accelerators]" --no-build-isolation
 ```
 
-Individual extras are also available for narrow environments: `triton`,
-`oeq`, and `cueq`.
+### Building a wheel
 
-## Running tests
+```bash
+python -m pip install build
+python -m build --no-isolation
+python cmake/audit_linux_wheel.py dist/*.whl
+python -m pip install --force-reinstall --no-deps dist/*.whl
+python cmake/smoke_installed_package.py
+```
+
+### Standalone C++ runtime
+
+The native runtime under `ye3t/runtime/csrc` also builds as a standalone
+CMake project, which is how `ye3t-lammps` consumes it:
+
+```bash
+cmake -S . -B build -DYE3T_TORCH_DISCOVERY=PYTHON
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
+
+`YE3T_BUILD_TORCH_ADAPTER` (default `ON`) adds the PyTorch adapter and
+`YE3T_BUILD_CUDA_ADAPTER` (default `ON`) its CUDA operators; set the latter
+to `OFF` on hosts without a CUDA toolkit. `docs/native_execution_plan.rst`
+describes the options and the install layout.
+
+## Environment variables
+
+| Variable | Effect |
+| --- | --- |
+| `YE3T_BUILD_CUDA_EXTENSION` | `auto` (default), `1` to require the CUDA build, `0` for CPU only |
+| `YE3T_SKIP_CPP_EXTENSION=1` | install without compiling the native extensions |
+| `YE3T_CACHE_DIR` | root directory of the on-disk artifact cache |
+| `YE3T_CACHE_MODE` | `auto` (default), `read_only`, `rebuild`, or `off` |
+| `YE3T_CACHE_VERIFY` | `hash` (default) or `full` verification of cached artifacts |
+| `YE3T_DISABLE_TRITON=1` | never dispatch to Triton kernels |
+| `YE3T_DISABLE_OPENEQUIVARIANCE=1` | never dispatch to the OpenEquivariance bridge |
+| `YE3T_REQUIRE_NATIVE=1` | raise instead of falling back to reference implementations |
+| `YE3T_DEBUG_TRITON=1` | verbose Triton diagnostics |
+
+## Package layout
+
+- `ye3t.couplings`: the public entry point for labels, multiplicity counts,
+  plans, and coefficient materialization, plus the scalar ACE,
+  tagged-Cauchy, lifted-Cauchy, and covariant-Cauchy compilers.
+- `ye3t.core`: labels, spherical and tesseral harmonics, rotations, exact
+  couplings, basis construction, and the factorized-runtime extension.
+- `ye3t.representations`: Young orthogonal, Yamanouchi, and Specht
+  constructions, numeric subduction, SU(2), projectors, and the
+  permutation-subduction extension.
+- `ye3t.ir` and `ye3t.lowering`: operator IR records, exact schedules,
+  materialization plans, and `compile_ye3t_operator(s)`.
+- `ye3t.runtime`: versioned execution plans and the native CPU/CUDA
+  operators.
+- `ye3t.backends` and `ye3t.adapters`: PyTorch and Triton lowering, the
+  OpenEquivariance bridge, and the cuEquivariance IR export.
+- `ye3t.cache`: the hash-bound on-disk artifact store and symbolic caches.
+- `ye3t.utils`: printing and illustration helpers used by the docs.
+- `ye3t.api`: a lazy facade over the compilers, runtime, and accelerators.
+  `import ye3t` exposes `YE3TAPI`, `ExactProductExpansionEngine`,
+  `PermutationIrrep`, `CoupledIrrepLabel`, `enumerate_rank_labels`, and
+  `format_ye3t_basis` without importing Torch-heavy or optional modules.
+
+## Examples
+
+Each script in `examples/` shows its editable `cfg_ye3t` dictionary and one
+`run_*` function; run it with `python examples/<name>.py`. `examples/README.md`
+describes them in full.
+
+- `coupling_multiplicity_counts.py`: count valid fixed-content coupling
+  labels through `ye3t.couplings.count`.
+- `coupling_coefficient_materialization.py`: plan and compile coupling
+  coefficients through `ye3t.couplings.plan` and `ye3t.couplings.compile`.
+- `compile_scalar_ace_lammps_plans.py`: compile scalar ACE coordinates and
+  execution plans for `ye3t-lammps`.
+- `exact_full_primitive_catalog.py`: compare exact, full, and primitive
+  product catalog dimensions for a small sector.
+- `symbolic_young_partition_catalogue.py`: expand symbolic Young partition
+  templates by rank and count the valid O(3) sectors.
+- `tagged_cauchy_image_catalogue.py`: build the shifted-Jacobi source
+  product algebra for a chosen source set and count, plan, and optionally
+  compile the tagged-Cauchy physical image.
+
+`examples/benchmarks/` holds bounded timing and validation benchmarks for
+permutation subduction, coefficient materialization, primitive caches, and
+symmetric-power kernels; see `examples/benchmarks/README.md`.
+
+## Tests
 
 ```bash
 python -m pip install -e ".[dev]" --no-build-isolation
 python -m pytest -m fast
 ```
 
-`-m fast` is the refactor-safe subset run by CI. Omit the marker for the full
-suite, which includes slow validation and optional GPU/accelerator tests that
-skip when their hardware or packages are absent.
+`-m fast` is the subset run by CI. The full suite adds the `slow` tests and
+the `optional`, `gpu`, `triton`, `oeq`, and `cueq` tests, which skip when
+their hardware or packages are absent.
 
-## Building the documentation
+## Documentation
 
 ```bash
 python -m pip install -e ".[docs]" --no-build-isolation
-sphinx-build docs docs/_build/html
+sphinx-build -W docs docs/_build/html
 ```
-
-The package must be installed because the API reference uses autodoc.
-
-## Import Surface
-
-`import ye3t` is intentionally lightweight. It exposes stable mathematical
-objects such as `YE3TAPI`, `ExactProductExpansionEngine`,
-`PermutationIrrep`, `CoupledIrrepLabel`, and count-only helpers such as
-`enumerate_rank_labels`.
-
-Common entry points include `YE3TAPI.reduce_ye3t`,
-`YE3TAPI.summarize_ye3t`, `format_ye3t_basis`,
-`compile_ye3t_operator`, and `compile_ye3t_operators`.
-
-Runtime compilers, native modules, and accelerator bridges are
-available from explicit submodules and lazy symbols in `ye3t.api`. Importing
-`ye3t` or `ye3t.api` should not eagerly import Triton, OpenEquivariance,
-cuEquivariance, ASE, or ACE code.
-
-## Intended Extras
-
-- `ye3t[accelerators]`: Triton, OpenEquivariance, and cuEquivariance bridges.
-- `ye3t[all]`: currently equivalent to `ye3t[accelerators]`.
-
-All optional stacks should import lazily and fall back to native/PyTorch paths
-where possible.
-
-## Rigor Rules
-
-This package should expose exact algebra with provenance, not only convenience
-counts. Stable labels and catalogs are expected to retain the permutation
-character, angular target, multiplicity index or source, coupling/tree
-provenance, exact/full/primitive status, and dimension source.
-
-## Current Capability Limits
-
-These limits are intentional first-release boundaries rather than silent
-fallbacks:
-
-- Some exact projector paths are capped to small permutation ranks; larger
-  ranks should use count-only, character, cached, or fallback-reported APIs.
-- Selected exact basis builders require explicit backend metadata and will
-  raise a descriptive error when an unsupported enumeration mode is requested.
-- Generic graph optimization and whole-DAG fusion remain deferred from the
-  stable API until bounded end-to-end benchmarks justify a stable cost model.
-- Accelerator bridges are optional, lazy, and skip/fallback aware.
-  They are not imported by `import ye3t` and should always preserve native or
-  PyTorch paths when an optional dependency is missing.
-
-## Examples
-
-Small, deterministic examples live in `examples/` and are included in source
-distributions. Importable public scripts expose visible editable `cfg_ye3t`
-dictionaries and one purpose-named `run_*` workflow when the script represents
-a reusable workflow. Smaller count, representation, and schedule demonstrations
-live in `docs/representation_snippets.rst` as tested copy/paste snippets.
-
-- `coupling_multiplicity_counts.py`: counts valid fixed-content coupling
-  labels through `ye3t.couplings.count`.
-- `coupling_coefficient_materialization.py`: plans and compiles coupling
-  coefficients through `ye3t.couplings.plan` and `ye3t.couplings.compile`.
-- `compile_scalar_ace_lammps_plans.py`: compiles representative scalar ACE
-  coordinates and execution plans for downstream LAMMPS binding through
-  `ye3t-lammps`.
-- `exact_full_primitive_catalog.py`: compares exact/full/primitive product
-  catalog dimensions for a small sector.
-- `symbolic_young_partition_catalogue.py`: expands symbolic Young partition
-  templates by rank and counts the valid O(3) sectors of each partition.
-- `tagged_cauchy_image_catalogue.py`: builds the exact shifted-Jacobi source
-  product algebra for a user-chosen source set and counts, plans, and
-  optionally compiles the bounded tagged-Cauchy physical image.
-
-Bounded benchmarks and diagnostics live in `examples/benchmarks/`:
-
-- `benchmark_permutation_subduction_fastpath.py`: compares exact symbolic and
-  numeric permutation-subduction construction with validation.
-- `coefficient_materialization_benchmarks.py`: writes coefficient
-  materialization timing artifacts for rotation-only, permutation-only, and
-  joint Young/O(3) families.
-- `primitive_cache_policies.py`: compares primitive-cache lookup policies on
-  a small exact sector.
-- `symmetric_power_kernels.py`: validates optional folded symmetric-power
-  monomial kernels, including a rank-8 case, against reference paths and
-  reports bounded timing comparisons.
 
 ## License and authors
 
