@@ -432,9 +432,14 @@ def test_native_extension_reports_factorized_abi():
     assert capabilities[
         "cpu_carrier_gated_scatter_auto_min_work_items"
     ] == (1 << 15)
-    assert capabilities[
-        "cuda_carrier_gated_scatter_auto_min_work_items"
-    ] == (1 << 18)
+    if capabilities["cuda"]:
+        assert capabilities[
+            "cuda_carrier_gated_scatter_auto_min_work_items"
+        ] == (1 << 18)
+    else:
+        assert capabilities[
+            "cuda_carrier_gated_scatter_auto_min_work_items"
+        ] is None
     assert "carrier_channel_update" in capabilities["operations"]
     assert "carrier_channel_update_adjoint" in capabilities["operations"]
     assert (
@@ -481,15 +486,18 @@ def test_native_extension_reports_factorized_abi():
         "factorized_angular_heterogeneous_double_backward"
         in capabilities["operations"]
     )
-    assert capabilities["cached_heterogeneous_factorized_reverse"]
-    assert (
-        "factorized_angular_heterogeneous_adjoint_with_workspace"
-        in capabilities["operations"]
-    )
-    assert (
-        "factorized_angular_heterogeneous_double_backward_from_workspace"
-        in capabilities["operations"]
-    )
+    if capabilities["cuda"]:
+        assert capabilities["cached_heterogeneous_factorized_reverse"]
+        assert (
+            "factorized_angular_heterogeneous_adjoint_with_workspace"
+            in capabilities["operations"]
+        )
+        assert (
+            "factorized_angular_heterogeneous_double_backward_from_workspace"
+            in capabilities["operations"]
+        )
+    else:
+        assert not capabilities["cached_heterogeneous_factorized_reverse"]
     assert "factorized_angular_linear" in capabilities["operations"]
     assert "factorized_angular_linear_adjoint" in capabilities["operations"]
     assert "symmetric_power_monomial" in capabilities["operations"]
@@ -536,47 +544,51 @@ def test_native_extension_reports_factorized_abi():
         "symmetric_power_shared_monomial_batched_adjoint"
         in capabilities["operations"]
     )
-    assert "factorized_angular" in capabilities["cuda_operations"]
-    assert "factorized_angular_adjoint" in capabilities["cuda_operations"]
-    assert (
-        "factorized_angular_double_backward"
-        in capabilities["cuda_operations"]
-    )
-    assert (
-        "factorized_angular_heterogeneous"
-        in capabilities["cuda_operations"]
-    )
-    assert (
-        "factorized_angular_heterogeneous_adjoint"
-        in capabilities["cuda_operations"]
-    )
-    assert (
-        "factorized_angular_heterogeneous_double_backward"
-        in capabilities["cuda_operations"]
-    )
-    assert (
-        "factorized_angular_heterogeneous_adjoint_with_workspace"
-        in capabilities["cuda_operations"]
-    )
-    assert (
-        "factorized_angular_heterogeneous_double_backward_from_workspace"
-        in capabilities["cuda_operations"]
-    )
-    assert "factorized_angular_linear" in capabilities["cuda_operations"]
-    assert (
-        "factorized_angular_linear_adjoint"
-        in capabilities["cuda_operations"]
-    )
+    if capabilities["cuda"]:
+        assert "factorized_angular" in capabilities["cuda_operations"]
+        assert "factorized_angular_adjoint" in capabilities["cuda_operations"]
+        assert (
+            "factorized_angular_double_backward"
+            in capabilities["cuda_operations"]
+        )
+        assert (
+            "factorized_angular_heterogeneous"
+            in capabilities["cuda_operations"]
+        )
+        assert (
+            "factorized_angular_heterogeneous_adjoint"
+            in capabilities["cuda_operations"]
+        )
+        assert (
+            "factorized_angular_heterogeneous_double_backward"
+            in capabilities["cuda_operations"]
+        )
+        assert (
+            "factorized_angular_heterogeneous_adjoint_with_workspace"
+            in capabilities["cuda_operations"]
+        )
+        assert (
+            "factorized_angular_heterogeneous_double_backward_from_workspace"
+            in capabilities["cuda_operations"]
+        )
+        assert "factorized_angular_linear" in capabilities["cuda_operations"]
+        assert (
+            "factorized_angular_linear_adjoint"
+            in capabilities["cuda_operations"]
+        )
+    else:
+        assert capabilities["cuda_operations"] == ()
     assert capabilities["symmetric_power_cpu_auto_max_batch"] == 32
     assert capabilities["symmetric_power_cpu_auto_min_power"] == 6
     assert capabilities["symmetric_power_shared_cpu_min_reuse"] == 3.0
     assert capabilities["symmetric_power_shared_cpu_min_batch"] == 8
-    assert capabilities["symmetric_power_shared_cuda_min_reuse"] == 8.0
-    assert capabilities["symmetric_power_shared_cuda_grad_min_batch"] == 256
-    assert (
-        capabilities["symmetric_power_shared_cuda_forward_min_batch"]
-        == 1024
-    )
+    if capabilities["cuda"]:
+        assert capabilities["symmetric_power_shared_cuda_min_reuse"] == 8.0
+        assert capabilities["symmetric_power_shared_cuda_grad_min_batch"] == 256
+        assert (
+            capabilities["symmetric_power_shared_cuda_forward_min_batch"]
+            == 1024
+        )
     assert "triton_available" in capabilities
     assert "triton_cuda_available" in capabilities
     assert (
@@ -4402,7 +4414,8 @@ def test_native_source_arena_cpu_opcheck_compile_and_schedule_validation():
     capabilities = native_execution_plan_capabilities()
     assert capabilities["core_abi_version"] >= 34
     assert capabilities["source_arena_gather"] is True
-    assert "source_arena_gather" in capabilities["cuda_operations"]
+    if capabilities["cuda"]:
+        assert "source_arena_gather" in capabilities["cuda_operations"]
     schedule, producer, atom_types = _source_arena_case(
         "cpu", torch.float64
     )

@@ -44,6 +44,7 @@ tmp/
 temp/
 generated/
 examples/generated/
+docs/_build/
 
 # Editor and OS metadata
 .DS_Store

@@ -103,7 +103,7 @@ def _package_facing_files():
                 for path in root.rglob("*"):
                     if path.is_file() and path not in seen:
                         rel = path.relative_to(PACKAGE_ROOT)
-                        if set(rel.parts) & {"generated", "__pycache__"}:
+                        if set(rel.parts) & {"generated", "__pycache__", "_build"}:
                             continue
                         out.append(path)
         return sorted(out)

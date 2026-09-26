@@ -35,7 +35,10 @@ from math import factorial
 import numpy as np
 import pytest
 import sympy as sp
-from scipy import special as scipy_special
+
+scipy_special = pytest.importorskip(
+    "scipy.special", reason="requires scipy for the spherical-harmonic oracle"
+)
 
 from ye3t.couplings import CompiledLiftedCauchyScalar
 from ye3t.couplings import compile as compile_coupling
