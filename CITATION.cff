@@ -1,0 +1,12 @@
+cff-version: 1.2.0
+message: "If you use YE3T, please cite this software package."
+title: "YE3T"
+version: "0.1.0"
+date-released: "2026-09-26"
+license: "BSD-3-Clause"
+authors:
+  - family-names: "Goff"
+    given-names: "James M."
+    affiliation: "Sandia National Laboratories"
+repository-code: "https://github.com/ye3t-equivariance/ye3t"
+abstract: "Representation-theory compiler and backend infrastructure for YE3T equivariance workflows."

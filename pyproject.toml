@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=77,<82", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ye3t"
+version = "0.1.0"
+description = "General G_N x SO(3) / E(3) representation, coupling, scheduling, and backend infrastructure."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
+authors = [
+    { name = "James M. Goff" },
+]
+dependencies = [
+    "numpy",
+    "torch",
+]
+
+[project.urls]
+Repository = "https://github.com/ye3t-equivariance/ye3t"
+Issues = "https://github.com/ye3t-equivariance/ye3t/issues"
+
+[project.optional-dependencies]
+triton = ["triton"]
+oeq = ["openequivariance"]
+cueq = ["cuequivariance"]
+docs = ["sphinx"]
+accelerators = ["triton", "openequivariance", "cuequivariance"]
+all = ["triton", "openequivariance", "cuequivariance"]
+reference = ["sympy"]
+dev = ["pytest", "build", "wheel", "sympy"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ye3t*"]
+exclude = ["ye3t_ace*", "utils*"]
+
+[tool.setuptools.package-data]
+ye3t = [
+    "core/csrc/*.cpp",
+    "representations/csrc/*.cpp",
+    "runtime/csrc/*.cpp",
+    "runtime/csrc/*.cu",
+    "runtime/csrc/*.h",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+markers = [
+    "fast: refactor-safe tests intended for default CI and local preflight runs",
+    "slow: long-running validation, integration, or benchmark-adjacent tests",
+    "optional: tests that require optional dependency extras",
+    "gpu: tests that require CUDA or another GPU backend",
+    "triton: tests that require Triton",
+    "oeq: tests that require OpenEquivariance",
+    "cueq: tests that require cuEquivariance",
+]

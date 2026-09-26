@@ -1,0 +1,52 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Test, coverage, and type/lint caches
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+
+# Build and packaging artifacts
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/
+*.so
+*.pyd
+*.dylib
+
+# Local environments
+.venv/
+venv/
+env/
+
+# Temporary files
+.pytest-tmp*/
+*.tmp
+*.temp
+*.log
+.tmp/
+.tmp-*/
+.runtime/
+piptmp/
+pytest-cache-files-*/
+pytest_tmp*/
+tmp/
+temp/
+generated/
+examples/generated/
+
+# Editor and OS metadata
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
