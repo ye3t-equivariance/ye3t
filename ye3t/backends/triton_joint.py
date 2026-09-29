@@ -1309,6 +1309,8 @@ class PackedWeightedSparseBilinearGroup(torch.nn.Module):
             )
         self.last_source_layout = source_layout
         reduction_mode = self.reduction_mode
+        if torch.are_deterministic_algorithms_enabled():
+            reduction_mode = "stable"
         if reduction_mode == "auto":
             reduction_mode = "segmented"
         if reduction_mode in {"segmented", "stable"}:
@@ -1328,6 +1330,25 @@ class PackedWeightedSparseBilinearGroup(torch.nn.Module):
             segmented_error = None
             if use_segmented_triton:
                 try:
+                    if torch.are_deterministic_algorithms_enabled():
+                        from ._deterministic_weighted_bilinear import deterministic_weighted_bilinear
+                        binding_tensors = (table.left_index, table.right_index, table.output_index,
+                            table.weight_index, table.coefficient) + tuple(
+                            tensor for plan in (left_plan, right_plan, output_plan, weight_plan)
+                            for tensor in (plan.offsets, plan.order))
+                        try:
+                            binding = (source_layout, expected_width, table.output_width, table.weight_count,
+                                tuple((id(tensor), tensor._version) for tensor in binding_tensors))
+                        except RuntimeError:
+                            # Inference tensors have no version counter: validate
+                            # them each time rather than caching a mutable binding.
+                            binding = None
+                        certified = binding is not None and binding == getattr(self, "_deterministic_binding", None)
+                        output = deterministic_weighted_bilinear(packed_sources, packed_sources, self.mixing_weight,
+                            table, left_plan, right_plan, output_plan, weight_plan, indices_certified=certified)
+                        self._deterministic_binding = binding
+                        self.last_backend = "triton_fixed_order_weighted_bilinear_product_rule"
+                        return output
                     if torch.is_grad_enabled() and (
                         packed_sources.requires_grad
                         or self.mixing_weight.requires_grad
@@ -1381,7 +1402,7 @@ class PackedWeightedSparseBilinearGroup(torch.nn.Module):
                     return output
                 except Exception as exc:
                     segmented_error = exc
-                    if bool(self.strict) or os.environ.get("YE3T_DEBUG_TRITON") == "1":
+                    if bool(self.strict) or torch.are_deterministic_algorithms_enabled() or os.environ.get("YE3T_DEBUG_TRITON") == "1":
                         raise
             if bool(self.strict) and packed_sources.is_cuda:
                 raise RuntimeError(

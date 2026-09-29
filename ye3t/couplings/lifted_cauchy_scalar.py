@@ -4938,6 +4938,8 @@ def _role_schur_vectors(role_dimension, size, partition):
 
 
 def _angular_schur_vectors(size, angular_l, partition, output_L, angular_basis_backend="legacy_exact"):
+    if angular_basis_backend not in {"legacy_exact", "exact_weight_space_v1"}:
+        raise ValueError("unknown angular Schur basis backend")
     if int(output_L) == 0:
         labeler = GeneralizedExactSymbolicLabeler(
             tuple(0 for _ in range(int(size))),
@@ -4951,6 +4953,7 @@ def _angular_schur_vectors(size, angular_l, partition, output_L, angular_basis_b
                 labeler.permutation_irrep(
                     (Partition(tuple(partition)),)
                 ),
+                backend="exact_coset" if angular_basis_backend == "exact_weight_space_v1" else "auto",
             )
         )
         if multiplicity <= 0:
@@ -5019,7 +5022,7 @@ def _vector_support(vector):
     )
 
 
-def _joint_synthesis_metric_dual(
+def _joint_synthesis_columns(
     role_states,
     magnetic_states,
     coordinate_labels,
@@ -5028,7 +5031,7 @@ def _joint_synthesis_metric_dual(
     pairings,
     tableau_count,
 ):
-    """Build exact joint synthesis and its dual without a dense product space."""
+    """Build selected exact synthesis columns without a metric inversion."""
     sp = _sympy()
     tableau_count = int(tableau_count)
     role_support = {
@@ -5080,6 +5083,26 @@ def _joint_synthesis_metric_dual(
                 if sp.simplify(value) != 0
             }
         )
+
+    return tuple(synthesis_columns)
+
+
+def _joint_synthesis_metric_dual(
+    role_states,
+    magnetic_states,
+    coordinate_labels,
+    role_vectors,
+    angular_vectors,
+    pairings,
+    tableau_count,
+):
+    """Build exact joint synthesis and its dual without a dense product space."""
+    sp = _sympy()
+    synthesis_columns = _joint_synthesis_columns(
+        role_states, magnetic_states, coordinate_labels, role_vectors,
+        angular_vectors, pairings, tableau_count,
+    )
+    role_support = {key: _vector_support(vector) for key, vector in role_vectors.items()}
 
     # Group coordinate labels into (role content class, M) blocks.  A role
     # copy's tableau vectors are confined to one role content class

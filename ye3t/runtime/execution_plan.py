@@ -10553,8 +10553,13 @@ def carrier_channel_transform(
     map_offsets,
     *,
     backend="auto",
+    output_width=None,
 ):
-    """Apply rectangular channel maps while preserving complete carriers."""
+    """Apply rectangular channel maps while preserving complete carriers.
+
+    A compiled caller may supply the immutable host output width to avoid a
+    CUDA scalar synchronization. It must equal the final output offset.
+    """
 
     backend = str(backend)
     if backend not in {"auto", "native", "reference"}:
@@ -10571,6 +10576,10 @@ def carrier_channel_transform(
     values, channel_maps = prepared[:2]
     offsets = prepared[2:7]
     offset_values = prepared[7]
+    if output_width is not None:
+        output_width = int(output_width)
+        if output_width < 0 or (offset_values[1] is not None and output_width != int(offset_values[1][-1])):
+            raise ValueError("compiled output_width disagrees with carrier output offsets")
     require_native = _enabled("YE3T_REQUIRE_NATIVE")
     if backend == "reference" and require_native:
         raise RuntimeError(
@@ -10616,11 +10625,12 @@ def carrier_channel_transform(
                     "carrier channel-transform runtime"
                 )
     if use_native:
-        output_width = (
-            int(offset_values[1][-1])
-            if offset_values[1] is not None
-            else int(offsets[1][-1].item())
-        )
+        if output_width is None:
+            output_width = (
+                int(offset_values[1][-1])
+                if offset_values[1] is not None
+                else int(offsets[1][-1].item())
+            )
         return torch.ops.ye3t_runtime.carrier_channel_transform(
             values.contiguous(),
             channel_maps.contiguous(),
@@ -12587,8 +12597,11 @@ def symmetric_power_shared_sparse_monomial_contraction(
         device=input.device,
     ).reshape(-1).contiguous()
     require_native = _enabled("YE3T_REQUIRE_NATIVE")
+    if backend == "reference" and require_native:
+        raise RuntimeError("YE3T_REQUIRE_NATIVE=1 forbids explicit reference fallback")
     use_native = bool(
-        input.device.type == "cuda"
+        backend != "reference"
+        and input.device.type == "cuda"
         and (
             _prebuilt_extension() is not None
             or _enabled("YE3T_ENABLE_EXECUTION_PLAN_JIT")

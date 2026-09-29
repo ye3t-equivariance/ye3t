@@ -68,6 +68,7 @@ YE3T_RUNTIME_OPCODES = (
 )
 
 YE3T_SOURCE_REALIZATION_KINDS = (
+    "tagged_cauchy_occurrence",
     "ordinary_density",
     "lifted_density_roles",
     "rooted_motif",
@@ -5661,8 +5662,16 @@ class YE3TSourceRealization:
                 raise ValueError("ordinary_density must not retain role order")
         elif not retain_role_order:
             raise ValueError(
-                "lifted_density_roles and rooted_motif must retain source role order"
+                "role-resolved, motif and tagged occurrence sources must retain source role order"
             )
+        if kind == "tagged_cauchy_occurrence":
+            tags = int(dict(self.metadata).get("tag_count", -1))
+            if tags not in (0, 1, 2) or tags > rank:
+                raise ValueError("tagged occurrence source requires an admissible explicit tag_count")
+            if not bool(self.injective):
+                raise ValueError("explicit tagged occurrences must be distinct")
+            if dict(self.metadata).get("density_context") != "inclusive":
+                raise ValueError("tagged occurrence source requires inclusive density context")
         object.__setattr__(self, "kind", kind)
         object.__setattr__(self, "rank", rank)
         object.__setattr__(self, "content", content)
@@ -5682,6 +5691,8 @@ class YE3TSourceRealization:
                 "ordinary commutative density can emit only the totally "
                 "symmetric partition lambda=(N)"
             )
+        if self.kind == "tagged_cauchy_occurrence" and not carrier_key.is_totally_symmetric:
+            raise ValueError("commutative direct tagged-Cauchy sources have formal parent (N); hidden LR parents are separate")
         return {
             "passed": True,
             "source_kind": str(self.kind),

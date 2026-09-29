@@ -3812,7 +3812,8 @@ def test_native_cuda_carrier_channel_transform_values_vjp_hvp_repeatable(
         for index, value in enumerate(native_case)
     )
     native = carrier_channel_transform(*native_case, backend="native")
-    repeat = carrier_channel_transform(*native_case, backend="native")
+    repeat = carrier_channel_transform(*native_case, backend="native",
+        output_width=int(native_case[3][-1].cpu()))
     reference = carrier_channel_transform(
         *reference_case, backend="reference"
     )

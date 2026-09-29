@@ -91,6 +91,23 @@ from ye3t.couplings.covariant_cauchy import (
     evaluate_covariant_cauchy,
     is_covariant_cauchy_request,
 )
+from ye3t.couplings.tagged_cauchy_carriers import (
+    _compile_tagged_role_factor_execution,
+    compile_tagged_cauchy_carriers,
+    is_tagged_cauchy_carriers_request,
+    tagged_cauchy_carriers_count,
+    tagged_cauchy_carriers_request,
+    tagged_cauchy_carrier_schedule,
+    tagged_cauchy_carrier_model_plan,
+    validate_tagged_cauchy_carriers,
+)
+from ye3t.couplings.rank_additive_hidden_lineage import (
+    rank_additive_hidden_lineage_request,
+    rank_additive_hidden_lineage_count,
+    compile_rank_additive_hidden_lineage,
+    is_rank_additive_hidden_lineage_request,
+    hidden_lineage_contract,
+)
 from ye3t.couplings.lifted_cauchy_scalar import (
     CompiledLiftedCauchyScalar,
     LIFTED_CAUCHY_K0_ORDINARY_LOWERING_SCHEMA,
@@ -2584,6 +2601,10 @@ def count(
 ):
     """Return valid labels and multiplicities for a fixed-content request."""
 
+    if is_rank_additive_hidden_lineage_request(request):
+        return rank_additive_hidden_lineage_count(request)
+    if is_tagged_cauchy_carriers_request(request):
+        return tagged_cauchy_carriers_count(request)
     if isinstance(request, TaggedCauchyImageMultiplicityReport):
         _validate_tagged_cauchy_image_identity(request)
         return request
@@ -2787,6 +2808,10 @@ def plan(
 ):
     """Return a coupling backend plan with multiplicity provenance."""
 
+    if is_rank_additive_hidden_lineage_request(request):
+        return rank_additive_hidden_lineage_count(request)
+    if is_tagged_cauchy_carriers_request(request):
+        return tagged_cauchy_carriers_count(request)
     if isinstance(request, TaggedCauchyImageCompilerPlan):
         _validate_tagged_cauchy_image_identity(request)
         return request
@@ -4766,6 +4791,14 @@ def compile(
 ):
     """Materialize coupling coefficients through the planned ye3t backend."""
 
+    if isinstance(request, dict) and request.get("kind") == "tagged_cauchy_carrier_execution":
+        if request.get("execution") != "role_factorized":
+            raise ValueError("unknown tagged carrier execution lowering")
+        return _compile_tagged_role_factor_execution(request["source_schedule"])
+    if is_rank_additive_hidden_lineage_request(request):
+        return compile_rank_additive_hidden_lineage(request)
+    if is_tagged_cauchy_carriers_request(request):
+        return compile_tagged_cauchy_carriers(request, cache_dir=kwargs.get("cache_dir"))
     if isinstance(request, CompiledTaggedCauchyImage):
         _validate_tagged_cauchy_image_identity(request)
         return request
@@ -7982,6 +8015,14 @@ __all__ = [
     "shifted_jacobi_normalization_squared",
     "shifted_jacobi_power_coefficients",
     "tagged_cauchy_image_count",
+    "tagged_cauchy_carriers_request",
+    "tagged_cauchy_carriers_count",
+    "compile_tagged_cauchy_carriers",
+    "tagged_cauchy_carrier_schedule",
+    "tagged_cauchy_carrier_model_plan",
+    "rank_additive_hidden_lineage_request",
+    "hidden_lineage_contract",
+    "validate_tagged_cauchy_carriers",
     "tagged_cauchy_image_plan",
     "tagged_cauchy_image_request",
     "tagged_cauchy_real_schedule",

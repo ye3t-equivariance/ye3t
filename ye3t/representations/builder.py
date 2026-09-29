@@ -676,8 +676,10 @@ def _exact_single_factor_weight_vectors(nin, lin, permutation_irrep, output_L):
     return basis_states, vectors, multiplicity
 
 
-def _exact_single_factor_scalar_vectors(nin, lin, permutation_irrep):
+def _exact_single_factor_scalar_vectors(nin, lin, permutation_irrep, *, backend="auto"):
     """Return the exact L=0 carrier using only the M=0 and M=1 spaces."""
+    if backend not in {"auto", "exact_coset"}:
+        raise ValueError("scalar weight-space backend must be auto or exact_coset")
     nin = tuple(int(value) for value in nin)
     lin = tuple(int(value) for value in lin)
     if len(permutation_irrep.subgroup.factors) != 1:
@@ -697,7 +699,7 @@ def _exact_single_factor_scalar_vectors(nin, lin, permutation_irrep):
     dimension = int(partition.dimension)
     block_size = len(slot_groups[0])
 
-    if block_size >= _COSET_SCALAR_VECTORS_THRESHOLD:
+    if backend == "exact_coset" or block_size >= _COSET_SCALAR_VECTORS_THRESHOLD:
         # Exact coset/breadth-first path, never materializing the
         # full-size projector or the size!-scale native matrix unit.
         angular_l_values = set(
