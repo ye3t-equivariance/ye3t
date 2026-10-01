@@ -245,8 +245,246 @@ Primitive Quotients
 
 Use ``young_resolved_primitive_quotient`` when the goal is to decide which
 projected exact basis vectors remain as new generators after lower-generated
-products have been removed.  The output records full rank, generated rank,
+products have been removed.  The output records target rank, generated rank,
 primitive rank, and validation metadata for the selected sector.
+
+For an abstract fixed-content Young/``SO(3)`` carrier, ``mode="full"`` admits
+all compatible child Young sectors and angular momenta.  ``max_factor_L``
+limits both children of each binary split. With a supplied
+``permutation_irrep``, the permutation label is an irrep of the
+repeated-content stabilizer ``G_nu``. It equals a global ``S_N`` Young label
+for homogeneous content. With ``global_partition`` and
+``permutation_irrep=None``, the same API induces the local product images over
+the full content orbit and resolves a global ``S_N`` label. For
+example, the same mixed rank-three sector can be compared with and without a
+child Young restriction::
+
+   from ye3t import permutation_irrep_for_character, young_resolved_primitive_quotient
+
+   nin = (1, 1, 1)
+   lin = (1, 1, 1)
+   target = permutation_irrep_for_character(nin, lin, ((2, 1),))
+   full = young_resolved_primitive_quotient(nin, lin, target, 1, mode="full")
+   restricted = young_resolved_primitive_quotient(
+       nin, lin, target, 1, mode="full", max_factor_L=1,
+       allowed_factor_partitions_by_rank={2: ((2,),)},
+   )
+
+The symmetric rank-two child generates the full two-dimensional ``(2,1)``
+parent carrier after its ``S_2 x S_1`` placement is induced over all three
+``S_3`` subgroup cosets. Keeping only one fixed placement would count just
+one direction and would not give a parent ``S_3`` submodule.
+
+``allowed_factor_partitions_by_rank`` takes child-rank keys.  A flat partition
+such as ``(2,)`` is shorthand for a homogeneous child.  For mixed content,
+each allowed entry is the full tuple of partitions for the child's repeated
+``(channel, l)`` blocks.  A named ``factor_route_filter`` can further select
+child content splits and child Young/angular combinations.  It receives the
+left and right ``nin``, ``lin``, permutation irrep, and ``L``, together with
+the target irrep and ``L``.  This filter acts before individual multiplicity
+branches are constructed. Left and right follow the canonical unordered split
+order; a policy that should ignore child order must check both sides.
+
+``factor_route_policy="matched_pairs"`` admits equal-content rank-one pairs
+and then merges even-rank children. With ``factor_scope="recursive"``, this
+certifies that every retained branch is built from matched pairs. For exactly
+three distinct two-slot content blocks, the exact backend handles every
+reachable output ``L_R`` in the pair-CG basis. It builds each allowed
+three-pair product tree and computes exact overlaps between its angular path
+and a canonical tree. Consequently, overlapping routes at ``L_R > 0`` are
+ranked in a small recoupling matrix, not counted as independent paths. Each
+pair has one selected ``S_2`` symmetry type; its allowed angular momenta come
+from exact subgroup character counts. The resulting angular channel count is
+checked against the independent character result. The ``quotient`` columns
+span the generated image in the canonical pair-CG basis; they need not be
+orthogonal or equal to raw product coefficients. The angular construction uses
+the triangle and CG orthogonality identities in `DLMF section 34.2
+<https://dlmf.nist.gov/34.2>`_ and `section 34.3
+<https://dlmf.nist.gov/34.3>`_. Its exact overlap contraction is the
+three-angular-momentum recoupling described in `DLMF section 16.24(iii)
+<https://dlmf.nist.gov/16.24.iii>`_. A general Yutsis-style graph reduction
+can organize larger recoupling trees, as described in the `NIST graphical
+recoupling monograph <https://www.nist.gov/publications/graphical-recoupling-angular-momenta>`_,
+but is unnecessary for these three pair spins.
+
+For any fixed-content rank, pass ``permutation_irrep=None`` and a partition
+of the full rank as ``global_partition`` to obtain the orbit-closed global
+``S_N`` quotient. This accepts either factor scope and either route policy.
+The implementation enumerates the repeated-content subgroup irreps ``mu``
+of ``G_nu``, computes their exact local generated images, and induces those
+images over the content orbit. The group algebra of ``S_N`` is free as a
+right module over the subgroup algebra, with the content-orbit cosets as a
+basis. Induction therefore preserves the inclusion of each subgroup product
+image. N-ary LR multiplicities ``c_mu^lambda`` resolve the result into a
+selected global Young sector. Write ``t_mu,L`` for the local SO(3)
+multiplicity, ``d_mu`` for the subgroup-irrep dimension, and ``r_mu,L`` for
+the rank of the local generated matrix divided by ``d_mu``. On the
+highest-weight slice,
+
+.. math::
+
+   \dim D^{\lambda,L}
+   = (\dim S^\lambda)\sum_\mu c_\mu^\lambda r_{\mu,L},
+   \qquad
+   \dim T^{\lambda,L}
+   = (\dim S^\lambda)\sum_\mu c_\mu^\lambda t_{\mu,L}.
+
+For ``d_mu > 1``, the implementation extracts the multiplicity-space image
+from one subgroup-tableau coordinate and checks by exact matrix rank that
+its tensor product with the full ``mu`` carrier equals the complete local
+image. The target multiplicity has an independent check from a direct
+``G_nu`` class trace: the trace at weight ``M=L`` minus that at ``M=L+1``,
+weighted by the restricted ``S_N`` character and divided by ``|G_nu|``.
+This count uses conjugacy classes and does not enumerate content-orbit words.
+The Young induction and LR rule agree with the `SageMath symmetric-function
+documentation <https://doc.sagemath.org/html/en/reference/combinat/sage/combinat/sf/sf.html>`_.
+The result stores exact local multiplicity-image matrices and LR-chain
+labels. Call
+``quotient.induction_map(subgroup_partitions)`` to compile and validate a
+particular exact Young-orthogonal coefficient map when coefficients are
+needed. The exact rank does not require materializing every such map. The
+three-pair CG construction remains an optional local fast path. Other local
+images use a requested-``L`` basis built from homogeneous Young carriers and
+exact CG merges. Each selected content split includes all cosets of its
+child subgroup inside ``G_nu``; this closes the generated image under the
+parent's repeated-content permutations. The requested-sector builder checks
+that its exact Gram matrix is a multiplicity-space matrix times the identity
+on the Young carrier, and inverts only that smaller matrix. For multiple content
+blocks, the product-map compiler precompiles each shared homogeneous block's
+reduced Young/angular fusion, tensors those maps, and contracts the child and
+parent CG trees in block-spin coordinates. The one-block fusion is an exact
+cached elementary map obtained from sparse coefficient-vector inner products. Cached
+Young-subgroup subduction coefficients propagate the resulting reduced map to
+the other cosets. An explicit orbit contraction remains as a small-case
+reference backend. Neither path constructs a full ambient Young projector.
+The count-only product-column bound includes the
+same subgroup-coset multiplicity. Homogeneous carrier vectors, requested-``L``
+parent bases, subgroup shuffles, unfiltered local quotients, character
+multiplicities, local subduction templates, and compiled global Young maps
+have separate caches. Named
+user route filters bypass the local quotient cache because their behavior
+cannot be inferred from the name alone. The elementary homogeneous fusion and
+requested-sector Gram construction can still be costly for large local
+carriers; the compiler does not promise bounded cost at arbitrary rank.
+
+.. code-block:: python
+
+   from ye3t import young_resolved_primitive_quotient
+
+   q = young_resolved_primitive_quotient(
+       (1,) * 6, (1, 1, 2, 2, 3, 3), None, 1,
+       mode="full", factor_scope="recursive",
+       factor_route_policy="matched_pairs", max_factor_L=3,
+       global_partition=(3, 2, 1),
+   )
+   print(q.sector_count, q.generated_rank, q.primitive_rank)
+   # 208 2016 1312 (208 total copies; 126 generated and 82 primitive,
+   #                 each with Young dimension 16)
+
+The global lift has no rank-six guard. For example, an eight-slot pattern
+with four distinct pairs and one active angular pair has an exact
+``L_R=1`` sector with global partition ``(7,1)`` and generated rank seven::
+
+   q8 = young_resolved_primitive_quotient(
+       (1, 1, 2, 2, 3, 3, 4, 4), (1, 1, 0, 0, 0, 0, 0, 0), None, 1,
+       mode="full", factor_scope="recursive",
+       factor_route_policy="matched_pairs", max_factor_L=1,
+       global_partition=(7, 1),
+   )
+   print(q8.sector_count, q8.generated_rank, q8.primitive_rank)
+   # 1 7 0
+
+For the three-pair rank-six pattern, the lift covers all eleven Young
+partitions and every reachable output ``L_R``. With no child limits,
+the matched-pair routes span every tested ``L_R=1`` global Young sector, so
+the primitive quotient vanishes; child limits produce the nonzero restricted
+quotients shown above. Its factor partition
+allowlist still uses repeated-content subgroup signatures for child spaces;
+it does not reinterpret those signatures as global child ``S_k`` labels.
+
+The default ``factor_scope="immediate"`` uses complete exact child sectors.
+``factor_scope="recursive"`` uses only child directions generated from
+rank-one factors under the same policy.  This is one explicit choice of the
+retained child subspaces in the general quotient definition; it does not add
+primitive child directions. It is a subspace rule, not a per-vector
+factorization test on parent basis vectors. The general backend still
+enumerates allowed binary content splits and child-basis products, compiles
+their exact reduced Young/angular product maps, and ranks their combined
+image. For multiple content blocks, this uses cached atomic homogeneous
+fusions, exact CG-tree recoupling, and Young subduction for each subgroup
+placement. It has no fixed rank or block-count cutoff; its matrix dimensions
+and exact arithmetic can still grow sharply. The three-pair recoupling path
+remains a specialized fast path behind the same exact quotient interface.
+Both scopes compute the exact rank after merging all retained product images.
+For stabilizer-sector calls,
+``count_only=True`` reports a product-column upper bound and a primitive
+lower bound; a positive bound is not an exact quotient rank. Global
+``global_partition`` calls require ``count_only=False``. With recursive
+scope, the stabilizer-sector bound uses complete immediate child
+counts and can remain positive even when a deeper retained child image is
+empty. ``primitive_basis_indices`` name coordinate quotient
+representatives, not an orthogonal complement. Reported exact ranks use the
+highest-weight slice, so the dimensions of the full ``SO(3)`` carriers are
+``(2*L_R + 1)`` times those ranks. Count-only bounds are per highest-weight
+slice as well.
+
+For an exact quotient, ``orthonormal_primitive_multiplicity_blocks()`` returns
+normalized primitive coefficient columns and the exact target Gram matrix.
+Each block uses the row labels in ``angular_basis_labels``. If ``B`` is its
+``coefficients``, ``G`` its ``gram``, and ``D`` its
+``generated_coefficients``, the compiler checks ``B.H*G*B = I`` and
+``D.H*G*B = 0`` exactly. It projects coordinate quotient representatives
+away from the generated image and uses exact Cholesky normalization. This is
+the weighted orthogonal projection of `MIT OpenCourseWare 18.06, Lecture 16
+<https://ocw.mit.edu/courses/18-06-linear-algebra-spring-2010/resources/lecture-16-projection-matrices-and-least-squares/>`_.
+The invariant inner product makes the orthogonal complement a subrepresentation
+(`deBray, Representation Theory lecture notes, Proposition 4.4
+<https://www.math.purdue.edu/~adebray/lecture_notes/m392c_RT_notes.pdf>`_).
+
+For a global partition the returned matrices are **multiplicity-space**
+coefficients. A block's columns repeat over its recorded LR induction copies,
+and tensor with the identity on its ``young_carrier_dimension`` tableau
+coordinates and ``magnetic_dimension`` magnetic coordinates. This compact
+form avoids a dense full-orbit matrix. Supply a subgroup partition signature
+to calculate just one block; ``induction_map(signature)`` supplies its exact
+Young placement coefficients on demand. The returned orthogonal subspace is
+intrinsic to the chosen invariant inner product and factor policy, while its
+individual normalized columns depend on the declared coordinate ordering.
+``orthonormal_primitive_vector(...)`` selects one primitive copy, LR channel,
+Young component, and magnetic component. It returns sparse
+``(target_basis_label, magnetic_M, exact_coefficient)`` terms in the
+symmetry-adapted target basis. It does not expand those terms into every
+uncoupled magnetic-slot and content-orbit coefficient.
+
+.. code-block:: python
+
+   blocks = q.orthonormal_primitive_multiplicity_blocks(((2,), (2,), (2,)))
+   block = blocks[0]
+   B = block["coefficients"]
+   print(B.shape, block["young_carrier_dimension"])
+   terms = q.orthonormal_primitive_vector(
+       0, ((2,), (2,), (2,)), induction_index=0, young_index=0, magnetic_M=1,
+   )
+   print(terms[:3])
+   # Exact coefficients for one subgroup/LR multiplicity block; no S_6 orbit
+   # coefficient table is materialized unless q.induction_map(...) is called.
+
+The API has no fixed rank cutoff. The catalog example constructs the exact
+rank-16 ``S_16:[15,1]`` quotient with eight matched pairs; its primitive
+coefficients can be requested from the saved basis object. The cost of
+finding the quotient and its exact multiplicity Gram still depends on the
+number and dimensions of contributing subgroup sectors; arbitrary rank does
+not imply bounded runtime or memory. A separate rank-16 regression retains one
+eight-plus-eight product route: its exact ``S_16:[15,1]`` highest-weight
+sector has 210 dimensions, with 105 generated and 105 orthogonal primitive
+coordinates. The unrestricted recursive route for that content remains
+computationally expensive.
+
+These calls analyze the canonical fixed-content tensor carrier.  Physical
+cluster placements, motif automorphisms, and role relations require an
+explicit assembly map before an application can claim the corresponding
+physical decomposable subspace.  Rank-additive Young products use induction;
+same-rank diagonal products require a separate Kronecker construction.
 
 The quotient should be called directly only for mathematical audits,
 enumeration tools, or new runtime lowering work.  User-facing descriptor and
@@ -258,8 +496,16 @@ Examples
 --------
 
 ``examples/exact_full_primitive_catalog.py``
-   Compares full exact sectors, primitive quotient representatives, and
-   primitive-generator reconstruction.
+   Constructs a saved ``YE3TFixedContentBasis`` from an editable config with
+   integer keys in ``basis["rank"]`` and ``representation["rank"]``. It then
+   builds the basis and calculates primitive/decomposable subspaces for ranks
+   4, 6, and 16. The printed representations and bases are compact summaries;
+   ``yb.primitive.basis.blocks(rank, cap)`` returns exact reduced coefficient
+   blocks, and ``vector(rank, cap, scope="local")`` selects a normalized
+   primitive vector. Rank 4 limits rank-2 child Young partitions and compares
+   angular caps in ``S_4:[3,1]``; rank 6 includes both a three-pair local
+   quotient and full ``S_6:[3,2,1]``; rank 16 uses the same global API.
+   Exact tests retain child-partition, recoupling, and higher-rank cases.
 
 ``tests/test_young_projector_backend.py`` and
 ``tests/test_numeric_subduction_fastpath.py`` run validation checks for

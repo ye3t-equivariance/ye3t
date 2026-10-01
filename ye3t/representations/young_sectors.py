@@ -1,8 +1,9 @@
 """Public Young-sector helpers for the generalized exact path.
 
-These functions provide a stable, provenance-carrying surface over the
-separate small-``N`` generalized projector and merged tensor-product code.  The
-default ACE/ye3t invariant path remains unchanged.
+These functions provide a stable, provenance-carrying surface over exact
+character counts, factorized Young/CG product images, and a retained small
+ambient-projector reference path. The default ACE/ye3t invariant path remains
+unchanged.
 
 Reference context: Schur-Weyl/Jacobi-Trudi count compression here uses Schur
 polynomial character identities as an exact integer count path.  Subgroup
@@ -16,8 +17,8 @@ finite cases.
 from collections import OrderedDict
 from fractions import Fraction
 from functools import lru_cache
-from itertools import combinations, permutations
-from math import factorial
+from itertools import combinations, permutations, product
+from math import comb, factorial
 
 from ye3t._record import recordclass
 from ye3t.exact_linalg import exact_algebraic_rank_or_none
@@ -50,12 +51,6 @@ def _build_exact_symbolic_projector_sector(
         permutation_irrep,
         spatial_symmetry=spatial_symmetry,
     ).build()
-
-
-def _build_exact_change_of_group_basis_map(*args, **kwargs):
-    from .tensor_products import build_exact_change_of_group_basis_map
-
-    return build_exact_change_of_group_basis_map(*args, **kwargs)
 
 
 def _build_balanced_pairwise_schedule(rank):
@@ -269,6 +264,13 @@ class YoungProductPath:
         'codepath',
         'detail',
         'quotient',
+        'factor_scope',
+        'allowed_factor_partitions_by_rank',
+        'factor_route_name',
+        'factor_route_policy',
+        'basis_convention',
+        'global_partition',
+        'factorized_blocks',
     ),
     frozen=True,
 )
@@ -285,6 +287,236 @@ class YoungResolvedPrimitiveQuotient:
     rank_status = "exact"
     detail = ""
     quotient = None
+    factor_scope = "immediate"
+    allowed_factor_partitions_by_rank = tuple()
+    factor_route_name = None
+    factor_route_policy = "all"
+    basis_convention = "canonical_projector_highest_weight"
+    global_partition = None
+    factorized_blocks = tuple()
+
+    def induction_map(self, subgroup_partitions):
+        """Compile the exact Young lift for one recorded global block on demand."""
+
+        if self.global_partition is None:
+            raise ValueError("An induction map requires a global S_N quotient.")
+        signature = tuple(tuple(int(part) for part in parts) for parts in subgroup_partitions)
+        block = next(
+            (item for item in self.factorized_blocks if item["subgroup_partitions"] == signature),
+            None,
+        )
+        if block is None:
+            raise ValueError(f"No global quotient block has subgroup partitions {signature!r}.")
+        from .young_orthogonal import (
+            validate_young_orthogonal_nary_subduction,
+            young_orthogonal_nary_subduction,
+        )
+
+        tensor = young_orthogonal_nary_subduction(signature, self.global_partition)
+        if int(tensor.multiplicity) != int(block["induction_multiplicity"]):
+            raise ArithmeticError("The compiled Young map disagrees with the quotient's exact LR multiplicity.")
+        if not validate_young_orthogonal_nary_subduction(tensor).passed:
+            raise ArithmeticError("The compiled Young map failed exact isometry or generator equivariance validation.")
+        return tensor
+
+    def orthonormal_primitive_multiplicity_blocks(self, subgroup_partitions=None):
+        """Return exact orthonormal primitive vectors in multiplicity coordinates.
+
+        Purpose:
+            Materialize the orthogonal complement of retained product images.
+        Mathematical contract:
+            Each coefficient matrix B obeys B.H * G * B = I and D.H * G * B = 0
+            in its reported multiplicity basis. Its columns are tensored with
+            the identity on the Young and magnetic carrier coordinates.
+        Inputs:
+            An optional repeated-content subgroup partition signature limits
+            a global S_N quotient to one stored induction block.
+        Outputs:
+            A tuple of compact dictionaries containing exact coefficient and
+            Gram matrices, row labels, induction multiplicity, and carrier size.
+        Does not:
+            Materialize every content-orbit placement or choose an intrinsic
+            basis among equivalent primitive copies.
+        """
+
+        if self.rank_status not in {"exact", "exact_no_generators"}:
+            raise ValueError("Orthonormal primitive coefficients require an exact quotient.")
+        if self.basis_convention == "character_count_no_basis":
+            raise ValueError("Count-only quotients have no basis coefficients to orthonormalize.")
+        if subgroup_partitions is not None and self.global_partition is None:
+            raise ValueError("subgroup_partitions selects a block of a global S_N quotient.")
+        if self.global_partition is not None:
+            selected = None if subgroup_partitions is None else tuple(
+                tuple(int(part) for part in parts) for parts in subgroup_partitions
+            )
+            blocks = tuple(
+                block for block in self.factorized_blocks
+                if selected is None or block["subgroup_partitions"] == selected
+            )
+            if selected is not None and not blocks:
+                raise ValueError(f"No global quotient block has subgroup partitions {selected!r}.")
+            result = []
+            specht_dim = int(Partition(self.global_partition).dimension)
+            for block in blocks:
+                angular_labels = tuple(block["angular_basis_labels"])
+                generated = _sympy().Matrix(block["angular_generated_matrix"])
+                if generated.cols == len(angular_labels):
+                    continue
+                irrep = permutation_irrep_for_character(
+                    self.nin, self.lin, block["subgroup_partitions"],
+                )
+                gram = _primitive_multiplicity_gram(
+                    self.nin, self.lin, irrep, self.L_R,
+                    block["local_basis_convention"], angular_labels,
+                )
+                coefficients, representatives = _orthonormal_primitive_copy_coefficients(
+                    generated, gram,
+                )
+                if coefficients.cols != int(block["angular_target_rank"]) - int(block["angular_generated_rank"]):
+                    raise ArithmeticError("Global primitive multiplicity rank disagrees with its exact local image.")
+                result.append({
+                    "subgroup_partitions": block["subgroup_partitions"],
+                    "angular_basis_labels": angular_labels,
+                    "coordinate_representative_labels": tuple(angular_labels[i] for i in representatives),
+                    "coefficients": coefficients,
+                    "gram": gram,
+                    "generated_coefficients": generated,
+                    "induction_multiplicity": int(block["induction_multiplicity"]),
+                    "lr_chain_labels": block["lr_chain_labels"],
+                    "young_carrier_dimension": specht_dim,
+                    "magnetic_dimension": 2 * int(self.L_R) + 1,
+                    "basis_convention": block["local_basis_convention"],
+                })
+            if selected is None and sum(
+                item["coefficients"].cols * item["induction_multiplicity"] * specht_dim
+                for item in result
+            ) != int(self.primitive_rank):
+                raise ArithmeticError("Orthonormal global blocks do not account for the primitive rank.")
+            return tuple(result)
+
+        if int(self.primitive_rank) == 0:
+            return tuple()
+        irrep = self.permutation_irrep
+        carrier_dim = int(irrep.dim)
+        if len(self.target_basis_labels) != int(self.sector_basis_rank):
+            raise ValueError("The exact quotient has no materialized target basis labels.")
+        if int(self.generated_rank) == 0:
+            generated = _sympy().zeros(int(self.sector_basis_rank), 0)
+        elif hasattr(self.quotient, "rows") and hasattr(self.quotient, "cols"):
+            generated = _sympy().Matrix(self.quotient)
+        else:
+            engine = _exact_product_expansion_engine()
+            target = engine.feature_space(self.nin, self.lin, int(self.L_R))
+            generated = engine._generated_columns_for_target(
+                target, mode=self.mode, stop_at_rank=target.dim,
+            )
+        if generated.rows != int(self.sector_basis_rank):
+            raise ArithmeticError("The local product matrix has the wrong target dimension.")
+        if carrier_dim == 1:
+            angular_labels = tuple(self.target_basis_labels)
+            angular_generated = generated
+        else:
+            reference_rows = tuple(range(0, int(self.sector_basis_rank), carrier_dim))
+            reference = generated.extract(reference_rows, tuple(range(generated.cols)))
+            independent_columns = tuple(int(index) for index in reference.rref(simplify=False)[1])
+            angular_generated = reference[:, independent_columns]
+            angular_labels = tuple(self.target_basis_labels[index] for index in reference_rows)
+            expanded = (
+                _sympy().kronecker_product(angular_generated, _sympy().eye(carrier_dim))
+                if angular_generated.cols else _sympy().zeros(int(self.sector_basis_rank), 0)
+            )
+            if (int(self.generated_rank) != angular_generated.cols * carrier_dim
+                    or int(_sympy().Matrix.hstack(generated, expanded).rank(simplify=False)) != int(self.generated_rank)):
+                raise ArithmeticError("The local product image is not a complete Young submodule.")
+        gram = _primitive_multiplicity_gram(
+            self.nin, self.lin, irrep, self.L_R, self.basis_convention, angular_labels,
+        )
+        coefficients, representatives = _orthonormal_primitive_copy_coefficients(
+            angular_generated, gram,
+        )
+        if coefficients.cols * carrier_dim != int(self.primitive_rank):
+            raise ArithmeticError("Orthonormal local vectors do not account for the primitive rank.")
+        return ({
+            "subgroup_partitions": tuple(tuple(partition.parts) for partition in irrep.partitions),
+            "angular_basis_labels": angular_labels,
+            "coordinate_representative_labels": tuple(angular_labels[i] for i in representatives),
+            "coefficients": coefficients,
+            "gram": gram,
+            "generated_coefficients": angular_generated,
+            "induction_multiplicity": 1,
+            "lr_chain_labels": tuple(),
+            "young_carrier_dimension": carrier_dim,
+            "magnetic_dimension": 2 * int(self.L_R) + 1,
+            "basis_convention": self.basis_convention,
+        },)
+
+    def orthonormal_primitive_vector(
+        self, primitive_copy_index, subgroup_partitions=None,
+        induction_index=0, young_index=0, magnetic_M=None,
+    ):
+        """Return one normalized primitive vector in target-sector coordinates.
+
+        Purpose:
+            Select one column of a compact primitive block and one complete
+            Young/rotation carrier component without a dense tensor product.
+        Mathematical contract:
+            The returned sparse target coordinates have unit invariant norm
+            and are orthogonal to the retained product image.
+        Inputs:
+            A primitive copy index within the selected subgroup block, an LR
+            induction index, a Young component index, and a magnetic number.
+        Outputs:
+            Tuples of ``(target_basis_label, magnetic_M, exact_coefficient)``.
+        Does not:
+            Materialize uncoupled magnetic-slot or full content-orbit vectors.
+        """
+
+        if self.global_partition is not None and subgroup_partitions is None:
+            contributing = tuple(
+                block["subgroup_partitions"] for block in self.factorized_blocks
+                if block["angular_target_rank"] > block["angular_generated_rank"]
+            )
+            if len(contributing) != 1:
+                raise ValueError("Select exactly one primitive subgroup block to materialize a vector.")
+            subgroup_partitions = contributing[0]
+        blocks = self.orthonormal_primitive_multiplicity_blocks(subgroup_partitions)
+        if len(blocks) != 1:
+            raise ValueError("Select exactly one primitive subgroup block to materialize a vector.")
+        block = blocks[0]
+        copy_index = int(primitive_copy_index)
+        lr_index = int(induction_index)
+        tableau_index = int(young_index)
+        M = int(self.L_R) if magnetic_M is None else int(magnetic_M)
+        if copy_index < 0 or copy_index >= block["coefficients"].cols:
+            raise ValueError("primitive_copy_index is outside the selected block.")
+        if lr_index < 0 or lr_index >= block["induction_multiplicity"]:
+            raise ValueError("induction_index is outside the selected block.")
+        if tableau_index < 0 or tableau_index >= block["young_carrier_dimension"]:
+            raise ValueError("young_index is outside the selected carrier.")
+        if abs(M) > int(self.L_R):
+            raise ValueError("magnetic_M is outside the target angular carrier.")
+        if self.global_partition is None:
+            carriers = tuple(product(*(
+                range(int(partition.dimension)) for partition in self.permutation_irrep.partitions
+            )))
+            carrier = carriers[tableau_index]
+        result = []
+        for row, angular_label in enumerate(block["angular_basis_labels"]):
+            coefficient = block["coefficients"][row, copy_index]
+            if coefficient == 0:
+                continue
+            if self.global_partition is not None:
+                label = (
+                    block["subgroup_partitions"], angular_label, lr_index, tableau_index,
+                )
+            elif block["young_carrier_dimension"] == 1:
+                label = angular_label
+            else:
+                label = (angular_label[0], carrier)
+            if label not in self.target_basis_labels:
+                raise ArithmeticError("Normalized primitive coordinate is absent from the exact target basis.")
+            result.append((label, M, coefficient))
+        return tuple(result)
 
 
 @recordclass(('quotient', 'rank_accounting', 'index_partition', 'generated_rank_matches_matrix', 'trivial_matches_ace', 'passed', 'detail'), frozen=True)
@@ -849,6 +1081,22 @@ def _all_permutation_irreps_for_pattern(nin, lin):
 
     _rec(0, tuple())
     return tuple(irreps)
+
+
+@lru_cache(maxsize=512)
+def _active_child_irreps_for_pattern(nin, lin, max_factor_L):
+    """Cache only child Young sectors with allowed nonzero angular content."""
+
+    active = []
+    for irrep in _all_permutation_irreps_for_pattern(nin, lin):
+        counts = generalized_sector_counts(nin, lin, irrep, count_only=True).counts_by_L
+        allowed = tuple(
+            (int(L), int(count)) for L, count in counts.items()
+            if int(count) > 0 and (int(max_factor_L) < 0 or int(L) <= int(max_factor_L))
+        )
+        if allowed:
+            active.append((irrep, allowed))
+    return tuple(active)
 
 
 @lru_cache(maxsize=256)
@@ -1589,6 +1837,70 @@ def _normalize_max_factor_L(max_factor_L):
     return value
 
 
+def _normalize_factor_partition_policy(allowed_factor_partitions_by_rank):
+    """Normalize child Young allowlists to hashable full subgroup signatures."""
+
+    if allowed_factor_partitions_by_rank is None:
+        return tuple()
+    if not hasattr(allowed_factor_partitions_by_rank, "items"):
+        raise ValueError("allowed_factor_partitions_by_rank must be a rank-keyed mapping.")
+    rules = []
+    for rank, entries in allowed_factor_partitions_by_rank.items():
+        rank = int(rank)
+        if rank < 1:
+            raise ValueError("Child partition policy ranks must be positive.")
+        signatures = set()
+        for entry in entries:
+            entry = tuple(entry)
+            if not entry:
+                raise ValueError("A child partition signature cannot be empty.")
+            if all(isinstance(part, int) for part in entry):
+                signature = (tuple(Partition(entry).parts),)
+            else:
+                signature = tuple(tuple(Partition(tuple(parts)).parts) for parts in entry)
+            if sum(sum(parts) for parts in signature) != rank:
+                raise ValueError("Child partition signature sizes must sum to the declared rank.")
+            signatures.add(signature)
+        rules.append((rank, tuple(sorted(signatures))))
+    return tuple(sorted(rules))
+
+
+def _factor_route_allowed(
+    left_nin, left_lin, left_irrep, left_L,
+    right_nin, right_lin, right_irrep, right_L,
+    target_irrep, target_L, mode, partition_policy, factor_route_filter,
+    factor_route_policy="all",
+):
+    """Apply the same joint child policy to count bounds and exact maps."""
+
+    if factor_route_policy == "matched_pairs":
+        if len(left_nin) + len(right_nin) == 2:
+            if (len(left_nin) != 1 or len(right_nin) != 1
+                    or tuple(zip(left_nin, left_lin)) != tuple(zip(right_nin, right_lin))):
+                return False
+        elif len(left_nin) % 2 or len(right_nin) % 2:
+            return False
+    if mode == "module" and not (
+        (int(left_L) == 0 and left_irrep.is_totally_symmetric())
+        or (int(right_L) == 0 and right_irrep.is_totally_symmetric())
+    ):
+        return False
+    for rank, irrep in ((len(left_nin), left_irrep), (len(right_nin), right_irrep)):
+        allowed = next((signatures for rule_rank, signatures in partition_policy if rule_rank == rank), None)
+        signature = tuple(tuple(int(part) for part in item.parts) for item in irrep.partitions)
+        if allowed is not None and signature not in allowed:
+            return False
+    if factor_route_filter is None:
+        return True
+    return bool(factor_route_filter(
+        left_nin=tuple(left_nin), left_lin=tuple(left_lin),
+        left_permutation=left_irrep, left_L=int(left_L),
+        right_nin=tuple(right_nin), right_lin=tuple(right_lin),
+        right_permutation=right_irrep, right_L=int(right_L),
+        target_permutation=target_irrep, target_L=int(target_L),
+    ))
+
+
 def _candidate_product_L_pairs(target_L, left_Ls, right_Ls, mode, max_factor_L=None):
     mode = str(mode)
     target_L = int(target_L)
@@ -1685,6 +1997,82 @@ def _native_algebraic_rank_or_none(matrix):
     return exact_algebraic_rank_or_none(_matrix_rows(matrix))
 
 
+def _primitive_multiplicity_gram(nin, lin, permutation_irrep, L_R, basis_convention, angular_labels):
+    """Return the exact physical Gram matrix on one Young multiplicity block."""
+
+    sp = _sympy()
+    angular_labels = tuple(angular_labels)
+    if basis_convention == "factorized_three_pair_recoupled_cg":
+        # The pair-character and canonical pair-CG vectors are normalized.
+        return sp.eye(len(angular_labels))
+    if basis_convention == "factorized_young_cg_gram":
+        from .factorized_product_images import factorized_requested_sector
+
+        sector = factorized_requested_sector(
+            nin, lin, _permutation_irrep_signature(permutation_irrep), int(L_R),
+        )
+        carrier_dim = int(permutation_irrep.dim)
+        reference_rows = tuple(index * carrier_dim for index in range(len(angular_labels)))
+        if tuple(sector.basis_labels[index] for index in reference_rows) != angular_labels:
+            raise ArithmeticError("Factorized primitive labels disagree with the exact Young basis.")
+        return sector.gram_inverse.extract(reference_rows, reference_rows).inv()
+    if basis_convention == "ace_compact_tree_highest_weight":
+        engine = _exact_product_expansion_engine()
+        target = engine.feature_space(nin, lin, int(L_R))
+        if tuple(target.labels) != angular_labels:
+            raise ArithmeticError("Primitive labels disagree with the exact ACE target basis.")
+        target_vectors = tuple(engine._m_vectors(label) for label in target.labels)
+        return engine._target_gram_inverse(target, target_vectors, int(L_R)).inv()
+    raise ValueError(f"No exact primitive Gram matrix is defined for {basis_convention!r}.")
+
+
+def _orthonormal_primitive_copy_coefficients(generated, gram):
+    """Project coordinate quotient seeds and normalize them in the exact Gram.
+
+    Algorithmic reference: weighted orthogonal projection and Cholesky
+    orthonormalization (Strang, MIT OCW 18.06, Lecture 16). Independent
+    implementation; no external source code is used.
+    """
+
+    from sympy.matrices.exceptions import NonPositiveDefiniteMatrixError
+
+    sp = _sympy()
+    gram = sp.Matrix(gram)
+    generated = sp.Matrix(generated)
+    dimension = int(gram.rows)
+    if gram.cols != dimension or generated.rows != dimension:
+        raise ValueError("Primitive Gram and product-image dimensions disagree.")
+    if any(sp.simplify(entry) != 0 for entry in gram - gram.H):
+        raise ArithmeticError("Primitive target Gram matrix is not Hermitian.")
+    independent = tuple(int(index) for index in generated.rref(simplify=False)[1])
+    generated = generated[:, independent]
+    if generated.cols:
+        _, row_pivots = generated.H.rref(simplify=False)
+        row_pivots = tuple(int(index) for index in row_pivots)
+    else:
+        row_pivots = tuple()
+    representatives = tuple(index for index in range(dimension) if index not in row_pivots)
+    if not representatives:
+        return sp.zeros(dimension, 0), representatives
+    seeds = sp.eye(dimension)[:, representatives]
+    if generated.cols:
+        normal = generated.H * gram * generated
+        projected = seeds - generated * normal.LUsolve(generated.H * gram * seeds)
+    else:
+        projected = seeds
+    residual_gram = (projected.H * gram * projected).applyfunc(sp.simplify)
+    try:
+        cholesky = residual_gram.cholesky()
+    except (ValueError, NonPositiveDefiniteMatrixError) as exc:
+        raise ArithmeticError("Projected primitive representatives have a singular or nonpositive Gram matrix.") from exc
+    coefficients = projected * cholesky.H.inv()
+    if any(sp.simplify(entry) != 0 for entry in generated.H * gram * coefficients):
+        raise ArithmeticError("Primitive coefficients are not orthogonal to generated products.")
+    if any(sp.simplify(entry) != 0 for entry in coefficients.H * gram * coefficients - sp.eye(len(representatives))):
+        raise ArithmeticError("Primitive coefficients are not orthonormal.")
+    return coefficients, representatives
+
+
 class _ExactColumnAccumulator:
     def __init__(self, rows, *, stop_rank=0):
         self.rows = int(rows)
@@ -1718,31 +2106,10 @@ class _ExactColumnAccumulator:
         return _sympy().Matrix.hstack(*self.columns)
 
 
-@lru_cache(maxsize=256)
-def _generalized_sector_cached(nin, lin, permutation_irrep_signature):
-    return _build_exact_symbolic_projector_sector(
-        tuple(int(x) for x in nin),
-        tuple(int(x) for x in lin),
-        _permutation_irrep_from_signature(permutation_irrep_signature),
-    )
-
-
-def _sector_for_irrep(nin, lin, permutation_irrep):
-    key = _sector_cache_key(tuple(nin), tuple(lin), permutation_irrep)
-    cached = _cache_get(key)
-    if cached is not None:
-        return cached
-    sector = _generalized_sector_cached(
-        tuple(int(x) for x in nin),
-        tuple(int(x) for x in lin),
-        _permutation_irrep_signature(permutation_irrep),
-    )
-    _cache_put(key, sector)
-    return sector
-
-
-@lru_cache(maxsize=256)
-def _young_generated_upper_bound_cached(nin, lin, permutation_irrep_signature, L_R, mode, target_dim, max_factor_L):
+def _young_generated_upper_bound_impl(
+    nin, lin, permutation_irrep_signature, L_R, mode, target_dim,
+    max_factor_L, partition_policy, factor_route_policy, factor_route_filter,
+):
     nin = tuple(int(x) for x in nin)
     lin = tuple(int(x) for x in lin)
     permutation_irrep = _permutation_irrep_from_signature(permutation_irrep_signature)
@@ -1751,30 +2118,59 @@ def _young_generated_upper_bound_cached(nin, lin, permutation_irrep_signature, L
     generated_upper_bound = 0
     product_path_count = 0
     for (left_nin, left_lin), (right_nin, right_lin) in _submultiset_pattern_partitions(nin, lin):
-        left_irreps = _all_permutation_irreps_for_pattern(left_nin, left_lin)
-        right_irreps = _all_permutation_irreps_for_pattern(right_nin, right_lin)
-        for left_irrep, right_irrep, subgroup_multiplicity in _candidate_child_irrep_terms(left_irreps, right_irreps, permutation_irrep, mode):
-            left_counts = generalized_sector_counts(left_nin, left_lin, left_irrep, count_only=True)
-            right_counts = generalized_sector_counts(right_nin, right_lin, right_irrep, count_only=True)
+        left_content = _channel_multiset(left_nin, left_lin)
+        parent_content = _channel_multiset(nin, lin)
+        left_counts = {(int(n), int(l)): int(count) for n, l, count in left_content}
+        shuffle_count = 1
+        for n, l, multiplicity in parent_content:
+            left_multiplicity = left_counts.get((int(n), int(l)), 0)
+            shuffle_count *= comb(int(multiplicity), int(left_multiplicity))
+        left_active = _active_child_irreps_for_pattern(left_nin, left_lin, max_factor_L)
+        right_active = _active_child_irreps_for_pattern(right_nin, right_lin, max_factor_L)
+        left_irreps = tuple(item[0] for item in left_active)
+        right_irreps = tuple(item[0] for item in right_active)
+        left_angular_counts = {irrep: dict(counts) for irrep, counts in left_active}
+        right_angular_counts = {irrep: dict(counts) for irrep, counts in right_active}
+        for left_irrep, right_irrep, _subgroup_multiplicity in _candidate_child_irrep_terms(left_irreps, right_irreps, permutation_irrep, mode):
+            left_counts = left_angular_counts[left_irrep]
+            right_counts = right_angular_counts[right_irrep]
             L_pairs = _candidate_product_L_pairs(
                 int(L_R),
-                tuple(int(L) for L in left_counts.counts_by_L),
-                tuple(int(L) for L in right_counts.counts_by_L),
+                tuple(left_counts),
+                tuple(right_counts),
                 str(mode),
                 None if int(max_factor_L) < 0 else int(max_factor_L),
             )
             for left_L, right_L in L_pairs:
-                left_dim = int(left_counts.counts_by_L.get(int(left_L), 0))
-                right_dim = int(right_counts.counts_by_L.get(int(right_L), 0))
-                path_dim = left_dim * right_dim * int(subgroup_multiplicity)
+                if not _factor_route_allowed(
+                    left_nin, left_lin, left_irrep, left_L,
+                    right_nin, right_lin, right_irrep, right_L,
+                    permutation_irrep, L_R, mode, partition_policy, factor_route_filter,
+                    factor_route_policy,
+                ):
+                    continue
+                left_dim = int(left_counts.get(int(left_L), 0)) * int(left_irrep.dim)
+                right_dim = int(right_counts.get(int(right_L), 0)) * int(right_irrep.dim)
+                path_dim = left_dim * right_dim * int(shuffle_count)
                 generated_upper_bound += int(path_dim)
                 product_path_count += int(path_dim)
     return (int(generated_upper_bound), int(product_path_count))
 
 
-def _young_generated_upper_bound(nin, lin, permutation_irrep, L_R, mode, target_dim, max_factor_L=None):
+@lru_cache(maxsize=256)
+def _young_generated_upper_bound_cached(nin, lin, permutation_irrep_signature, L_R, mode, target_dim, max_factor_L, partition_policy, factor_route_policy):
+    return _young_generated_upper_bound_impl(
+        nin, lin, permutation_irrep_signature, L_R, mode, target_dim,
+        max_factor_L, partition_policy, factor_route_policy, None,
+    )
+
+
+def _young_generated_upper_bound(
+    nin, lin, permutation_irrep, L_R, mode, target_dim, max_factor_L=None,
+    partition_policy=(), factor_route_policy="all", factor_route_filter=None,
+):
     max_factor_L = _normalize_max_factor_L(max_factor_L)
-    return _young_generated_upper_bound_cached(
+    args = (
         tuple(int(x) for x in nin),
         tuple(int(x) for x in lin),
         _permutation_irrep_signature(permutation_irrep),
@@ -1782,81 +2178,693 @@ def _young_generated_upper_bound(nin, lin, permutation_irrep, L_R, mode, target_
         str(mode),
         int(target_dim),
         -1 if max_factor_L is None else int(max_factor_L),
+        tuple(partition_policy),
+        str(factor_route_policy),
     )
+    if factor_route_filter is not None:
+        return _young_generated_upper_bound_impl(*args, factor_route_filter)
+    return _young_generated_upper_bound_cached(*args)
 
 
-@lru_cache(maxsize=128)
-def _young_generated_columns_cached(nin, lin, permutation_irrep_signature, L_R, mode, max_factor_L):
+def _young_generated_columns_impl(
+    nin, lin, permutation_irrep_signature, L_R, mode, max_factor_L,
+    partition_policy, factor_scope, factor_route_policy, factor_route_filter, memo,
+):
+    from .factorized_product_images import factorized_product_image, factorized_requested_sector
+
     nin = tuple(int(x) for x in nin)
     lin = tuple(int(x) for x in lin)
     permutation_irrep = _permutation_irrep_from_signature(permutation_irrep_signature)
-    target_sector = _sector_for_irrep(nin, lin, permutation_irrep)
-    target_dim = len(_highest_weight_basis_labels(target_sector, int(L_R)))
-    if len(nin) <= 1 or target_dim == 0:
-        return _sympy().zeros(target_dim, 0)
+    memo_key = (
+        nin, lin, permutation_irrep_signature, int(L_R), str(mode),
+        int(max_factor_L), tuple(partition_policy), str(factor_scope), str(factor_route_policy),
+    )
+    if memo_key in memo:
+        return memo[memo_key]
+    target_sector = factorized_requested_sector(nin, lin, permutation_irrep_signature, int(L_R))
+    target_dim = len(target_sector.basis_labels)
+    if target_dim == 0:
+        return _sympy().zeros(0, 0)
+    if len(nin) <= 1:
+        return _sympy().eye(target_dim) if factor_scope == "recursive" else _sympy().zeros(target_dim, 0)
     accumulator = _ExactColumnAccumulator(target_dim, stop_rank=target_dim)
     for (left_nin, left_lin), (right_nin, right_lin) in _submultiset_pattern_partitions(nin, lin):
-        left_irreps = _all_permutation_irreps_for_pattern(left_nin, left_lin)
-        right_irreps = _all_permutation_irreps_for_pattern(right_nin, right_lin)
+        left_active = _active_child_irreps_for_pattern(left_nin, left_lin, max_factor_L)
+        right_active = _active_child_irreps_for_pattern(right_nin, right_lin, max_factor_L)
+        left_irreps = tuple(item[0] for item in left_active)
+        right_irreps = tuple(item[0] for item in right_active)
+        left_angular_counts = {irrep: dict(counts) for irrep, counts in left_active}
+        right_angular_counts = {irrep: dict(counts) for irrep, counts in right_active}
         for left_irrep, right_irrep in _candidate_child_irreps(left_irreps, right_irreps, permutation_irrep, mode):
-            left_sector = _sector_for_irrep(left_nin, left_lin, left_irrep)
-            right_sector = _sector_for_irrep(right_nin, right_lin, right_irrep)
+            left_counts = left_angular_counts[left_irrep]
+            right_counts = right_angular_counts[right_irrep]
             L_pairs = _candidate_product_L_pairs(
                 int(L_R),
-                tuple(int(L) for L in left_sector.counts_by_L),
-                tuple(int(L) for L in right_sector.counts_by_L),
+                tuple(left_counts),
+                tuple(right_counts),
                 str(mode),
                 None if int(max_factor_L) < 0 else int(max_factor_L),
             )
             for left_L, right_L in L_pairs:
-                mapping = _build_exact_change_of_group_basis_map(
-                    left_sector,
-                    right_sector,
-                    left_L=int(left_L),
-                    right_L=int(right_L),
-                    output_L=int(L_R),
-                    node_span=(0, len(nin)),
+                if not _factor_route_allowed(
+                    left_nin, left_lin, left_irrep, left_L,
+                    right_nin, right_lin, right_irrep, right_L,
+                    permutation_irrep, L_R, mode, partition_policy, factor_route_filter,
+                    factor_route_policy,
+                ):
+                    continue
+                left_sector = factorized_requested_sector(
+                    left_nin, left_lin, _permutation_irrep_signature(left_irrep), int(left_L),
                 )
-                for branch in mapping.branches:
-                    if not _target_irrep_matches(branch.permutation_irrep, permutation_irrep):
+                right_sector = factorized_requested_sector(
+                    right_nin, right_lin, _permutation_irrep_signature(right_irrep), int(right_L),
+                )
+                if factor_scope == "recursive":
+                    left_retained = _young_generated_columns_impl(
+                        left_nin, left_lin, _permutation_irrep_signature(left_irrep),
+                        int(left_L), mode, max_factor_L, partition_policy,
+                        factor_scope, factor_route_policy, factor_route_filter, memo,
+                    )
+                    right_retained = _young_generated_columns_impl(
+                        right_nin, right_lin, _permutation_irrep_signature(right_irrep),
+                        int(right_L), mode, max_factor_L, partition_policy,
+                        factor_scope, factor_route_policy, factor_route_filter, memo,
+                    )
+                    if left_retained.cols == 0 or right_retained.cols == 0:
                         continue
-                    accumulator.try_add_matrix(branch.coordinate_matrix)
-                    if accumulator.reached_target():
-                        return accumulator.matrix()
-    return accumulator.matrix()
+                columns, source_labels = factorized_product_image(left_sector, right_sector, target_sector)
+                if factor_scope == "recursive":
+                    # Restrict both child images before the exact merge map
+                    # (supplemental Eqs. suppdecomposablesubspace and suppprimitivequotient).
+                    child_labels = tuple(
+                        (left, right)
+                        for left in left_sector.basis_labels
+                        for right in right_sector.basis_labels
+                    )
+                    if not child_labels or len(source_labels) % len(child_labels):
+                        raise ArithmeticError("Induced source labels have an invalid subgroup-coset size.")
+                    coset_count = len(source_labels) // len(child_labels)
+                    expected = tuple(
+                        (coset_index, left, right)
+                        for coset_index in range(coset_count)
+                        for left, right in child_labels
+                    )
+                    if source_labels != expected:
+                        raise ArithmeticError("Recursive child coordinates do not match the exact source basis.")
+                    retained = _sympy().kronecker_product(left_retained, right_retained)
+                    columns = columns * _sympy().kronecker_product(
+                        _sympy().eye(coset_count), retained,
+                    )
+                accumulator.try_add_matrix(columns)
+                if accumulator.reached_target():
+                    result = accumulator.matrix()
+                    memo[memo_key] = result
+                    return result
+    result = accumulator.matrix()
+    memo[memo_key] = result
+    return result
 
 
-def _young_generated_columns(nin, lin, permutation_irrep, L_R, mode, max_factor_L=None):
+@lru_cache(maxsize=128)
+def _young_generated_columns_cached(nin, lin, permutation_irrep_signature, L_R, mode, max_factor_L, partition_policy, factor_scope, factor_route_policy):
+    return _young_generated_columns_impl(
+        nin, lin, permutation_irrep_signature, L_R, mode, max_factor_L,
+        partition_policy, factor_scope, factor_route_policy, None, {},
+    )
+
+
+def _young_generated_columns(
+    nin, lin, permutation_irrep, L_R, mode, max_factor_L=None,
+    partition_policy=(), factor_scope="immediate", factor_route_policy="all",
+    factor_route_filter=None,
+):
     max_factor_L = _normalize_max_factor_L(max_factor_L)
-    return _young_generated_columns_cached(
+    args = (
         tuple(int(x) for x in nin),
         tuple(int(x) for x in lin),
         _permutation_irrep_signature(permutation_irrep),
         int(L_R),
         str(mode),
         -1 if max_factor_L is None else int(max_factor_L),
+        tuple(partition_policy),
+        str(factor_scope),
+        str(factor_route_policy),
+    )
+    if factor_route_filter is not None:
+        return _young_generated_columns_impl(*args, factor_route_filter, {})
+    return _young_generated_columns_cached(*args)
+
+
+@lru_cache(maxsize=8192)
+def _three_pair_recoupling_overlap(spins, output_L, canonical_J, pair, pair_J):
+    """Exact overlap of two three-spin CG trees at highest weight M=L."""
+
+    if pair == (0, 1):
+        return _sympy().Integer(int(canonical_J == pair_J))
+    from ye3t.core.subtree_dag import cg_exact
+    from ye3t.exact_scalars import ExactRadical
+
+    a, b = pair
+    c = next(index for index in range(3) if index not in pair)
+    total = ExactRadical.rational(0)
+    for m0 in range(-spins[0], spins[0] + 1):
+        for m1 in range(-spins[1], spins[1] + 1):
+            m2 = int(output_L) - m0 - m1
+            if abs(m2) > spins[2]:
+                continue
+            magnetic = (m0, m1, m2)
+            canonical_m = m0 + m1
+            if abs(canonical_m) > canonical_J:
+                continue
+            pair_m = magnetic[a] + magnetic[b]
+            if abs(pair_m) > pair_J:
+                continue
+            canonical = cg_exact(spins[0], m0, spins[1], m1, canonical_J, canonical_m)
+            canonical *= cg_exact(canonical_J, canonical_m, spins[2], m2, output_L, output_L)
+            route = cg_exact(spins[a], magnetic[a], spins[b], magnetic[b], pair_J, pair_m)
+            route *= cg_exact(pair_J, pair_m, spins[c], magnetic[c], output_L, output_L)
+            total += canonical * route
+    sp = _sympy()
+    return sum(
+        sp.Rational(coefficient.numerator, coefficient.denominator)
+        * sp.sqrt(sp.Rational(radicand.numerator, radicand.denominator))
+        for radicand, coefficient in total.terms.items()
     )
 
 
-def young_resolved_primitive_quotient(nin, lin, permutation_irrep, L_R, mode="full", count_only=False, max_factor_L=None):
+def _factorized_three_pair_joint_quotient(
+    nin, lin, permutation_irrep, L_R, max_factor_L, partition_policy,
+    factor_route_filter=None, factor_route_name=None,
+):
+    """Exact three-pair quotient from small CG recoupling and pair characters.
+
+    Algorithmic reference: CG recoupling and orthogonality, DLMF 34.3-34.4.
+    This implementation independently contracts the two CG trees at M=L.
+    """
+
+    if permutation_irrep.subgroup != PermutationSubgroup.from_nl(nin, lin):
+        return None
+    factors = tuple(permutation_irrep.subgroup.factors)
+    if len(factors) != 3 or any(int(factor.multiplicity) != 2 for factor in factors):
+        return None
+    if int(permutation_irrep.dim) != 1:
+        return None
+
+    pairs = []
+    for factor, partition in zip(factors, permutation_irrep.partitions, strict=True):
+        pair_nin = (int(factor.channel_label),) * 2
+        pair_lin = (int(factor.l),) * 2
+        pair_irrep = permutation_irrep_for_character(pair_nin, pair_lin, (partition.parts,))
+        rank_one_irrep = permutation_irrep_for_character(pair_nin[:1], pair_lin[:1], ((1,),))
+        counts = generalized_sector_counts(pair_nin, pair_lin, pair_irrep, count_only=True)
+        if any(int(multiplicity) != 1 for multiplicity in counts.counts_by_L.values()):
+            return None
+        retained_Ls = set()
+        for pair_L in counts.counts_by_L:
+            if not _candidate_product_L_pairs(pair_L, (factor.l,), (factor.l,), "full", max_factor_L):
+                continue
+            if _factor_route_allowed(
+                pair_nin[:1], pair_lin[:1], rank_one_irrep, factor.l,
+                pair_nin[:1], pair_lin[:1], rank_one_irrep, factor.l,
+                pair_irrep, pair_L, "full", partition_policy, factor_route_filter, "matched_pairs",
+            ):
+                retained_Ls.add(int(pair_L))
+        pairs.append((pair_nin, pair_lin, pair_irrep, counts, frozenset(retained_Ls)))
+
+    sp = _sympy()
+    basis_labels = []
+    block_columns = []
+    generated_indices = []
+    product_path_count = 0
+    for spins in product(*(tuple(sorted(pair[3].counts_by_L)) for pair in pairs)):
+        spins = tuple(int(value) for value in spins)
+        canonical_Js = tuple(
+            J for J in range(abs(spins[0] - spins[1]), spins[0] + spins[1] + 1)
+            if _cg_allowed(J, spins[2], L_R)
+        )
+        if not canonical_Js:
+            continue
+        start = len(basis_labels)
+        for J in canonical_Js:
+            pair_labels = tuple(
+                ((factor.channel_label, int(factor.l)), int(pair_L))
+                for factor, pair_L in zip(factors, spins, strict=True)
+            )
+            basis_labels.append(pair_labels if int(L_R) == 0 else (*pair_labels, int(J)))
+        if any(int(spins[index]) not in pairs[index][4] for index in range(3)):
+            continue
+        routes = []
+        for last in range(3):
+            a, b = tuple(index for index in range(3) if index != last)
+            pair_a, pair_b, pair_c = pairs[a], pairs[b], pairs[last]
+            rank_four_nin = pair_a[0] + pair_b[0]
+            rank_four_lin = pair_a[1] + pair_b[1]
+            rank_four_irrep = permutation_irrep_for_character(
+                rank_four_nin, rank_four_lin,
+                (permutation_irrep.partitions[a].parts, permutation_irrep.partitions[b].parts),
+            )
+            for intermediate_L in range(abs(spins[a] - spins[b]), spins[a] + spins[b] + 1):
+                if not _candidate_product_L_pairs(
+                    intermediate_L, (spins[a],), (spins[b],), "full", max_factor_L,
+                ):
+                    continue
+                if not _factor_route_allowed(
+                    pair_a[0], pair_a[1], pair_a[2], spins[a],
+                    pair_b[0], pair_b[1], pair_b[2], spins[b],
+                    rank_four_irrep, intermediate_L, "full", partition_policy, factor_route_filter, "matched_pairs",
+                ):
+                    continue
+                if not _candidate_product_L_pairs(
+                    L_R, (intermediate_L,), (spins[last],), "full", max_factor_L,
+                ):
+                    continue
+                if not _factor_route_allowed(
+                    rank_four_nin, rank_four_lin, rank_four_irrep, intermediate_L,
+                    pair_c[0], pair_c[1], pair_c[2], spins[last],
+                    permutation_irrep, L_R, "full", partition_policy, factor_route_filter, "matched_pairs",
+                ):
+                    continue
+                routes.append(((a, b), int(intermediate_L)))
+        product_path_count += len(routes)
+        if not routes:
+            continue
+        recoupled = sp.Matrix([
+            [
+                _three_pair_recoupling_overlap(spins, int(L_R), int(J), pair, int(pair_J))
+                for pair, pair_J in routes
+            ]
+            for J in canonical_Js
+        ])
+        if any(
+            sp.simplify(sum(recoupled[row, col] ** 2 for row in range(recoupled.rows)) - 1) != 0
+            for col in range(recoupled.cols)
+        ):
+            raise ArithmeticError("A three-pair CG route failed exact normalization in the canonical basis.")
+        independent_columns = tuple(int(index) for index in recoupled.rref(simplify=False)[1])
+        span = recoupled[:, independent_columns]
+        _, row_pivots = span.T.rref(simplify=False)
+        generated_indices.extend(start + int(index) for index in row_pivots)
+        block_columns.append((start, span))
+
+    target_counts = generalized_sector_counts(nin, lin, permutation_irrep, count_only=True)
+    sector_count = int(target_counts.counts_by_L.get(int(L_R), 0))
+    if len(basis_labels) != sector_count:
+        raise ArithmeticError("Three-pair CG channel count disagrees with the exact subgroup character count.")
+    generated = sp.zeros(sector_count, sum(matrix.cols for _, matrix in block_columns))
+    column_offset = 0
+    for row_offset, matrix in block_columns:
+        generated[row_offset:row_offset + matrix.rows, column_offset:column_offset + matrix.cols] = matrix
+        column_offset += matrix.cols
+    exact_rank = _native_algebraic_rank_or_none(generated)
+    if exact_rank is None:
+        exact_rank = int(generated.rank(simplify=True))
+    if int(exact_rank) != len(generated_indices):
+        raise ArithmeticError("The exact three-pair product rank disagrees with its coordinate pivots.")
+    generated_set = set(generated_indices)
+    primitive_indices = tuple(index for index in range(sector_count) if index not in generated_set)
+    return YoungResolvedPrimitiveQuotient(
+        nin=nin, lin=lin, channel_multiset=_channel_multiset(nin, lin),
+        permutation_irrep=permutation_irrep, L_R=int(L_R), mode="full",
+        max_factor_L=max_factor_L, sector_count=sector_count,
+        sector_basis_rank=sector_count, primitive_rank=len(primitive_indices),
+        generated_rank=len(generated_indices),
+        generated_basis_indices=tuple(generated_indices),
+        primitive_basis_indices=primitive_indices, target_basis_labels=tuple(basis_labels),
+        generated_upper_bound=int(product_path_count),
+        primitive_lower_bound=max(0, sector_count - int(product_path_count)),
+        product_path_count=int(product_path_count), rank_status="exact",
+        provenance="exact_subgroup_character_count_and_CG_recoupling",
+        codepath="factorized_three_pair_joint_primitive_quotient",
+        detail=(
+            "Exact S2^3 pair-character sectors and three-spin CG recoupling. "
+            "The reported columns span retained products in the canonical pair-CG basis."
+        ),
+        quotient=generated, factor_scope="recursive",
+        allowed_factor_partitions_by_rank=partition_policy,
+        factor_route_name=factor_route_name, factor_route_policy="matched_pairs",
+        basis_convention="factorized_three_pair_recoupled_cg",
+    )
+
+
+@lru_cache(maxsize=512)
+def _global_sector_count_by_character(nin, lin, target_parts, L_R):
+    """Count a global S_N/SO(3) highest-weight sector by an H-class trace.
+
+    Algorithmic reference: Frobenius reciprocity for Young-subgroup induction
+    and the SU(2) highest-weight difference w_L - w_(L+1).  The class trace
+    is evaluated independently of local Young-sector decompositions.
+    """
+
+    subgroup = PermutationSubgroup.from_nl(nin, lin)
+    target = Partition(target_parts)
+    total = 0
+    subgroup_order = 1
+    for factor in subgroup.factors:
+        subgroup_order *= factorial(int(factor.multiplicity))
+    class_choices = tuple(
+        _partition_parts_of_n(int(factor.multiplicity))
+        for factor in subgroup.factors
+    )
+    for cycle_types in product(*class_choices):
+        merged_type = tuple(sorted((length for parts in cycle_types for length in parts), reverse=True))
+        character = int(symmetric_group_character(target, merged_type))
+        if character == 0:
+            continue
+        class_size = 1
+        weights = {0: 1}
+        for factor, cycle_type in zip(subgroup.factors, cycle_types, strict=True):
+            class_size *= _cycle_type_class_size(cycle_type)
+            weights = _convolve_weight_counts(
+                weights, _weight_trace_for_cycle_type(factor.l, cycle_type)
+            )
+        total += class_size * character * (
+            int(weights.get(int(L_R), 0)) - int(weights.get(int(L_R) + 1, 0))
+        )
+    count, remainder = divmod(total, subgroup_order)
+    if remainder or count < 0:
+        raise ArithmeticError("The global character trace did not give a nonnegative integral multiplicity.")
+    return int(count)
+
+
+@lru_cache(maxsize=32)
+def _global_local_quotient_cached(
+    nin, lin, irrep_signature, L_R, mode, max_factor_L, partition_policy,
+    factor_scope, factor_route_policy,
+):
+    """Reuse one exact G_nu product image across global Young partitions."""
+
+    return young_resolved_primitive_quotient(
+        nin, lin, _permutation_irrep_from_signature(irrep_signature), int(L_R),
+        mode=mode, max_factor_L=None if int(max_factor_L) < 0 else int(max_factor_L),
+        allowed_factor_partitions_by_rank=dict(partition_policy),
+        factor_scope=factor_scope, factor_route_policy=factor_route_policy,
+    )
+
+
+def _global_fixed_content_primitive_quotient(
+    nin, lin, global_partition, L_R, mode, max_factor_L, partition_policy,
+    factor_scope, factor_route_policy, factor_route_filter, factor_route_name,
+):
+    """Induce exact local product images into a global S_N Young sector."""
+
+    from .young_orthogonal import (
+        littlewood_richardson_chain_labels,
+        young_nary_induced_multiplicity_by_character,
+    )
+
+    target = global_partition if isinstance(global_partition, Partition) else Partition(global_partition)
+    if int(target.size) != len(nin):
+        raise ValueError("global_partition must partition the parent rank.")
+    specht_dim = int(target.dimension)
+    labels = []
+    generated_indices = []
+    primitive_indices = []
+    blocks = []
+    sector_count = 0
+    generated_rank = 0
+    generated_upper_bound = 0
+    for irrep in _all_permutation_irreps_for_pattern(nin, lin):
+        counts = generalized_sector_counts(nin, lin, irrep, count_only=True)
+        local_copies = int(counts.counts_by_L.get(int(L_R), 0))
+        if local_copies == 0:
+            continue
+        signature = tuple(tuple(int(part) for part in partition.parts) for partition in irrep.partitions)
+        induction_multiplicity = int(young_nary_induced_multiplicity_by_character(signature, target))
+        if induction_multiplicity == 0:
+            continue
+        if factor_route_filter is None:
+            local = _global_local_quotient_cached(
+                nin, lin, _permutation_irrep_signature(irrep), int(L_R), mode,
+                -1 if max_factor_L is None else int(max_factor_L),
+                partition_policy, factor_scope, factor_route_policy,
+            )
+        else:
+            local = young_resolved_primitive_quotient(
+                nin, lin, irrep, int(L_R), mode=mode,
+                max_factor_L=max_factor_L,
+                allowed_factor_partitions_by_rank=dict(partition_policy),
+                factor_scope=factor_scope, factor_route_policy=factor_route_policy,
+                factor_route_filter=factor_route_filter, factor_route_name=factor_route_name,
+            )
+        carrier_dim = int(irrep.dim)
+        if (local.rank_status not in {"exact", "exact_no_generators"}
+                or int(local.sector_count) != local_copies
+                or int(local.sector_basis_rank) != local_copies * carrier_dim):
+            raise ArithmeticError("The local exact quotient disagrees with its subgroup character count.")
+        lr_labels = littlewood_richardson_chain_labels(signature, target, bracketing="balanced")
+        if len(lr_labels) != induction_multiplicity:
+            raise ArithmeticError("LR-chain labels disagree with the exact n-ary character multiplicity.")
+        sp = _sympy()
+        if int(local.generated_rank) == 0:
+            local_matrix = sp.zeros(int(local.sector_basis_rank), 0)
+        elif hasattr(local.quotient, "rows") and hasattr(local.quotient, "cols"):
+            local_matrix = sp.Matrix(local.quotient)
+        else:
+            local_matrix = _young_generated_columns(
+                nin, lin, irrep, int(L_R), mode,
+                max_factor_L=max_factor_L, partition_policy=partition_policy,
+                factor_scope=factor_scope, factor_route_policy=factor_route_policy,
+                factor_route_filter=factor_route_filter,
+            )
+        if local_matrix.rows != local_copies * carrier_dim:
+            raise ArithmeticError("The local product matrix has the wrong Young-carrier dimension.")
+        local_matrix_rank = _native_algebraic_rank_or_none(local_matrix)
+        if local_matrix_rank is None:
+            local_matrix_rank = int(local_matrix.rank(simplify=False))
+        if int(local_matrix_rank) != int(local.generated_rank):
+            raise ArithmeticError("The local product matrix disagrees with its exact generated rank.")
+        if carrier_dim == 1:
+            angular_labels = tuple(local.target_basis_labels)
+            angular_generated = local_matrix
+            angular_indices = tuple(int(index) for index in angular_generated.T.rref(simplify=False)[1])
+        else:
+            carrier_indices = tuple(product(*(
+                range(int(partition.dimension)) for partition in irrep.partitions
+            )))
+            expected_labels = tuple(
+                (copy_index, carrier_index)
+                for copy_index in range(local_copies)
+                for carrier_index in carrier_indices
+            )
+            if tuple(local.target_basis_labels) != expected_labels:
+                raise ArithmeticError("Local Young coordinates are not ordered by copy and carrier.")
+            reference_rows = tuple(index * carrier_dim for index in range(local_copies))
+            reference = local_matrix.extract(reference_rows, tuple(range(local_matrix.cols)))
+            independent_columns = tuple(int(index) for index in reference.rref(simplify=False)[1])
+            angular_generated = reference[:, independent_columns]
+            angular_labels = tuple(local.target_basis_labels[index] for index in reference_rows)
+            expanded = (
+                sp.kronecker_product(angular_generated, sp.eye(carrier_dim))
+                if angular_generated.cols else sp.zeros(int(local.sector_basis_rank), 0)
+            )
+            local_rank = int(local.generated_rank)
+            combined_rank = int(sp.Matrix.hstack(local_matrix, expanded).rank(simplify=False))
+            if local_rank != carrier_dim * angular_generated.cols or combined_rank != local_rank:
+                raise ArithmeticError("The local product image is not a full subgroup-irrep module.")
+            angular_indices = tuple(int(index) for index in angular_generated.T.rref(simplify=False)[1])
+        angular_rank = int(angular_generated.cols)
+        if carrier_dim == 1 and angular_rank != int(local.generated_rank):
+            raise ArithmeticError("The local product matrix rank disagrees with the exact quotient.")
+        local_copy_bound = int(local.generated_upper_bound) // carrier_dim
+        if local_copy_bound < angular_rank:
+            raise ArithmeticError("The local product-column bound is smaller than its exact image.")
+        for lr_index in range(induction_multiplicity):
+            for local_index, angular_label in enumerate(angular_labels):
+                for tableau_index in range(specht_dim):
+                    index = len(labels)
+                    labels.append((signature, angular_label, int(lr_index), int(tableau_index)))
+                    if local_index in angular_indices:
+                        generated_indices.append(index)
+                    else:
+                        primitive_indices.append(index)
+        sector_count += induction_multiplicity * local_copies
+        generated_rank += induction_multiplicity * angular_rank * specht_dim
+        generated_upper_bound += induction_multiplicity * local_copy_bound * specht_dim
+        blocks.append({
+            "subgroup_partitions": signature,
+            "subgroup_carrier_dim": carrier_dim,
+            "induction_multiplicity": induction_multiplicity,
+            "lr_chain_labels": lr_labels,
+            "angular_basis_labels": angular_labels,
+            "angular_generated_matrix": angular_generated,
+            "angular_generated_indices": angular_indices,
+            "angular_primitive_indices": tuple(index for index in range(local_copies) if index not in angular_indices),
+            "angular_target_rank": local_copies,
+            "angular_generated_rank": angular_rank,
+            "angular_product_path_count": int(local.product_path_count),
+            "local_codepath": local.codepath,
+            "local_basis_convention": local.basis_convention,
+            "young_map_compiler": "young_orthogonal_nary_subduction",
+        })
+
+    expected_count = _global_sector_count_by_character(nin, lin, tuple(target.parts), int(L_R))
+    if sector_count != expected_count:
+        raise ArithmeticError(
+            f"Induced quotient has {sector_count} global multiplicity copies; "
+            f"the independent global character trace reports {expected_count}."
+        )
+    if len(labels) != sector_count * specht_dim:
+        raise ArithmeticError("The global quotient basis size disagrees with its Young multiplicity.")
+    return YoungResolvedPrimitiveQuotient(
+        nin=nin, lin=lin, channel_multiset=_channel_multiset(nin, lin),
+        permutation_irrep=None, L_R=int(L_R), mode=str(mode),
+        max_factor_L=max_factor_L, sector_count=sector_count,
+        sector_basis_rank=len(labels), primitive_rank=len(primitive_indices),
+        generated_rank=int(generated_rank),
+        generated_basis_indices=tuple(generated_indices),
+        primitive_basis_indices=tuple(primitive_indices),
+        target_basis_labels=tuple(labels),
+        generated_upper_bound=int(generated_upper_bound),
+        primitive_lower_bound=max(0, len(labels) - int(generated_upper_bound)),
+        product_path_count=int(generated_upper_bound), rank_status="exact",
+        provenance="global_character_trace_x_exact_local_product_images_x_young_induction",
+        codepath="global_fixed_content_primitive_quotient",
+        detail=(
+            "Exact full-S_N fixed-content quotient: every retained G_nu product "
+            "image is induced over its content orbit and resolved by n-ary LR. "
+            "Block matrices carry exact local multiplicity-space images; "
+            "induction_map(subgroup_partitions) compiles the Young coefficients on demand."
+        ),
+        quotient=None, factor_scope=factor_scope,
+        allowed_factor_partitions_by_rank=partition_policy,
+        factor_route_name=factor_route_name, factor_route_policy=factor_route_policy,
+        basis_convention="local_multiplicity_x_induced_Young_LR",
+        global_partition=tuple(int(part) for part in target.parts),
+        factorized_blocks=tuple(blocks),
+    )
+
+
+def young_resolved_primitive_quotient(
+    nin, lin, permutation_irrep, L_R, mode="full", count_only=False,
+    max_factor_L=None, allowed_factor_partitions_by_rank=None,
+    factor_route_filter=None, factor_route_name=None, factor_scope="immediate",
+    factor_route_policy="all", global_partition=None,
+):
     """Return the exact Young/SO(3)-resolved primitive quotient for one sector.
 
-    The quotient is computed in the canonical highest-weight basis of the joint
-    ``SO(3) x G_nu`` sector.  For the totally symmetric Young sector this
-    reduces to the existing ACE primitive quotient.  For sign or mixed Specht
-    sectors, lower-generated products are assembled with exact generalized
-    Young/SO(3) tensor-product intertwiners.
+    The default quotient uses the canonical highest-weight basis of the joint
+    ``SO(3) x G_nu`` sector. With the default full policy, the totally
+    symmetric Young sector reduces to the existing ACE primitive quotient.
+    For sign or mixed Specht sectors, lower-generated products are assembled
+    with exact generalized
+    Young/SO(3) tensor-product intertwiners. Child partition allowlists use
+    full repeated-content subgroup signatures; a flat partition is accepted
+    for a homogeneous child. ``factor_route_filter`` receives the left/right
+    child content, Young irreps, angular momenta, and target sector as named
+    arguments. It selects child pairs before exact multiplicity branches and
+    requires a stable ``factor_route_name`` for reporting. Filtered calls
+    bypass the global generated-column caches.
+
+    ``factor_route_policy='matched_pairs'`` restricts a recursive construction
+    to equal-content rank-one pairs followed by merges of even-rank children.
+    Three distinct two-slot content blocks use exact three-spin CG recoupling
+    as an optional local fast path. ``global_partition`` induces every local
+    subgroup product image over the complete content orbit at any input rank
+    and returns the selected full S_N Young sector. In this mode pass
+    ``permutation_irrep=None``. Compact blocks hold exact multiplicity-space
+    product-image columns and n-ary LR lift labels; ``induction_map`` compiles
+    a selected Young coefficient table on demand.
+
+    Other exact local images use cached homogeneous Young carriers and CG
+    coupling, with sparse magnetic overlaps in a common parent basis. This
+    avoids constructing full ambient Young projectors. The small three-pair
+    recoupling path remains a specialized exact fast path.
+
+    ``factor_scope='immediate'`` takes complete exact child sectors.
+    ``factor_scope='recursive'`` retains only child directions generated from
+    rank-one sectors under the same policy; it does not add higher-rank
+    primitive directions to those children. Stabilizer-sector count-only
+    reports remain upper bounds and do not compute recursive child images;
+    global-partition calls require an exact quotient. Both policies concern
+    abstract fixed-content tensor products; no physical cluster-placement
+    or graph-automorphism map is inferred. Quotient basis indices select
+    coordinate representatives, not an orthogonal complement.
     """
 
     nin, lin = _normalize_nl(nin, lin)
     max_factor_L = _normalize_max_factor_L(max_factor_L)
+    if str(mode) not in {"invariant", "module", "full"}:
+        raise ValueError("mode must be one of {'invariant', 'module', 'full'}")
+    partition_policy = _normalize_factor_partition_policy(allowed_factor_partitions_by_rank)
+    factor_scope = str(factor_scope)
+    factor_route_policy = str(factor_route_policy)
+    if factor_scope not in {"immediate", "recursive"}:
+        raise ValueError("factor_scope must be 'immediate' or 'recursive'.")
+    if factor_route_policy not in {"all", "matched_pairs"}:
+        raise ValueError("factor_route_policy must be 'all' or 'matched_pairs'.")
+    if factor_route_filter is not None and not callable(factor_route_filter):
+        raise ValueError("factor_route_filter must be callable or None.")
+    if factor_route_filter is not None and not str(factor_route_name or "").strip():
+        raise ValueError("factor_route_name is required with factor_route_filter.")
+    if factor_route_filter is None and factor_route_name is not None:
+        raise ValueError("factor_route_name requires factor_route_filter.")
+    use_factorized = (
+        not bool(count_only)
+        and (
+            max_factor_L is not None or partition_policy or factor_route_filter is not None
+            or factor_scope == "recursive" or factor_route_policy != "all"
+            or (isinstance(permutation_irrep, PermutationIrrep) and not permutation_irrep.is_totally_symmetric())
+        )
+    )
+    if global_partition is not None:
+        if permutation_irrep is not None:
+            raise ValueError("Pass permutation_irrep=None when selecting a full global S_N partition.")
+        if bool(count_only):
+            raise ValueError("The exact global quotient requires count_only=False.")
+        return _global_fixed_content_primitive_quotient(
+            nin, lin, global_partition, int(L_R), str(mode), max_factor_L,
+            partition_policy, factor_scope, factor_route_policy,
+            factor_route_filter, factor_route_name,
+        )
+    policy_fields = {
+        "factor_scope": factor_scope,
+        "allowed_factor_partitions_by_rank": partition_policy,
+        "factor_route_name": factor_route_name,
+        "factor_route_policy": factor_route_policy,
+        "basis_convention": (
+            "character_count_no_basis" if bool(count_only)
+            else "factorized_young_cg_gram" if use_factorized
+            else "canonical_projector_highest_weight"
+        ),
+    }
     if not isinstance(permutation_irrep, PermutationIrrep):
         permutation_irrep = permutation_irrep_for_character(nin, lin, permutation_irrep)
-    counts = generalized_sector_counts(nin, lin, permutation_irrep, count_only=bool(count_only))
+    if (
+        not bool(count_only) and str(mode) == "full"
+        and factor_scope == "recursive" and factor_route_policy == "matched_pairs"
+    ):
+        factorized = _factorized_three_pair_joint_quotient(
+            nin, lin, permutation_irrep, int(L_R), max_factor_L, partition_policy,
+            factor_route_filter=factor_route_filter, factor_route_name=factor_route_name,
+        )
+        if factorized is not None:
+            return factorized
+    if not permutation_irrep.is_totally_symmetric() and not bool(count_only):
+        use_factorized = True
+        policy_fields["basis_convention"] = "factorized_young_cg_gram"
+    counts = generalized_sector_counts(
+        nin, lin, permutation_irrep,
+        count_only=bool(count_only) or use_factorized,
+    )
     sector_count = int(counts.counts_by_L.get(int(L_R), 0))
     target_sector = counts.sector
-    target_basis_labels = tuple() if target_sector is None else _highest_weight_basis_labels(target_sector, int(L_R))
-    sector_basis_rank = int(sector_count) if target_sector is None else len(target_basis_labels)
+    if use_factorized:
+        carrier_indices = tuple(product(*(
+            range(int(partition.dimension)) for partition in permutation_irrep.partitions
+        )))
+        target_basis_labels = tuple(
+            (copy_index, carrier_index)
+            for copy_index in range(sector_count)
+            for carrier_index in carrier_indices
+        )
+    elif not bool(count_only):
+        target_basis_labels = tuple(
+            _exact_product_expansion_engine().feature_space(nin, lin, int(L_R)).labels
+        )
+        policy_fields["basis_convention"] = "ace_compact_tree_highest_weight"
+    else:
+        target_basis_labels = tuple() if target_sector is None else _highest_weight_basis_labels(target_sector, int(L_R))
+    sector_basis_rank = int(sector_count) * int(permutation_irrep.dim) if target_sector is None else len(target_basis_labels)
     if sector_basis_rank == 0:
         return YoungResolvedPrimitiveQuotient(
             nin=nin,
@@ -1881,6 +2889,7 @@ def young_resolved_primitive_quotient(nin, lin, permutation_irrep, L_R, mode="fu
             codepath=counts.codepath,
             detail="Target Young/SO(3) sector is empty.",
             quotient=None,
+            **policy_fields,
         )
     generated_upper_bound, product_path_count = _young_generated_upper_bound(
         nin,
@@ -1890,6 +2899,9 @@ def young_resolved_primitive_quotient(nin, lin, permutation_irrep, L_R, mode="fu
         str(mode),
         int(sector_basis_rank),
         max_factor_L=max_factor_L,
+        partition_policy=partition_policy,
+        factor_route_policy=factor_route_policy,
+        factor_route_filter=factor_route_filter,
     )
     primitive_lower_bound = max(0, int(sector_basis_rank) - int(generated_upper_bound))
     if bool(count_only):
@@ -1917,6 +2929,7 @@ def young_resolved_primitive_quotient(nin, lin, permutation_irrep, L_R, mode="fu
             codepath="count_only_young_so3_primitive_bound",
             detail="Count-only generated-rank upper bound; exact product coordinate maps were not built.",
             quotient=None,
+            **policy_fields,
         )
     if int(generated_upper_bound) == 0:
         return YoungResolvedPrimitiveQuotient(
@@ -1942,9 +2955,22 @@ def young_resolved_primitive_quotient(nin, lin, permutation_irrep, L_R, mode="fu
             codepath="count_only_young_so3_primitive_bound",
             detail="No compatible lower-generated product paths exist, so the whole sector is primitive.",
             quotient=None,
+            **policy_fields,
         )
-    if max_factor_L is not None or not permutation_irrep.is_totally_symmetric():
-        generated = _young_generated_columns(nin, lin, permutation_irrep, int(L_R), str(mode), max_factor_L=max_factor_L)
+    if use_factorized:
+        generated = _young_generated_columns(
+            nin, lin, permutation_irrep, int(L_R), str(mode),
+            max_factor_L=max_factor_L, partition_policy=partition_policy,
+            factor_scope=factor_scope, factor_route_policy=factor_route_policy,
+            factor_route_filter=factor_route_filter,
+        )
+        from .factorized_product_images import factorized_requested_sector
+
+        actual_labels = factorized_requested_sector(
+            nin, lin, _permutation_irrep_signature(permutation_irrep), int(L_R),
+        ).basis_labels
+        if actual_labels != target_basis_labels:
+            raise ArithmeticError("Factorized quotient labels disagree with the exact parent basis.")
         if generated.cols == 0:
             generated_rank = 0
             generated_basis_indices = tuple()
@@ -1972,12 +2998,16 @@ def young_resolved_primitive_quotient(nin, lin, permutation_irrep, L_R, mode="fu
             primitive_lower_bound=int(primitive_lower_bound),
             product_path_count=int(product_path_count),
             rank_status="exact",
-            provenance="exact_projector" if counts.provenance != "cached" else "cached",
-            codepath="symbolic_young_so3_primitive_quotient",
-            detail="Exact quotient in the resolved Young/SO(3) highest-weight basis.",
+            provenance="exact_factorized_young_cg_overlap",
+            codepath="factorized_young_so3_primitive_quotient",
+            detail="Exact quotient in the factorized Young/SO(3) highest-weight basis.",
             quotient=generated,
+            **policy_fields,
         )
     quotient = _exact_product_expansion_engine().primitive_quotient(nin, lin, int(L_R), mode=str(mode))
+    if len(quotient.target_space.labels) != int(sector_basis_rank):
+        raise ArithmeticError("The exact ACE target basis disagrees with the Young-sector dimension.")
+    policy_fields["basis_convention"] = "ace_compact_tree_highest_weight"
     return YoungResolvedPrimitiveQuotient(
         nin=nin,
         lin=lin,
@@ -1992,7 +3022,7 @@ def young_resolved_primitive_quotient(nin, lin, permutation_irrep, L_R, mode="fu
         generated_rank=int(quotient.generated_rank),
         generated_basis_indices=tuple(int(x) for x in quotient.generated_basis_indices),
         primitive_basis_indices=tuple(int(x) for x in quotient.primitive_basis_indices),
-        target_basis_labels=target_basis_labels,
+        target_basis_labels=tuple(quotient.target_space.labels),
         generated_upper_bound=int(generated_upper_bound),
         primitive_lower_bound=int(primitive_lower_bound),
         product_path_count=int(product_path_count),
@@ -2001,6 +3031,7 @@ def young_resolved_primitive_quotient(nin, lin, permutation_irrep, L_R, mode="fu
         codepath="ace_trivial_primitive_quotient",
         detail="Trivial Young sector delegates to the existing ACE/ye3t primitive quotient.",
         quotient=quotient,
+        **policy_fields,
     )
 
 
@@ -2024,16 +3055,63 @@ def validate_young_resolved_primitive_quotient(quotient):
     index_partition = (
         set(generated_indices).isdisjoint(primitive_indices)
         and set(generated_indices) | set(primitive_indices) == target_indices
+        and len(set(generated_indices)) == len(generated_indices) == int(quotient.generated_rank)
+        and len(set(primitive_indices)) == len(primitive_indices) == int(quotient.primitive_rank)
     )
     generated_rank_matches_matrix = True
-    if quotient.codepath == "symbolic_young_so3_primitive_quotient" and quotient.quotient is not None:
+    if quotient.codepath in {
+        "symbolic_young_so3_primitive_quotient",
+        "factorized_young_so3_primitive_quotient",
+        "factorized_three_pair_joint_primitive_quotient",
+    } and quotient.quotient is not None:
         native_rank = _native_algebraic_rank_or_none(quotient.quotient)
         if native_rank is None:
             native_rank = int(_sympy().Matrix(quotient.quotient).rank(simplify=False))
         generated_rank_matches_matrix = int(native_rank) == int(quotient.generated_rank)
+        if quotient.codepath == "factorized_young_so3_primitive_quotient":
+            generated_rank_matches_matrix = bool(
+                generated_rank_matches_matrix
+                and len(quotient.target_basis_labels) == int(quotient.sector_basis_rank)
+                and quotient.basis_convention == "factorized_young_cg_gram"
+            )
+        if quotient.codepath == "factorized_three_pair_joint_primitive_quotient":
+            matrix = _sympy().Matrix(quotient.quotient)
+            generated_rank_matches_matrix = bool(
+                generated_rank_matches_matrix
+                and len(quotient.target_basis_labels) == int(quotient.sector_basis_rank)
+                and quotient.basis_convention == "factorized_three_pair_recoupled_cg"
+            )
+    if quotient.codepath == "global_fixed_content_primitive_quotient":
+        global_rank = 0
+        global_size = 0
+        specht_dim = int(Partition(quotient.global_partition).dimension)
+        for block in quotient.factorized_blocks:
+            matrix = _sympy().Matrix(block["angular_generated_matrix"])
+            local_rank = _native_algebraic_rank_or_none(matrix)
+            if local_rank is None:
+                local_rank = int(matrix.rank(simplify=False))
+            generated_rank_matches_matrix = bool(
+                generated_rank_matches_matrix
+                and int(local_rank) == int(block["angular_generated_rank"])
+                and matrix.rows == int(block["angular_target_rank"])
+                and len(block["lr_chain_labels"]) == int(block["induction_multiplicity"])
+            )
+            global_rank += int(local_rank) * int(block["induction_multiplicity"]) * specht_dim
+            global_size += int(block["angular_target_rank"]) * int(block["induction_multiplicity"]) * specht_dim
+        generated_rank_matches_matrix = bool(
+            generated_rank_matches_matrix
+            and global_rank == int(quotient.generated_rank)
+            and global_size == int(quotient.sector_basis_rank)
+        )
     trivial_matches_ace = None
-    if quotient.permutation_irrep.is_totally_symmetric():
-        if quotient.max_factor_L is None:
+    if quotient.permutation_irrep is not None and quotient.permutation_irrep.is_totally_symmetric():
+        if (
+            quotient.max_factor_L is None
+            and quotient.factor_scope == "immediate"
+            and quotient.factor_route_policy == "all"
+            and not quotient.allowed_factor_partitions_by_rank
+            and quotient.factor_route_name is None
+        ):
             ace = _exact_product_expansion_engine().primitive_quotient(
                 tuple(quotient.nin),
                 tuple(quotient.lin),

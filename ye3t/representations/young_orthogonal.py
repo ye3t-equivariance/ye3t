@@ -611,8 +611,18 @@ def young_induced_multiplicity_by_character(left_partition, right_partition, tar
 def young_nary_induced_multiplicity_by_character(subgroup_partitions, target_partition):
     """Return the exact character multiplicity for an n-ary Young subgroup."""
 
-    subgroup_partitions = tuple(_coerce_partition(partition) for partition in subgroup_partitions)
-    target_partition = _coerce_partition(target_partition)
+    return _young_nary_induced_multiplicity_by_character_cached(
+        tuple(tuple(_coerce_partition(partition).parts) for partition in subgroup_partitions),
+        tuple(_coerce_partition(target_partition).parts),
+    )
+
+
+@lru_cache(maxsize=8192)
+def _young_nary_induced_multiplicity_by_character_cached(subgroup_parts, target_parts):
+    """Evaluate one normalized Young-subgroup character inner product."""
+
+    subgroup_partitions = tuple(Partition(parts) for parts in subgroup_parts)
+    target_partition = Partition(target_parts)
     block_sizes = tuple(int(partition.size) for partition in subgroup_partitions)
     if sum(block_sizes) != int(target_partition.size):
         return 0

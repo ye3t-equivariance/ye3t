@@ -173,6 +173,7 @@ from .representations.young_sectors import (
     young_product_paths,
     young_resolved_primitive_quotient,
 )
+from .representations.fixed_content_basis import YE3TFixedContentBasis
 from .representations.young_orthogonal import (
     ReducedMultiplicityInnerProduct,
     YoungInducedBasisEntry,
@@ -539,6 +540,7 @@ __all__ = [
     "YoungOrthogonalValidationSuiteReport",
     "YoungResolvedPrimitiveQuotient",
     "YoungResolvedPrimitiveQuotientValidation",
+    "YE3TFixedContentBasis",
     "YoungSectorCounts",
     "generalized_sector_counts",
     "permutation_irrep_for_character",

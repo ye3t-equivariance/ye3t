@@ -270,11 +270,16 @@ def test_symmetric_power_kernels_example_runs():
 
 def test_exact_full_primitive_catalog_example_runs():
     stdout = run_example_workflow("exact_full_primitive_catalog.py", None)
-    assert "rank-2 scalar basis dimension" in stdout
-    assert "rank-2 invariant primitive quotient" in stdout
-    assert "rank-3 mixed equivariant-module primitive quotient" in stdout
-    assert "primitive basis label" in stdout
-    assert "reconstructed rank" in stdout
+    assert "representations:" in stdout
+    assert "basis: YE3TExactBasis(full:" in stdout
+    assert "S4(3, 1), L=1, child L cap=2: 5 copies" in stdout
+    assert "G6((1, 1), (1, 1), (2,)), L=1, child L cap=3: 2 copies" in stdout
+    assert "S6(3, 2, 1), L=1, child L cap=3: 82 copies" in stdout
+    assert "S6(3, 2, 1), L=1, child L cap=4: 180 copies" in stdout
+    assert "S16(15, 1), L=1, child L cap=0: 1 copy" in stdout
+    assert "primitive basis: YE3TExactBasis(primitive:" in stdout
+    assert "decomposable basis: YE3TExactBasis(decomposable:" in stdout
+    assert "one normalized primitive vector: YE3TExactVector(rank=6, scope=local" in stdout
 
 
 def test_coupling_multiplicity_counts_example_runs():

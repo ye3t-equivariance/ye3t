@@ -286,8 +286,8 @@ def test_public_young_sector_helpers_report_provenance():
     assert validate_young_resolved_primitive_quotient(trivial_quotient).passed
 
     sign_quotient = young_resolved_primitive_quotient((1, 1), (1, 1), sign, 1, mode="full")
-    assert sign_quotient.provenance in {"exact_projector", "cached"}
-    assert sign_quotient.codepath == "symbolic_young_so3_primitive_quotient"
+    assert sign_quotient.provenance == "exact_factorized_young_cg_overlap"
+    assert sign_quotient.codepath == "factorized_young_so3_primitive_quotient"
     assert sign_quotient.sector_count == 1
     assert sign_quotient.sector_basis_rank == 1
     assert sign_quotient.generated_rank == 1
@@ -739,7 +739,7 @@ def test_specht_construction_plan_respects_dimension_caps_and_explicit_partition
     assert ((3, 1),) in explicit_signatures
 
 
-def test_symbolic_young_so3_primitive_quotient_handles_mixed_and_multichannel_sectors():
+def test_factorized_young_so3_primitive_quotient_handles_mixed_and_multichannel_sectors():
     from ye3t import (
         Partition,
         permutation_irrep_for_character,
@@ -750,7 +750,7 @@ def test_symbolic_young_so3_primitive_quotient_handles_mixed_and_multichannel_se
     mixed = permutation_irrep_for_character((1, 1, 1), (1, 1, 1), ((2, 1),))
     mixed_q = young_resolved_primitive_quotient((1, 1, 1), (1, 1, 1), mixed, 1, mode="full")
     assert mixed.partitions == (Partition((2, 1)),)
-    assert mixed_q.codepath == "symbolic_young_so3_primitive_quotient"
+    assert mixed_q.codepath == "factorized_young_so3_primitive_quotient"
     assert mixed_q.sector_count == 1
     assert mixed_q.sector_basis_rank == 2
     assert mixed_q.generated_rank == 2
@@ -764,6 +764,279 @@ def test_symbolic_young_so3_primitive_quotient_handles_mixed_and_multichannel_se
     assert multichannel_q.generated_rank == 1
     assert multichannel_q.primitive_rank == 0
     assert validate_young_resolved_primitive_quotient(multichannel_q).passed
+
+
+def test_factorized_local_product_image_matches_small_ambient_projector_and_young_orbit():
+    from sympy import Matrix, zeros
+
+    from ye3t import generalized_sector_counts, permutation_irrep_for_character
+    from ye3t.representations.factorized_product_images import (
+        _content_placement_and_subgroup_shuffles,
+        factorized_product_image,
+        factorized_requested_sector,
+    )
+    from ye3t.representations.young_sectors import _permutation_irrep_signature
+    from ye3t.representations.tensor_products import _coupled_highest_weight_basis_matrix
+    from ye3t.representations.projectors import permute_state_slots
+
+    left_nin, left_lin = (1,), (1,)
+    right_nin, right_lin = (1, 1), (1, 1)
+    target_nin, target_lin = (1, 1, 1), (1, 1, 1)
+    left_irrep = permutation_irrep_for_character(left_nin, left_lin, ((1,),))
+    right_irrep = permutation_irrep_for_character(right_nin, right_lin, ((2,),))
+    target_irrep = permutation_irrep_for_character(target_nin, target_lin, ((2, 1),))
+    left = factorized_requested_sector(left_nin, left_lin, _permutation_irrep_signature(left_irrep), 1)
+    right = factorized_requested_sector(right_nin, right_lin, _permutation_irrep_signature(right_irrep), 0)
+    target = factorized_requested_sector(target_nin, target_lin, _permutation_irrep_signature(target_irrep), 1)
+    coordinates, labels = factorized_product_image(left, right, target)
+    direct_coordinates, direct_labels = factorized_product_image(
+        left, right, target, coefficient_backend="direct_orbit",
+    )
+    assert direct_labels == labels
+    assert coordinates == direct_coordinates
+    assert len(labels) == 3
+    assert coordinates.rank() == 2
+
+    states = tuple((a, b, c) for a in range(-1, 2) for b in range(-1, 2) for c in range(-1, 2))
+    state_index = {state: index for index, state in enumerate(states)}
+    factor_basis = zeros(len(states), len(target.basis_labels))
+    for column, label in enumerate(target.basis_labels):
+        for state, value in target.highest_vectors[label].items():
+            factor_basis[state_index[state], column] = value._sympy_()
+    factor_image = factor_basis * coordinates
+
+    left_reference = generalized_sector_counts(left_nin, left_lin, left_irrep).sector
+    right_reference = generalized_sector_counts(right_nin, right_lin, right_irrep).sector
+    target_reference = generalized_sector_counts(target_nin, target_lin, target_irrep).sector
+    source, _ = _coupled_highest_weight_basis_matrix(
+        left_reference, right_reference, left_L=1, right_L=0, output_L=1,
+    )
+    _placement, shuffles = _content_placement_and_subgroup_shuffles(
+        left.content, right.content, target.content,
+    )
+    reference_columns = []
+    for shuffle in shuffles:
+        for column in range(source.cols):
+            placed = zeros(len(states), 1)
+            for row, state in enumerate(states):
+                placed[state_index[permute_state_slots(state, tuple(range(3)), shuffle)], 0] += source[row, column]
+            reference_columns.append(target_reference.projector_matrix * placed)
+    reference_image = Matrix.hstack(*reference_columns)
+    assert reference_image.rank() == factor_image.rank() == 2
+    assert Matrix.hstack(reference_image, factor_image).rank() == 2
+    assert target_reference.projector_matrix * factor_image == factor_image
+    for adjacent in ((1, 0, 2), (0, 2, 1)):
+        acted = zeros(len(states), factor_image.cols)
+        for row, state in enumerate(states):
+            acted[state_index[permute_state_slots(state, tuple(range(3)), adjacent)], :] = factor_image[row, :]
+        assert Matrix.hstack(factor_image, acted).rank() == 2
+
+
+@pytest.mark.parametrize("lin,right_partition,target_partition,left_L,right_L,output_L", (
+    ((2, 2, 2), (2,), (2, 1), 2, 0, 2),
+    ((1, 1, 1, 1), (2, 1), (2, 1, 1), 1, 1, 1),
+))
+def test_factorized_young_subduction_matches_direct_orbit_for_mixed_carriers(
+    lin, right_partition, target_partition, left_L, right_L, output_L,
+):
+    from ye3t import permutation_irrep_for_character
+    from ye3t.representations.factorized_product_images import (
+        factorized_product_image,
+        factorized_requested_sector,
+    )
+    from ye3t.representations.young_sectors import _permutation_irrep_signature
+
+    nin = (1,) * len(lin)
+    left_irrep = permutation_irrep_for_character(nin[:1], lin[:1], ((1,),))
+    right_irrep = permutation_irrep_for_character(nin[1:], lin[1:], (right_partition,))
+    target_irrep = permutation_irrep_for_character(nin, lin, (target_partition,))
+    left = factorized_requested_sector(nin[:1], lin[:1], _permutation_irrep_signature(left_irrep), left_L)
+    right = factorized_requested_sector(nin[1:], lin[1:], _permutation_irrep_signature(right_irrep), right_L)
+    target = factorized_requested_sector(nin, lin, _permutation_irrep_signature(target_irrep), output_L)
+    compiled, labels = factorized_product_image(left, right, target)
+    direct, direct_labels = factorized_product_image(
+        left, right, target, coefficient_backend="direct_orbit",
+    )
+    assert labels == direct_labels
+    assert compiled == direct
+    assert compiled.rank() > 0
+
+
+def test_local_factorized_subduction_resolves_repeated_lr_copies():
+    from sympy import eye
+
+    from ye3t import permutation_irrep_for_character
+    from ye3t.representations.factorized_product_images import _local_young_subduction_template
+    from ye3t.representations.young_sectors import _permutation_irrep_signature
+
+    left = permutation_irrep_for_character((1,) * 3, (1,) * 3, ((2, 1),))
+    right = permutation_irrep_for_character((1,) * 3, (1,) * 3, ((2, 1),))
+    target = permutation_irrep_for_character((1,) * 6, (1,) * 6, ((3, 2, 1),))
+    _rows, matrices, left_inverse = _local_young_subduction_template(
+        _permutation_irrep_signature(left),
+        _permutation_irrep_signature(right),
+        _permutation_irrep_signature(target),
+    )
+    assert len(matrices) == 20
+    assert matrices[0].cols == 2
+    assert left_inverse * matrices[0] == eye(2)
+
+
+def test_local_factorized_product_map_with_two_lr_copies_matches_direct_orbit():
+    from ye3t import permutation_irrep_for_character
+    from ye3t.representations.factorized_product_images import (
+        factorized_product_image,
+        factorized_requested_sector,
+    )
+    from ye3t.representations.young_sectors import _permutation_irrep_signature
+
+    child_irrep = permutation_irrep_for_character((1,) * 3, (1,) * 3, ((2, 1),))
+    target_irrep = permutation_irrep_for_character((1,) * 6, (1,) * 6, ((3, 2, 1),))
+    child = factorized_requested_sector((1,) * 3, (1,) * 3, _permutation_irrep_signature(child_irrep), 1)
+    target = factorized_requested_sector((1,) * 6, (1,) * 6, _permutation_irrep_signature(target_irrep), 1)
+    compiled, labels = factorized_product_image(child, child, target)
+    direct, direct_labels = factorized_product_image(
+        child, child, target, coefficient_backend="direct_orbit",
+    )
+    assert labels == direct_labels
+    assert len(labels) == 20 * len(child.basis_labels) ** 2
+    assert compiled == direct
+    assert compiled.rank() > 0
+
+
+def test_factorized_subduction_tensorizes_two_split_content_blocks():
+    from ye3t import permutation_irrep_for_character
+    from ye3t.representations.factorized_product_images import (
+        factorized_product_image,
+        factorized_requested_sector,
+    )
+    from ye3t.representations.young_sectors import _permutation_irrep_signature
+
+    child_nin, child_lin = (1, 2), (1, 1)
+    parent_nin, parent_lin = (1, 1, 2, 2), (1, 1, 1, 1)
+    child_irrep = permutation_irrep_for_character(child_nin, child_lin, ((1,), (1,)))
+    parent_irrep = permutation_irrep_for_character(parent_nin, parent_lin, ((2,), (1, 1)))
+    left = factorized_requested_sector(child_nin, child_lin, _permutation_irrep_signature(child_irrep), 0)
+    right = factorized_requested_sector(child_nin, child_lin, _permutation_irrep_signature(child_irrep), 1)
+    parent = factorized_requested_sector(parent_nin, parent_lin, _permutation_irrep_signature(parent_irrep), 1)
+    compiled, labels = factorized_product_image(left, right, parent)
+    direct, direct_labels = factorized_product_image(
+        left, right, parent, coefficient_backend="direct_orbit",
+    )
+    assert len(labels) == 4
+    assert labels == direct_labels
+    assert compiled == direct
+    assert compiled.rank() > 0
+
+
+def test_reduced_product_map_recouples_three_split_content_blocks_exactly():
+    from ye3t import permutation_irrep_for_character
+    from ye3t.representations.factorized_product_images import (
+        factorized_product_image,
+        factorized_requested_sector,
+    )
+    from ye3t.representations.young_sectors import _permutation_irrep_signature
+
+    child_nin, child_lin = (1, 2, 3), (1, 1, 1)
+    parent_nin, parent_lin = (1, 1, 2, 2, 3, 3), (1,) * 6
+    child_irrep = permutation_irrep_for_character(child_nin, child_lin, ((1,),) * 3)
+    parent_irrep = permutation_irrep_for_character(parent_nin, parent_lin, ((2,),) * 3)
+    child = factorized_requested_sector(
+        child_nin, child_lin, _permutation_irrep_signature(child_irrep), 1,
+    )
+    parent = factorized_requested_sector(
+        parent_nin, parent_lin, _permutation_irrep_signature(parent_irrep), 1,
+    )
+    compiled, labels = factorized_product_image(child, child, parent)
+    reference, reference_labels = factorized_product_image(
+        child, child, parent, coefficient_backend="direct_orbit",
+    )
+    assert labels == reference_labels
+    assert compiled == reference
+    assert compiled.rank() > 0
+
+
+def test_reduced_product_map_resolves_mixed_young_carrier_and_angular_tree():
+    from ye3t import permutation_irrep_for_character
+    from ye3t.representations.factorized_product_images import (
+        factorized_product_image,
+        factorized_requested_sector,
+    )
+    from ye3t.representations.young_sectors import _permutation_irrep_signature
+
+    left_nin, left_lin = (1, 2), (1, 1)
+    right_nin, right_lin = (1, 1, 2), (1, 1, 1)
+    parent_nin, parent_lin = (1, 1, 1, 2, 2), (1,) * 5
+    left_irrep = permutation_irrep_for_character(left_nin, left_lin, ((1,), (1,)))
+    right_irrep = permutation_irrep_for_character(right_nin, right_lin, ((2,), (1,)))
+    parent_irrep = permutation_irrep_for_character(parent_nin, parent_lin, ((2, 1), (2,)))
+    left = factorized_requested_sector(
+        left_nin, left_lin, _permutation_irrep_signature(left_irrep), 0,
+    )
+    right = factorized_requested_sector(
+        right_nin, right_lin, _permutation_irrep_signature(right_irrep), 1,
+    )
+    parent = factorized_requested_sector(
+        parent_nin, parent_lin, _permutation_irrep_signature(parent_irrep), 1,
+    )
+    compiled, labels = factorized_product_image(left, right, parent)
+    reference, reference_labels = factorized_product_image(
+        left, right, parent, coefficient_backend="direct_orbit",
+    )
+    assert labels == reference_labels
+    assert compiled == reference
+    assert compiled.rank() > 0
+
+
+def test_reduced_product_map_handles_eight_blocks_at_rank16():
+    from ye3t import permutation_irrep_for_character
+    from ye3t.representations.factorized_product_images import (
+        factorized_product_image,
+        factorized_requested_sector,
+    )
+    from ye3t.representations.young_sectors import _permutation_irrep_signature
+
+    nin = tuple(channel for channel in range(1, 9) for _ in range(2))
+    lin = (1, 1) + (0,) * 14
+    left_irrep = permutation_irrep_for_character(
+        nin[:8], lin[:8], ((1, 1), (2,), (2,), (2,)),
+    )
+    right_irrep = permutation_irrep_for_character(
+        nin[8:], lin[8:], ((2,),) * 4,
+    )
+    parent_irrep = permutation_irrep_for_character(
+        nin, lin, ((1, 1),) + ((2,),) * 7,
+    )
+    left = factorized_requested_sector(nin[:8], lin[:8], _permutation_irrep_signature(left_irrep), 1)
+    right = factorized_requested_sector(nin[8:], lin[8:], _permutation_irrep_signature(right_irrep), 0)
+    parent = factorized_requested_sector(nin, lin, _permutation_irrep_signature(parent_irrep), 1)
+    compiled, labels = factorized_product_image(left, right, parent)
+    reference, reference_labels = factorized_product_image(
+        left, right, parent, coefficient_backend="direct_orbit",
+    )
+    assert labels == reference_labels
+    assert compiled == reference
+    assert compiled.rank() == 1
+
+
+@pytest.mark.parametrize("nin,lin,partition,output_L", (
+    ((1, 1, 1), (2, 2, 2), (2, 1), 2),
+    ((1, 1, 1, 1), (1, 1, 1, 1), (2, 1, 1), 1),
+))
+def test_factorized_mixed_high_angular_sector_avoids_ambient_projector(nin, lin, partition, output_L):
+    from ye3t import generalized_sector_counts, permutation_irrep_for_character, young_resolved_primitive_quotient
+    from ye3t.representations.factorized_product_images import factorized_requested_sector
+    from ye3t.representations.young_sectors import _permutation_irrep_signature
+
+    irrep = permutation_irrep_for_character(nin, lin, (partition,))
+    counts = generalized_sector_counts(nin, lin, irrep, count_only=True)
+    sector = factorized_requested_sector(nin, lin, _permutation_irrep_signature(irrep), output_L)
+    assert len(sector.basis_labels) == int(irrep.dim) * counts.counts_by_L[output_L]
+    assert sector.gram_inverse.rows == len(sector.basis_labels)
+    quotient = young_resolved_primitive_quotient(nin, lin, irrep, output_L, mode="full", max_factor_L=2)
+    assert quotient.codepath == "factorized_young_so3_primitive_quotient"
+    assert quotient.sector_basis_rank == len(sector.basis_labels)
+    assert quotient.generated_rank + quotient.primitive_rank == quotient.sector_basis_rank
 
 
 def test_young_resolved_primitive_quotient_count_only_bounds_repeated_blocks():
@@ -783,7 +1056,7 @@ def test_young_resolved_primitive_quotient_count_only_bounds_repeated_blocks():
     bounded = young_resolved_primitive_quotient((1, 1, 1, 1), (1, 1, 1, 1), mixed, 0, mode="full", count_only=True)
     assert bounded.codepath == "count_only_young_so3_primitive_bound"
     assert bounded.rank_status == "bounded"
-    assert bounded.sector_basis_rank == 1
+    assert bounded.sector_basis_rank == 2
     assert bounded.generated_rank is None
     assert bounded.primitive_rank is None
     assert bounded.generated_upper_bound >= bounded.sector_basis_rank
@@ -793,7 +1066,7 @@ def test_young_resolved_primitive_quotient_count_only_bounds_repeated_blocks():
     high_l = permutation_irrep_for_character((1, 1, 1, 1), (3, 3, 3, 3), ((2, 2),))
     high_l_bound = young_resolved_primitive_quotient((1, 1, 1, 1), (3, 3, 3, 3), high_l, 10, mode="full", count_only=True)
     assert high_l_bound.codepath == "count_only_young_so3_primitive_bound"
-    assert high_l_bound.sector_basis_rank == 1
+    assert high_l_bound.sector_basis_rank == 2
     assert high_l_bound.generated_upper_bound > 0
 
 
@@ -830,6 +1103,848 @@ def test_count_only_full_mode_can_cap_lower_factor_angular_momenta():
     assert uncapped.generated_upper_bound > capped.generated_upper_bound
     assert capped.primitive_lower_bound >= uncapped.primitive_lower_bound
     assert capped.product_path_count == capped.generated_upper_bound
+
+
+def test_exact_young_primitive_policy_filters_both_child_types_and_combined_images():
+    from sympy import Matrix, eye, zeros
+
+    from ye3t import (
+        permutation_irrep_for_character,
+        validate_young_resolved_primitive_quotient,
+        young_resolved_primitive_quotient,
+    )
+
+    nin = (1, 1, 1)
+    lin = (1, 1, 1)
+    target = permutation_irrep_for_character(nin, lin, ((2, 1),))
+    full = young_resolved_primitive_quotient(nin, lin, target, 1, mode="full")
+    capped_L = young_resolved_primitive_quotient(nin, lin, target, 1, mode="full", max_factor_L=0)
+    symmetric_child = young_resolved_primitive_quotient(
+        nin, lin, target, 1, mode="full",
+        allowed_factor_partitions_by_rank={2: ((2,),)},
+    )
+
+    def rank_two_joint_scalar(**route):
+        return any(
+            len(route[side + "_nin"]) == 2
+            and route[side + "_L"] == 0
+            and route[side + "_permutation"].is_totally_symmetric()
+            for side in ("left", "right")
+        )
+
+    selected = young_resolved_primitive_quotient(
+        nin, lin, target, 1, mode="full",
+        factor_route_filter=rank_two_joint_scalar,
+        factor_route_name="rank_two_joint_scalar_test",
+    )
+    # One selected S2 x S1 split induces its complete S3 shuffle orbit.
+    assert (full.generated_rank, capped_L.generated_rank, symmetric_child.generated_rank, selected.generated_rank) == (2, 0, 2, 2)
+    assert all(validate_young_resolved_primitive_quotient(item).passed for item in (full, capped_L, symmetric_child, selected))
+    for restricted in (capped_L, symmetric_child, selected):
+        columns = restricted.quotient if restricted.quotient is not None else zeros(restricted.sector_basis_rank, 0)
+        combined = Matrix.hstack(full.quotient, columns)
+        assert combined.rank() == full.generated_rank
+        representatives = eye(restricted.sector_basis_rank)[:, restricted.primitive_basis_indices]
+        assert Matrix.hstack(columns, representatives).rank() == restricted.sector_basis_rank
+
+
+def test_recursive_young_factor_policy_uses_retained_child_image():
+    from ye3t import permutation_irrep_for_character, young_resolved_primitive_quotient
+
+    nin = (1, 1, 1, 1)
+    lin = (1, 1, 1, 0)
+    target = permutation_irrep_for_character(nin, lin, ((1, 1, 1), (1,)))
+    immediate = young_resolved_primitive_quotient(
+        nin, lin, target, 0, mode="full", max_factor_L=0,
+        factor_scope="immediate",
+    )
+    recursive = young_resolved_primitive_quotient(
+        nin, lin, target, 0, mode="full", max_factor_L=0,
+        factor_scope="recursive",
+    )
+    assert immediate.sector_basis_rank == 1
+    assert immediate.generated_rank == 1
+    assert recursive.generated_rank == 0
+    assert recursive.primitive_rank == 1
+
+
+def test_exact_rank_six_three_pair_factorization_respects_child_young_limit():
+    from ye3t import (
+        permutation_irrep_for_character,
+        validate_young_resolved_primitive_quotient,
+        young_resolved_primitive_quotient,
+    )
+
+    seen_splits = set()
+
+    def three_matched_pairs(**route):
+        left = tuple(zip(route["left_nin"], route["left_lin"]))
+        right = tuple(zip(route["right_nin"], route["right_lin"]))
+        rank = len(left) + len(right)
+        seen_splits.add((rank, *sorted((len(left), len(right)))))
+        if rank == 2:
+            return len(left) == len(right) == 1 and left[0] == right[0]
+        return (rank == 4 and len(left) == len(right) == 2) or (
+            rank == 6 and sorted((len(left), len(right))) == [2, 4]
+        )
+
+    nin = (1,) * 6
+    lin = (0, 0, 0, 0, 1, 1)
+    target = permutation_irrep_for_character(nin, lin, ((4,), (1, 1)))
+    request = {
+        "mode": "full", "max_factor_L": 1, "factor_scope": "recursive",
+        "factor_route_filter": three_matched_pairs,
+        "factor_route_name": "three_matched_pairs_test",
+    }
+    complete = young_resolved_primitive_quotient(nin, lin, target, 1, **request)
+    structured = young_resolved_primitive_quotient(
+        nin, lin, target, 1, mode="full", max_factor_L=1,
+        factor_scope="recursive", factor_route_policy="matched_pairs",
+    )
+    restricted = young_resolved_primitive_quotient(
+        nin, lin, target, 1,
+        allowed_factor_partitions_by_rank={2: ((2,),)}, **request,
+    )
+    assert complete.sector_basis_rank == 1
+    assert complete.generated_rank == 1
+    assert structured.codepath == "factorized_young_so3_primitive_quotient"
+    assert structured.generated_rank == complete.generated_rank
+    assert restricted.generated_rank == 0
+    assert restricted.primitive_rank == 1
+    assert {(2, 1, 1), (4, 2, 2), (6, 2, 4)} <= seen_splits
+    assert validate_young_resolved_primitive_quotient(complete).passed
+    assert validate_young_resolved_primitive_quotient(structured).passed
+    assert validate_young_resolved_primitive_quotient(restricted).passed
+
+
+def test_factorized_three_pair_scalar_quotient_is_exact_for_high_angular_content():
+    from sympy import eye
+
+    from ye3t import (
+        permutation_irrep_for_character,
+        validate_young_resolved_primitive_quotient,
+        young_resolved_primitive_quotient,
+    )
+
+    nin = (1,) * 6
+    lin = (1, 1, 2, 2, 3, 3)
+    target = permutation_irrep_for_character(nin, lin, ((1, 1), (1, 1), (2,)))
+    request = {"mode": "full", "factor_scope": "recursive", "factor_route_policy": "matched_pairs"}
+    too_small = young_resolved_primitive_quotient(nin, lin, target, 0, max_factor_L=2, **request)
+    capped = young_resolved_primitive_quotient(nin, lin, target, 0, max_factor_L=3, **request)
+    complete = young_resolved_primitive_quotient(nin, lin, target, 0, max_factor_L=4, **request)
+    symmetric_pairs = young_resolved_primitive_quotient(
+        nin, lin, target, 0, max_factor_L=3,
+        allowed_factor_partitions_by_rank={2: ((2,),)}, **request,
+    )
+
+    assert capped.codepath == "factorized_three_pair_joint_primitive_quotient"
+    assert capped.basis_convention == "factorized_three_pair_recoupled_cg"
+    assert (capped.sector_basis_rank, capped.generated_rank, capped.primitive_rank) == (4, 3, 1)
+    assert (too_small.generated_rank, complete.generated_rank, symmetric_pairs.generated_rank) == (0, 4, 0)
+    assert capped.generated_upper_bound >= capped.generated_rank
+    assert capped.target_basis_labels[capped.primitive_basis_indices[0]][2][1] == 4
+    assert capped.quotient.T * capped.quotient == eye(3)
+    assert all(
+        validate_young_resolved_primitive_quotient(item).passed
+        for item in (too_small, capped, complete, symmetric_pairs)
+    )
+
+
+def test_factorized_three_pair_scalar_matches_general_compiler():
+    from ye3t import permutation_irrep_for_character, young_resolved_primitive_quotient
+
+    def matched_pairs(**route):
+        left = tuple(zip(route["left_nin"], route["left_lin"]))
+        right = tuple(zip(route["right_nin"], route["right_lin"]))
+        return (len(left) == len(right) == 1 and left == right) if len(left) + len(right) == 2 else (
+            len(left) % 2 == len(right) % 2 == 0
+        )
+
+    nin = (1, 1, 2, 2, 3, 3)
+    lin = (0, 0, 0, 0, 1, 1)
+    target = permutation_irrep_for_character(nin, lin, ((2,), (2,), (2,)))
+    common = {"mode": "full", "factor_scope": "recursive", "max_factor_L": 1}
+    factorized = young_resolved_primitive_quotient(
+        nin, lin, target, 0, factor_route_policy="matched_pairs", **common,
+    )
+    projector = young_resolved_primitive_quotient(
+        nin, lin, target, 0,
+        factor_route_filter=matched_pairs,
+        factor_route_name="matched_pairs_projector_reference", **common,
+    )
+    assert factorized.codepath == "factorized_three_pair_joint_primitive_quotient"
+    assert projector.codepath == "factorized_young_so3_primitive_quotient"
+    assert factorized.sector_basis_rank == projector.sector_basis_rank == 1
+    assert factorized.generated_rank == projector.generated_rank == 1
+    assert factorized.primitive_rank == projector.primitive_rank == 0
+
+
+def test_factorized_three_pair_non_scalar_matches_general_compiler():
+    from ye3t import permutation_irrep_for_character, young_resolved_primitive_quotient
+
+    def matched_pairs(**route):
+        left = tuple(zip(route["left_nin"], route["left_lin"]))
+        right = tuple(zip(route["right_nin"], route["right_lin"]))
+        return (len(left) == len(right) == 1 and left == right) if len(left) + len(right) == 2 else (
+            len(left) % 2 == len(right) % 2 == 0
+        )
+
+    nin = (1, 1, 2, 2, 3, 3)
+    lin = (0, 0, 0, 0, 1, 1)
+    target = permutation_irrep_for_character(nin, lin, ((2,), (2,), (1, 1)))
+    common = {"mode": "full", "factor_scope": "recursive", "max_factor_L": 1}
+    factorized = young_resolved_primitive_quotient(
+        nin, lin, target, 1, factor_route_policy="matched_pairs", **common,
+    )
+    projector = young_resolved_primitive_quotient(
+        nin, lin, target, 1, factor_route_filter=matched_pairs,
+        factor_route_name="matched_pairs_projector_reference", **common,
+    )
+    assert factorized.sector_basis_rank == projector.sector_basis_rank == 1
+    assert factorized.generated_rank == projector.generated_rank == 1
+    assert factorized.primitive_rank == projector.primitive_rank == 0
+
+
+def test_factorized_three_pair_joint_non_scalar_recoupling_is_exact():
+    from sympy import eye, sqrt
+
+    from ye3t import (
+        permutation_irrep_for_character,
+        validate_young_resolved_primitive_quotient,
+        young_resolved_primitive_quotient,
+    )
+
+    nin = (1,) * 6
+    lin = (1, 1, 2, 2, 3, 3)
+    target = permutation_irrep_for_character(nin, lin, ((1, 1), (1, 1), (2,)))
+    quotient = young_resolved_primitive_quotient(
+        nin, lin, target, 1, mode="full", factor_scope="recursive",
+        factor_route_policy="matched_pairs", max_factor_L=3,
+    )
+    assert (quotient.sector_count, quotient.generated_rank, quotient.primitive_rank) == (7, 5, 2)
+    assert quotient.quotient.T * quotient.quotient == eye(5)
+    assert abs(quotient.quotient[1, 2]) == sqrt(3) / 2
+    assert validate_young_resolved_primitive_quotient(quotient).passed
+
+
+@pytest.mark.parametrize("spins,output_L", (((1, 1, 2), 1), ((1, 3, 4), 2)))
+def test_three_pair_exact_recoupling_agrees_with_independent_wigner_6j(spins, output_L):
+    from sympy import simplify, sqrt
+    from sympy.physics.wigner import wigner_6j
+
+    from ye3t.representations.young_sectors import _three_pair_recoupling_overlap
+
+    for canonical_J in range(abs(spins[0] - spins[1]), spins[0] + spins[1] + 1):
+        if not abs(canonical_J - spins[2]) <= output_L <= canonical_J + spins[2]:
+            continue
+        for pair in ((0, 2), (1, 2)):
+            last = next(index for index in range(3) if index not in pair)
+            for pair_J in range(abs(spins[pair[0]] - spins[pair[1]]), spins[pair[0]] + spins[pair[1]] + 1):
+                if not abs(pair_J - spins[last]) <= output_L <= pair_J + spins[last]:
+                    continue
+                overlap = _three_pair_recoupling_overlap(spins, output_L, canonical_J, pair, pair_J)
+                first, second = (spins[0], spins[1]) if pair == (1, 2) else (spins[1], spins[0])
+                symbol = wigner_6j(
+                    first, second, canonical_J, spins[2], output_L, pair_J,
+                )
+                phase = spins[1] + spins[2] + pair_J
+                if pair == (0, 2):
+                    phase -= canonical_J
+                expected = (-1) ** phase * sqrt((2 * canonical_J + 1) * (2 * pair_J + 1)) * symbol
+                assert simplify(overlap - expected) == 0
+
+
+def test_factorized_global_six_slot_quotient_resolves_all_young_partitions():
+    from ye3t import (
+        all_young_character_irreps_for_pattern,
+        validate_young_resolved_primitive_quotient,
+        young_resolved_primitive_quotient,
+    )
+    from ye3t.fixed_content import FixedContentModule, FixedContentSpec
+
+    nin = (1,) * 6
+    lin = (1, 1, 2, 2, 3, 3)
+    independent = FixedContentModule(FixedContentSpec(nin, lin)).decompose()
+    target_partitions = tuple(
+        sector.partition for sector in independent.valid_young_rotation_sectors if sector.L_R == 1
+    )
+    total_dimension = 0
+    total_generated = 0
+    for partition in target_partitions:
+        quotient = young_resolved_primitive_quotient(
+            nin, lin, None, 1, mode="full", factor_scope="recursive",
+            factor_route_policy="matched_pairs", max_factor_L=3,
+            global_partition=partition,
+        )
+        assert quotient.sector_count == independent.sector_multiplicity(partition, 1)
+        assert quotient.global_partition == partition
+        assert quotient.generated_rank + quotient.primitive_rank == quotient.sector_basis_rank
+        assert validate_young_resolved_primitive_quotient(quotient).passed
+        complete = young_resolved_primitive_quotient(
+            nin, lin, None, 1, mode="full", factor_scope="recursive",
+            factor_route_policy="matched_pairs", global_partition=partition,
+        )
+        assert complete.generated_rank == complete.sector_basis_rank
+        assert complete.primitive_rank == 0
+        total_dimension += quotient.sector_basis_rank
+        total_generated += quotient.generated_rank
+        if partition == (3, 2, 1):
+            assert (quotient.sector_count, quotient.generated_rank, quotient.primitive_rank) == (208, 2016, 1312)
+            assert len(quotient.factorized_blocks) > 1
+    assert len(target_partitions) == 11
+    ordered_weights = {0: 1}
+    for angular_l in lin:
+        next_weights = {}
+        for current_M, multiplicity in ordered_weights.items():
+            for magnetic_M in range(-angular_l, angular_l + 1):
+                key = current_M + magnetic_M
+                next_weights[key] = next_weights.get(key, 0) + multiplicity
+        ordered_weights = next_weights
+    assert total_dimension == 90 * (ordered_weights[1] - ordered_weights[2])
+    local_generated = sum(
+        young_resolved_primitive_quotient(
+            nin, lin, irrep, 1, mode="full", factor_scope="recursive",
+            factor_route_policy="matched_pairs", max_factor_L=3,
+        ).generated_rank
+        for irrep in all_young_character_irreps_for_pattern(nin, lin)
+    )
+    assert total_generated == 90 * local_generated
+
+
+def test_global_quotient_induces_a_higher_dimensional_stabilizer_irrep():
+    from ye3t import validate_young_resolved_primitive_quotient, young_resolved_primitive_quotient
+    from ye3t.fixed_content import FixedContentModule, FixedContentSpec
+
+    nin = (1, 1, 1, 2)
+    lin = (1, 1, 1, 0)
+    quotient = young_resolved_primitive_quotient(
+        nin, lin, None, 1, mode="full", max_factor_L=1,
+        factor_scope="recursive", factor_route_policy="all",
+        global_partition=(2, 1, 1),
+    )
+    independent = FixedContentModule(FixedContentSpec(nin, lin)).decompose()
+    assert quotient.sector_count == independent.sector_multiplicity((2, 1, 1), 1) == 1
+    assert (quotient.sector_basis_rank, quotient.generated_rank, quotient.primitive_rank) == (3, 3, 0)
+    assert len(quotient.factorized_blocks) == 1
+    block = quotient.factorized_blocks[0]
+    assert block["subgroup_partitions"] == ((2, 1), (1,))
+    assert block["subgroup_carrier_dim"] == 2
+    assert block["angular_target_rank"] == block["angular_generated_rank"] == 1
+    tensor = quotient.induction_map(((2, 1), (1,)))
+    assert tensor.induced_dim == 8
+    assert tensor.coefficient_matrix().cols == 3
+    assert validate_young_resolved_primitive_quotient(quotient).passed
+
+
+def test_global_quotient_accepts_immediate_products_and_symmetric_subgroup_blocks():
+    from ye3t import validate_young_resolved_primitive_quotient, young_resolved_primitive_quotient
+
+    quotient = young_resolved_primitive_quotient(
+        (1, 1, 1, 2), (1, 1, 1, 0), None, 1,
+        mode="full", factor_scope="immediate", factor_route_policy="all",
+        global_partition=(3, 1),
+    )
+    assert (quotient.sector_count, quotient.sector_basis_rank) == (2, 6)
+    assert (quotient.generated_rank, quotient.primitive_rank) == (6, 0)
+    assert {block["local_codepath"] for block in quotient.factorized_blocks} == {
+        "ace_trivial_primitive_quotient", "factorized_young_so3_primitive_quotient",
+    }
+    assert validate_young_resolved_primitive_quotient(quotient).passed
+
+
+def test_rank4_mixed_global_quotient_respects_child_young_and_angular_limits():
+    from ye3t import validate_young_resolved_primitive_quotient, young_resolved_primitive_quotient
+    from ye3t.fixed_content import FixedContentModule, FixedContentSpec
+
+    nin, lin = (1, 1, 2, 2), (1, 1, 2, 2)
+    independent = FixedContentModule(FixedContentSpec(nin, lin)).decompose()
+    common = {
+        "mode": "full", "factor_scope": "recursive",
+        "factor_route_policy": "matched_pairs", "global_partition": (3, 1),
+    }
+    cap1 = young_resolved_primitive_quotient(
+        nin, lin, None, 1, max_factor_L=1,
+        allowed_factor_partitions_by_rank={2: ((2,),)}, **common,
+    )
+    cap2 = young_resolved_primitive_quotient(
+        nin, lin, None, 1, max_factor_L=2,
+        allowed_factor_partitions_by_rank={2: ((2,),)}, **common,
+    )
+    unrestricted = young_resolved_primitive_quotient(
+        nin, lin, None, 1, max_factor_L=2, **common,
+    )
+    assert independent.sector_multiplicity((3, 1), 1) == 6
+    assert (cap1.sector_count, cap2.sector_count, unrestricted.sector_count) == (6, 6, 6)
+    assert (cap1.generated_rank, cap2.generated_rank, unrestricted.generated_rank) == (0, 3, 15)
+    assert all(validate_young_resolved_primitive_quotient(q).passed for q in (cap1, cap2, unrestricted))
+
+
+def test_global_quotient_supports_odd_rank_and_unrestricted_routes():
+    from ye3t import validate_young_resolved_primitive_quotient, young_resolved_primitive_quotient
+
+    quotient = young_resolved_primitive_quotient(
+        (1, 1, 2, 3, 4, 5, 6), (1, 1, 0, 0, 0, 0, 0), None, 1,
+        mode="full", max_factor_L=1, factor_scope="recursive",
+        factor_route_policy="all", global_partition=(6, 1),
+    )
+    assert (quotient.sector_count, quotient.sector_basis_rank) == (1, 6)
+    assert (quotient.generated_rank, quotient.primitive_rank) == (6, 0)
+    assert validate_young_resolved_primitive_quotient(quotient).passed
+
+
+def test_global_rank_eight_young_sectors_obey_orbit_dimension_and_child_cap():
+    from math import factorial
+
+    from ye3t import Partition, validate_young_resolved_primitive_quotient, young_resolved_primitive_quotient
+    from ye3t.core.basis.exhaustive_enumeration import integer_partitions
+    from ye3t.representations.young_sectors import _global_local_quotient_cached
+
+    nin = (1, 1, 2, 2, 3, 3, 4, 4)
+    lin = (1, 1, 0, 0, 0, 0, 0, 0)
+    common = {
+        "mode": "full", "factor_scope": "recursive",
+        "factor_route_policy": "matched_pairs", "max_factor_L": 1,
+    }
+    total_target = 0
+    total_generated = 0
+    cache_hits_before = _global_local_quotient_cached.cache_info().hits
+    for partition in integer_partitions(8):
+        quotient = young_resolved_primitive_quotient(
+            nin, lin, None, 1, global_partition=partition, **common,
+        )
+        assert validate_young_resolved_primitive_quotient(quotient).passed
+        total_target += quotient.sector_count * Partition(partition).dimension
+        total_generated += quotient.generated_rank
+        if partition == (7, 1):
+            assert (quotient.sector_count, quotient.generated_rank, quotient.primitive_rank) == (1, 7, 0)
+    assert total_target == total_generated == factorial(8) // (2 ** 4)
+    assert _global_local_quotient_cached.cache_info().hits > cache_hits_before
+    capped = young_resolved_primitive_quotient(
+        nin, lin, None, 1, global_partition=(7, 1),
+        **{**common, "max_factor_L": 0},
+    )
+    assert (capped.sector_basis_rank, capped.generated_rank, capped.primitive_rank) == (7, 0, 7)
+
+
+def test_global_quotient_rank_twelve_uses_the_same_induction_path():
+    from ye3t import validate_young_resolved_primitive_quotient, young_resolved_primitive_quotient
+
+    nin = tuple(value for value in range(1, 7) for _ in range(2))
+    lin = (1, 1) + (0,) * 10
+    quotient = young_resolved_primitive_quotient(
+        nin, lin, None, 1, mode="full", max_factor_L=1,
+        factor_scope="recursive", factor_route_policy="matched_pairs",
+        global_partition=(11, 1),
+    )
+    assert (quotient.sector_count, quotient.sector_basis_rank) == (1, 11)
+    assert (quotient.generated_rank, quotient.primitive_rank) == (11, 0)
+    assert validate_young_resolved_primitive_quotient(quotient).passed
+
+
+@pytest.mark.parametrize("rank,expected", (
+    (8, (7, 49, 14, 35)),
+    (10, (8, 72, 18, 54)),
+))
+def test_global_two_angular_pair_quotients_scale_past_six_slots(rank, expected):
+    from ye3t import validate_young_resolved_primitive_quotient, young_resolved_primitive_quotient
+
+    nin = tuple(channel for channel in range(1, rank // 2 + 1) for _ in range(2))
+    lin = (1, 1, 1, 1) + (0,) * (rank - 4)
+    quotient = young_resolved_primitive_quotient(
+        nin, lin, None, 1, mode="full", max_factor_L=1,
+        factor_scope="recursive", factor_route_policy="matched_pairs",
+        global_partition=(rank - 1, 1),
+    )
+    assert (quotient.sector_count, quotient.sector_basis_rank,
+            quotient.generated_rank, quotient.primitive_rank) == expected
+    assert validate_young_resolved_primitive_quotient(quotient).passed
+
+
+def test_global_odd_rank_repeated_triple_quotient_is_exact():
+    from ye3t import validate_young_resolved_primitive_quotient, young_resolved_primitive_quotient
+
+    quotient = young_resolved_primitive_quotient(
+        (1, 1, 1, 2, 2, 3, 3, 4, 4), (1, 1, 1) + (0,) * 6,
+        None, 1, mode="full", max_factor_L=1,
+        factor_scope="immediate", factor_route_policy="all",
+        global_partition=(8, 1),
+    )
+    assert (quotient.sector_count, quotient.sector_basis_rank,
+            quotient.generated_rank, quotient.primitive_rank) == (4, 32, 32, 0)
+    assert validate_young_resolved_primitive_quotient(quotient).passed
+
+
+def test_exact_primitive_orthogonalization_uses_the_target_gram():
+    from sympy import Matrix, eye, simplify, sqrt
+
+    from ye3t.representations.young_sectors import _orthonormal_primitive_copy_coefficients
+
+    generated = Matrix([[1], [0]])
+    gram = Matrix([[2, 1], [1, 2]])
+    coefficients, representatives = _orthonormal_primitive_copy_coefficients(generated, gram)
+    assert representatives == (1,)
+    assert all(simplify(value) == 0 for value in coefficients - Matrix([[-1], [2]]) / sqrt(6))
+    assert generated.T * gram * coefficients == Matrix([[0]])
+    assert coefficients.T * gram * coefficients == eye(1)
+    with pytest.raises(ArithmeticError, match="nonpositive"):
+        _orthonormal_primitive_copy_coefficients(Matrix(1, 0, []), Matrix([[-1]]))
+
+
+def test_local_primitive_vectors_cover_factorized_and_ace_gram_conventions():
+    from sympy import eye, simplify
+
+    from ye3t import ExactProductExpansionEngine, permutation_irrep_for_character, young_resolved_primitive_quotient
+
+    mixed = young_resolved_primitive_quotient(
+        (1, 1, 1), (1, 1, 1),
+        permutation_irrep_for_character((1, 1, 1), (1, 1, 1), ((2, 1),)),
+        1, mode="full", max_factor_L=0,
+    )
+    (mixed_block,) = mixed.orthonormal_primitive_multiplicity_blocks()
+    assert mixed_block["young_carrier_dimension"] == 2
+    assert mixed_block["coefficients"].shape == (1, 1)
+    assert all(simplify(value) == 0 for value in (
+        mixed_block["coefficients"].H * mixed_block["gram"] * mixed_block["coefficients"] - eye(1)
+    ))
+    mixed_vector = mixed.orthonormal_primitive_vector(0, young_index=1, magnetic_M=-1)
+    assert len(mixed_vector) == 1
+    assert mixed_vector[0][0] == (0, (1,))
+    assert mixed_vector[0][1] == -1
+
+    trivial = young_resolved_primitive_quotient(
+        (1, 1), (1, 1),
+        permutation_irrep_for_character((1, 1), (1, 1), ((2,),)),
+        0, mode="invariant",
+    )
+    (trivial_block,) = trivial.orthonormal_primitive_multiplicity_blocks()
+    assert trivial.basis_convention == "ace_compact_tree_highest_weight"
+    assert trivial.target_basis_labels == ExactProductExpansionEngine().feature_space((1, 1), (1, 1), 0).labels
+    assert trivial_block["coefficients"].H * trivial_block["gram"] * trivial_block["coefficients"] == eye(1)
+
+    module = young_resolved_primitive_quotient(
+        (1, 1, 1), (1, 2, 1),
+        permutation_irrep_for_character((1, 1, 1), (1, 2, 1), ((2,), (1,))),
+        2, mode="module",
+    )
+    assert (module.sector_basis_rank, module.generated_rank, module.primitive_rank) == (2, 1, 1)
+    (module_block,) = module.orthonormal_primitive_multiplicity_blocks()
+    assert module.target_basis_labels == ExactProductExpansionEngine().feature_space((1, 1, 1), (1, 2, 1), 2).labels
+    assert all(simplify(value) == 0 for value in (
+        module_block["generated_coefficients"].H * module_block["gram"] * module_block["coefficients"]
+    ))
+    assert all(simplify(value) == 0 for value in (
+        module_block["coefficients"].H * module_block["gram"] * module_block["coefficients"] - eye(1)
+    ))
+
+
+def test_global_primitive_vectors_handle_higher_dimensional_subgroup_carrier():
+    from sympy import eye, simplify
+
+    from ye3t import young_resolved_primitive_quotient
+
+    quotient = young_resolved_primitive_quotient(
+        (1, 1, 1, 2), (1, 1, 1, 0), None, 1,
+        mode="full", max_factor_L=0, factor_scope="recursive",
+        global_partition=(2, 1, 1),
+    )
+    assert quotient.primitive_rank == 3
+    (block,) = quotient.orthonormal_primitive_multiplicity_blocks()
+    assert block["subgroup_partitions"] == ((2, 1), (1,))
+    assert block["young_carrier_dimension"] == 3
+    assert block["coefficients"].shape == (1, 1)
+    assert all(simplify(value) == 0 for value in block["coefficients"].H * block["gram"] * block["coefficients"] - eye(1))
+
+
+def test_three_pair_primitive_vectors_are_orthonormal_and_not_just_labels():
+    from sympy import Matrix, eye, simplify
+
+    from ye3t import permutation_irrep_for_character, young_resolved_primitive_quotient
+
+    def one_rank_four_route(**route):
+        rank = len(route["left_nin"]) + len(route["right_nin"])
+        if rank != 4:
+            return True
+        return (sorted((route["left_nin"][0], route["right_nin"][0])) == [1, 3]
+                and route["target_L"] == 1)
+
+    nin = (1, 1, 2, 2, 3, 3)
+    lin = (1,) * 6
+    target = permutation_irrep_for_character(nin, lin, ((1, 1), (1, 1), (1, 1)))
+    quotient = young_resolved_primitive_quotient(
+        nin, lin, target, 1, mode="full", factor_scope="recursive",
+        factor_route_policy="matched_pairs", max_factor_L=1,
+        factor_route_filter=one_rank_four_route,
+        factor_route_name="one_rank_four_route_test",
+    )
+    assert (quotient.sector_basis_rank, quotient.generated_rank, quotient.primitive_rank) == (3, 1, 2)
+    (block,) = quotient.orthonormal_primitive_multiplicity_blocks()
+    generated = Matrix(quotient.quotient)
+    coefficients = block["coefficients"]
+    assert block["gram"] == eye(3)
+    assert all(simplify(value) == 0 for value in generated.T * coefficients)
+    assert all(simplify(value) == 0 for value in coefficients.T * coefficients - eye(2))
+    assert Matrix.hstack(generated, coefficients).rank() == 3
+    assert any(sum(value != 0 for value in coefficients[:, index]) > 1 for index in range(2))
+    vector = quotient.orthonormal_primitive_vector(0, magnetic_M=-1)
+    assert len(vector) == 3
+    assert all(term[1] == -1 for term in vector)
+    assert tuple(term[2] for term in vector) == tuple(coefficients[:, 0])
+
+
+def test_global_primitive_vectors_are_exact_and_compact_in_multiplicity_space():
+    from sympy import eye, simplify
+
+    from ye3t import young_resolved_primitive_quotient
+
+    quotient = young_resolved_primitive_quotient(
+        (1,) * 6, (1, 1, 2, 2, 3, 3), None, 1,
+        mode="full", factor_scope="recursive", factor_route_policy="matched_pairs",
+        max_factor_L=3, global_partition=(3, 2, 1),
+    )
+    blocks = quotient.orthonormal_primitive_multiplicity_blocks()
+    assert blocks
+    assert sum(
+        block["coefficients"].cols * block["induction_multiplicity"]
+        for block in blocks
+    ) == 82
+    for block in blocks:
+        coefficients = block["coefficients"]
+        gram = block["gram"]
+        generated = block["generated_coefficients"]
+        assert block["young_carrier_dimension"] == 16
+        assert block["magnetic_dimension"] == 3
+        assert all(simplify(value) == 0 for value in generated.H * gram * coefficients)
+        assert all(simplify(value) == 0 for value in coefficients.H * gram * coefficients - eye(coefficients.cols))
+        selected = quotient.orthonormal_primitive_multiplicity_blocks(block["subgroup_partitions"])
+        assert len(selected) == 1
+        assert selected[0]["coefficients"] == coefficients
+    first = blocks[0]
+    vector = quotient.orthonormal_primitive_vector(
+        0, first["subgroup_partitions"], young_index=15, magnetic_M=-1,
+    )
+    assert vector
+    assert all(term[0][-1] == 15 and term[1] == -1 for term in vector)
+
+
+def test_global_rank_sixteen_primitive_vectors_use_general_induction_path():
+    from sympy import eye
+
+    from ye3t import young_resolved_primitive_quotient
+
+    nin = tuple(value for value in range(1, 9) for _ in range(2))
+    lin = (1, 1) + (0,) * 14
+    quotient = young_resolved_primitive_quotient(
+        nin, lin, None, 1, mode="full", max_factor_L=0,
+        factor_scope="recursive", factor_route_policy="matched_pairs",
+        global_partition=(15, 1),
+    )
+    assert (quotient.sector_count, quotient.generated_rank, quotient.primitive_rank) == (1, 0, 15)
+    (block,) = quotient.orthonormal_primitive_multiplicity_blocks()
+    assert block["coefficients"].shape == (1, 1)
+    assert block["coefficients"].H * block["gram"] * block["coefficients"] == eye(1)
+    assert block["young_carrier_dimension"] == 15
+    assert block["magnetic_dimension"] == 3
+    vector = quotient.orthonormal_primitive_vector(0, young_index=14, magnetic_M=-1)
+    assert len(vector) == 1
+    assert vector[0][0][-1] == 14
+    assert vector[0][1] == -1
+
+
+def test_global_rank_sixteen_partial_product_image_has_orthogonal_primitive_copies():
+    from sympy import eye, simplify
+
+    from ye3t import young_resolved_primitive_quotient
+
+    nin = tuple(value for value in range(1, 9) for _ in range(2))
+    lin = (1, 1, 1, 1) + (0,) * 12
+
+    def one_root_route(**route):
+        if len(route["left_nin"]) + len(route["right_nin"]) != 16:
+            return True
+        return len(route["left_nin"]) == 8 and frozenset(route["left_nin"]) == {1, 3, 4, 5}
+
+    quotient = young_resolved_primitive_quotient(
+        nin, lin, None, 0, mode="full", max_factor_L=1,
+        factor_scope="immediate", factor_route_policy="matched_pairs",
+        factor_route_filter=one_root_route,
+        factor_route_name="one_root_route_test",
+        global_partition=(15, 1),
+    )
+    assert (quotient.sector_count, quotient.generated_rank, quotient.primitive_rank) == (14, 105, 105)
+    (block,) = quotient.orthonormal_primitive_multiplicity_blocks()
+    assert block["induction_multiplicity"] == 7
+    assert block["coefficients"].shape == (2, 1)
+    assert all(simplify(value) == 0 for value in (
+        block["generated_coefficients"].H * block["gram"] * block["coefficients"]
+    ))
+    assert all(simplify(value) == 0 for value in (
+        block["coefficients"].H * block["gram"] * block["coefficients"] - eye(1)
+    ))
+    vector = quotient.orthonormal_primitive_vector(
+        0, block["subgroup_partitions"], induction_index=6, young_index=14,
+    )
+    assert vector and all(term[0][-2:] == (6, 14) and term[1] == 0 for term in vector)
+
+
+def test_factorized_global_quotient_compiles_a_mixed_young_map_on_demand():
+    from ye3t import young_resolved_primitive_quotient
+
+    quotient = young_resolved_primitive_quotient(
+        (1,) * 6, (1, 1, 2, 2, 3, 3), None, 1,
+        mode="full", factor_scope="recursive",
+        factor_route_policy="matched_pairs", max_factor_L=3,
+        global_partition=(5, 1),
+    )
+    tensor = quotient.induction_map(((2,), (2,), (2,)))
+    assert tensor.multiplicity == 2
+    assert tensor.induced_dim == 90
+    assert tensor.coefficient_matrix().cols == 10
+
+
+@pytest.mark.slow
+def test_factorized_global_quotient_validates_sign_pair_to_mixed_six_slot_map():
+    from ye3t import young_resolved_primitive_quotient
+
+    quotient = young_resolved_primitive_quotient(
+        (1,) * 6, (1, 1, 2, 2, 3, 3), None, 1,
+        mode="full", factor_scope="recursive",
+        factor_route_policy="matched_pairs", max_factor_L=3,
+        global_partition=(3, 2, 1),
+    )
+    tensor = quotient.induction_map(((1, 1), (1, 1), (2,)))
+    assert tensor.multiplicity == 2
+    assert tensor.induced_dim == 90
+    assert tensor.coefficient_matrix().cols == 32
+
+
+@pytest.mark.parametrize("output_L", (0, 2, 3))
+def test_factorized_global_six_slot_quotient_handles_other_angular_targets(output_L):
+    from ye3t import validate_young_resolved_primitive_quotient, young_resolved_primitive_quotient
+    from ye3t.fixed_content import FixedContentModule, FixedContentSpec
+
+    nin = (1,) * 6
+    lin = (1, 1, 2, 2, 3, 3)
+    quotient = young_resolved_primitive_quotient(
+        nin, lin, None, output_L, mode="full", factor_scope="recursive",
+        factor_route_policy="matched_pairs", max_factor_L=4,
+        global_partition=(3, 2, 1),
+    )
+    independent = FixedContentModule(FixedContentSpec(nin, lin)).decompose()
+    assert quotient.sector_count == independent.sector_multiplicity((3, 2, 1), output_L)
+    assert validate_young_resolved_primitive_quotient(quotient).passed
+
+
+def test_factorized_global_six_slot_quotient_respects_child_young_and_route_limits():
+    from ye3t import Partition, validate_young_resolved_primitive_quotient, young_resolved_primitive_quotient
+
+    nin = (1,) * 6
+    lin = (1, 1, 2, 2, 3, 3)
+    common = {
+        "mode": "full", "factor_scope": "recursive",
+        "factor_route_policy": "matched_pairs", "max_factor_L": 3,
+        "global_partition": (3, 2, 1),
+    }
+    full = young_resolved_primitive_quotient(nin, lin, None, 1, **common)
+    partition_object = young_resolved_primitive_quotient(
+        nin, lin, None, 1, **{**common, "global_partition": Partition((3, 2, 1))},
+    )
+    symmetric_pairs = young_resolved_primitive_quotient(
+        nin, lin, None, 1,
+        allowed_factor_partitions_by_rank={2: ((2,),)}, **common,
+    )
+
+    def low_intermediate_L(**route):
+        return len(route["left_nin"]) + len(route["right_nin"]) != 4 or route["target_L"] <= 1
+
+    route_limited = young_resolved_primitive_quotient(
+        nin, lin, None, 1,
+        factor_route_filter=low_intermediate_L,
+        factor_route_name="rank_four_L_at_most_one", **common,
+    )
+    assert symmetric_pairs.generated_rank < full.generated_rank
+    assert route_limited.generated_rank < full.generated_rank
+    assert partition_object.generated_rank == full.generated_rank
+    assert all(validate_young_resolved_primitive_quotient(item).passed
+               for item in (full, symmetric_pairs, route_limited))
+
+
+@pytest.mark.parametrize(
+    "angular_l,partition,expected_Ls",
+    ((1, (1, 1), (1,)), (2, (1, 1), (1, 3)), (3, (2,), (0, 2, 4, 6))),
+)
+def test_three_pair_scalar_block_channels_match_exact_pair_projectors(
+    angular_l, partition, expected_Ls,
+):
+    from ye3t import generalized_sector_counts, permutation_irrep_for_character
+
+    nin = (1, 1)
+    lin = (angular_l, angular_l)
+    irrep = permutation_irrep_for_character(nin, lin, (partition,))
+    character = generalized_sector_counts(nin, lin, irrep, count_only=True)
+    projector = generalized_sector_counts(nin, lin, irrep)
+    assert tuple(sorted(character.counts_by_L)) == expected_Ls
+    assert character.counts_by_L == projector.counts_by_L
+    assert set(character.counts_by_L.values()) == {1}
+
+
+def test_young_factor_partition_policy_accepts_full_multiblock_signatures():
+    from ye3t import permutation_irrep_for_character, young_resolved_primitive_quotient
+
+    nin = (1, 1, 2)
+    lin = (1, 1, 0)
+    target = permutation_irrep_for_character(nin, lin, ((1, 1), (1,)))
+    unrestricted = young_resolved_primitive_quotient(nin, lin, target, 1, count_only=True)
+    restricted = young_resolved_primitive_quotient(
+        nin, lin, target, 1, count_only=True,
+        allowed_factor_partitions_by_rank={2: (((1,), (1,)),)},
+    )
+    assert restricted.allowed_factor_partitions_by_rank == ((2, ((((1,), (1,))),)),)
+    assert restricted.generated_upper_bound <= unrestricted.generated_upper_bound
+    with pytest.raises(ValueError, match="signature sizes"):
+        young_resolved_primitive_quotient(
+            nin, lin, target, 1, count_only=True,
+            allowed_factor_partitions_by_rank={2: (((2,), (1,)),)},
+        )
+    with pytest.raises(ValueError, match="factor_route_name"):
+        young_resolved_primitive_quotient(
+            nin, lin, target, 1, count_only=True,
+            factor_route_filter=lambda **route: True,
+        )
+    with pytest.raises(ValueError, match="factor_route_policy"):
+        young_resolved_primitive_quotient(
+            nin, lin, target, 1, count_only=True,
+            factor_route_policy="unknown",
+        )
+
+
+def test_young_module_policy_requires_one_jointly_invariant_child():
+    from ye3t import permutation_irrep_for_character, young_resolved_primitive_quotient
+
+    nin = (1, 1, 1, 1)
+    lin = (1, 1, 1, 1)
+    target = permutation_irrep_for_character(nin, lin, ((2, 1, 1),))
+
+    def cross_trivial_route(**route):
+        sides = ("left", "right")
+        return any(
+            len(route[side + "_nin"]) == 3
+            and route[side + "_L"] == 0
+            and not route[side + "_permutation"].is_totally_symmetric()
+            and len(route[other + "_nin"]) == 1
+            and route[other + "_L"] == 1
+            for side, other in ((sides[0], sides[1]), (sides[1], sides[0]))
+        )
+
+    common = {
+        "count_only": True,
+        "factor_route_filter": cross_trivial_route,
+        "factor_route_name": "cross_trivial_test",
+    }
+    full = young_resolved_primitive_quotient(nin, lin, target, 1, mode="full", **common)
+    module = young_resolved_primitive_quotient(nin, lin, target, 1, mode="module", **common)
+    assert full.generated_upper_bound > 0
+    assert module.generated_upper_bound == 0
 
 
 def test_young_primitive_quotient_validation_rational_rank_does_not_import_sympy():

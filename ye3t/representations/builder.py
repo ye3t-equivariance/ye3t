@@ -396,6 +396,8 @@ def _angular_scalar_vectors_coset(
     angular_l,
     partition,
     dimension,
+    *,
+    normalize_tableaux=True,
 ):
     """Class-wise construction of the E_{0,0} image and tableau vectors on the
     M=0 scalar space, via the exact coset decomposition.
@@ -611,7 +613,7 @@ def _angular_scalar_vectors_coset(
             dense = sp.zeros(len(scalar_states), 1)
             for word, value in raw_by_tableau[tableau].items():
                 dense[scalar_index[word], 0] = value
-            normalized = _pivot_normalize_vector(dense)
+            normalized = _pivot_normalize_vector(dense) if normalize_tableaux else dense
             scalar_vectors[(copy_index, tableau)] = normalized
             all_tableau_vectors.append(normalized)
 
@@ -626,7 +628,7 @@ def _angular_scalar_vectors_coset(
     return scalar_vectors, multiplicity
 
 
-def _exact_single_factor_weight_vectors(nin, lin, permutation_irrep, output_L):
+def _exact_single_factor_weight_vectors(nin, lin, permutation_irrep, output_L, *, normalize_tableaux=True):
     """Exact requested-L carrier from a coset image and raising nullspace.
 
     This uses only the highest-weight raising block and successive lowering
@@ -651,7 +653,8 @@ def _exact_single_factor_weight_vectors(nin, lin, permutation_irrep, output_L):
     highest_states = weights[output_L]
     raising = _weight_raising_matrix(lin, highest_states, weights[output_L+1])
     highest, multiplicity = _angular_scalar_vectors_coset(
-        highest_states, raising, slots, lin[0], partition, int(partition.dimension))
+        highest_states, raising, slots, lin[0], partition, int(partition.dimension),
+        normalize_tableaux=normalize_tableaux)
     expected = generalized_sector_counts(nin, lin, permutation_irrep=permutation_irrep,
                                         count_only=True, spatial_symmetry="O3")
     if int(expected.counts_by_L.get(output_L, 0)) != multiplicity:

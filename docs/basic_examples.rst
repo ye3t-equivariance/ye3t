@@ -108,8 +108,8 @@ small vocabulary:
 ``mode``
    For the basis enumeration snippet, ``"counts_by_L"`` prints exact
    dimensions by target ``L_R`` and ``"labels_by_L"`` materializes compact
-   basis labels. For ``examples/exact_full_primitive_catalog.py``,
-   ``"invariant"`` and ``"module"`` select the primitive quotient.
+   basis labels. The primitive catalog uses ``"full"`` with a matched-pair
+   factor policy.
 
 ``print_limit``
    Bound on representative labels printed per section. It does not change the
@@ -170,11 +170,16 @@ schedule metadata.
    resource caps or output location.
 
 ``examples/exact_full_primitive_catalog.py``
-   Compares full exact sectors with primitive quotient representatives for
-   tiny descriptor spaces. This is useful when checking which reduced
-   permutation sectors remain available after quotienting. ``mode="invariant"``
-   is the scalar primitive quotient and ``mode="module"`` is the equivariant
-   module quotient.
+   Shows the saved-object workflow: configure ``YE3TFixedContentBasis`` with
+   integer rank keys, call ``build_basis()`` and ``calculate_pd()``, then inspect
+   ``yb.representations``, ``yb.basis``, ``yb.primitive`` and
+   ``yb.decomposable``. Rank 4 restricts rank-2 child Young partitions and
+   compares angular caps for ``S_4:[3,1]``. Rank 6 adds a three-pair local
+   sector and the full mixed ``S_6:[3,2,1]`` sector. Rank 16 uses the same
+   global API. ``yb.primitive.basis.blocks(rank, cap)`` gives exact reduced
+   coefficients, and ``vector(rank, cap, scope="local")`` selects one normalized
+   primitive vector. Edit both rank maps to add a case; the shared
+   ``representation["L"]`` sets the default target angular momentum.
 
 ``examples/symbolic_young_partition_catalogue.py``
    Expands symbolic parent-partition templates such as ``("N/2", "N/2")`` for

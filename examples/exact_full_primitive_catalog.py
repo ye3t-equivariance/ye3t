@@ -1,55 +1,59 @@
-"""Build an exact product expansion and primitive quotient catalog."""
+"""Inspect exact Young/rotation primitive and decomposable bases.
 
-# exact_full_primitive_catalog.py
-# Compare full exact product spaces against primitive quotient representatives.
-# This is the place to inspect which reduced permutation sectors survive after
-# invariant/module primitive factorization.
+Install ye3t with its SymPy extra. These are abstract fixed-content carriers;
+physical cluster placement and graph automorphisms require an application map.
+"""
 
-from ye3t import ExactProductExpansionEngine
-from ye3t.utils.printing import print_primitive_summary
-from ye3t.workflows import merge_workflow_config
+from ye3t.api import YE3TFixedContentBasis
 
 
-# YE3T config dictionary.
 cfg_ye3t = {
-    "tree_type": "balanced",  # Recoupling tree used for exact products.
-    "summary_cases": (  # Primitive quotient sectors to summarize.
-        {
-            "name": "rank-2 invariant primitive quotient:",  # Name used in printed output.
-            "nin": (1, 1),  # Non-angular channel eta_i for each slot.
-            "lin": (1, 1),  # Angular momentum l_i for each slot.
-            "L_R": 0,  # Target output angular momentum.
-            "mode": "invariant",  # Primitive factorization for scalar invariant outputs.
-            "print_limit": 3,  # Maximum primitive basis labels to print.
+    "metadata": {"name": "exact_full_primitive_catalog", "status": "experimental"},
+    "basis": {
+        "type": "abstract_fixed_content",
+        "rank": {
+            4: {"n": (1, 1, 2, 2), "l": (1, 1, 2, 2)},
+            6: {"n": (1,) * 6, "l": (1, 1, 2, 2, 3, 3)},
+            16: {
+                "n": tuple(i for i in range(1, 9) for _ in range(2)),
+                "l": (1, 1) + (0,) * 14,
+            },
         },
-        {
-            "name": "rank-3 mixed equivariant-module primitive quotient:",  # Printed label.
-            "nin": (1, 1, 1),  # Non-angular channel eta_i for each slot.
-            "lin": (1, 2, 1),  # Angular momentum l_i for each slot.
-            "L_R": 2,  # Target output angular momentum.
-            "mode": "module",  # Primitive factorization for equivariant module outputs.
-            "print_limit": 3,  # Maximum primitive basis labels to print.
+    },
+    "representation": {
+        "L": 1,
+        "factorization": "matched_pairs",  # or "all_lower_products"
+        "rank": {
+            4: {"partition": (3, 1), "max_child_L": (1, 2),  # Compare two child-L limits.
+                "child_partitions": {2: ((2,),)}},  # Allow this rank-2 Young sector in factors.
+            6: {"partition": (3, 2, 1), "max_child_L": (3, 4),
+                "local_partitions": ((1, 1), (1, 1), (2,))},  # Also inspect this G_nu sector.
+            16: {"partition": (15, 1), "max_child_L": 0},
         },
-    ),
+    },
+    "runtime": {"backend": "exact_symbolic", "device": "cpu"},
+    "model": {"type": "none"},
+    "targets": {"quantity": "primitive_quotient"},
+    "validation": {"rank_accounting": True},
 }
 
 
 def run_exact_full_primitive_catalog(config=None):
-    """Compare exact/full products, primitive quotients, and reconstruction."""
-    settings = merge_workflow_config(cfg_ye3t, config)
-    engine = ExactProductExpansionEngine(tree_type=settings["tree_type"])
-    rank2_scalar = engine.feature_space((1, 1), (1, 1), 0)
-    label = rank2_scalar.labels[0]
-    expansion = engine.expand_product(label, label, L_out=0)
+    yb = YE3TFixedContentBasis(cfg_ye3t if config is None else config)
+    print("representations:\n", yb.representations)
+    yb.build_basis()  # Compile the selected Young and angular sectors.
+    print("basis:", yb.basis)
+    yb.calculate_pd()  # Split each sector into product image and primitive complement.
+    print("primitive representations:\n", yb.primitive.representations)
+    print("decomposable representations:\n", yb.decomposable.representations)
+    print("primitive basis:", yb.primitive.basis)
+    print("decomposable basis:", yb.decomposable.basis)
+    # Options: copy, young_index, magnetic_M; global adds subgroup_partitions, induction_index.
+    # scope="local" uses the fixed-content stabilizer G_nu; "global" uses all S_N.
+    sample = yb.primitive.basis.vector(6, 3, scope="local")  # Rank 6, child-L cap 3.
+    print("one normalized primitive vector:", sample)
+    return yb
 
-    print("rank-2 scalar basis dimension:", rank2_scalar.dim)
-    print("rank-4 scalar target dimension:", expansion.target_space.dim)
-    print("nonzero expansion coefficients:", sum(1 for coeff in expansion.coefficients if coeff != 0))
-    print("max M inconsistency:", expansion.max_M_inconsistency)
-    for case in settings["summary_cases"]:
-        print()
-        print_primitive_summary(engine, case)
 
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     run_exact_full_primitive_catalog(config=cfg_ye3t)

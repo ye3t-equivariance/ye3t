@@ -165,8 +165,11 @@ describes them in full.
   coefficients through `ye3t.couplings.plan` and `ye3t.couplings.compile`.
 - `compile_scalar_ace_lammps_plans.py`: compile scalar ACE coordinates and
   execution plans for `ye3t-lammps`.
-- `exact_full_primitive_catalog.py`: compare exact, full, and primitive
-  product catalog dimensions for a small sector.
+- `exact_full_primitive_catalog.py`: compare exact Young/rotation primitive
+  quotients at ranks 4, 6, and 16 through a saved `YE3TFixedContentBasis`
+  object. It prints representation and basis summaries, plus a compact
+  normalized-vector summary; exact terms and blocks remain available on the
+  object.
 - `symbolic_young_partition_catalogue.py`: expand symbolic Young partition
   templates by rank and count the valid O(3) sectors.
 - `tagged_cauchy_image_catalogue.py`: build the shifted-Jacobi source
