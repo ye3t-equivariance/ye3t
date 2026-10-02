@@ -84,6 +84,7 @@ YE3T_MODEL_STAGE_PRODUCER_KINDS = (
     "physical_source_injection",
     "same_rank_kronecker",
     "rank_additive_lr_induction",
+    "rank_additive_lr_right_tag_kronecker",
     "exact_hierarchical_product",
     "channel_transform",
 )
@@ -2294,6 +2295,14 @@ def _normalized_model_stage_program(
                     raise ValueError(
                         "rank-additive model products must preserve rank grading"
                     )
+            if producer_kind == "rank_additive_lr_right_tag_kronecker":
+                if len(source_carrier_ids) < 2:
+                    raise ValueError("right-tag rank growth requires complete child multiplets")
+                source_ranks = {int(carriers_by_full_id[source_id]["carrier_layout"]["key"]["rank"])
+                                for source_id in source_carrier_ids}
+                if len(source_ranks) > 2 or sum(source_ranks) != int(layout.key.rank):
+                    if len(source_ranks) != 1 or 2 * next(iter(source_ranks)) != int(layout.key.rank):
+                        raise ValueError("right-tag rank growth must preserve the two formal child ranks")
             record = {
                 "carrier_id": carrier_id,
                 "full_carrier_id": full_carrier_id,

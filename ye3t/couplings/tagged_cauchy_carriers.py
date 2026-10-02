@@ -24,6 +24,10 @@ from ye3t.core.cg import cg_exact_integer
 from ye3t.exact_scalars import exact_scalar
 from ye3t.global_coupler import _angular_factorized_paths
 from ye3t.representations.generalized_irreps import Partition
+from ye3t.representations.projectors import (
+    adjacent_transposition_representation_matrix, canonical_irrep_matrices,
+    standard_tableaux, tableau_positions,
+)
 
 from . import lifted_cauchy_scalar as _scalar
 from .covariant_cauchy import covariant_cauchy_count, covariant_cauchy_request, _real_rows
@@ -46,7 +50,13 @@ def tagged_cauchy_carriers_request(
     tag_sectors="all", kappa_policy="all", selected_coordinates=None,
     catalogue=None, species=None,
 ):
-    """Declare a fixed complete-channel source; no coefficients are built."""
+    """Declare fixed sources or a rank-keyed catalogue without building coefficients.
+
+    A catalogue needs ranks and either shared nmax/lmax or exact per-rank maps.
+    Source-block patterns default to all integer partitions; max_source_blocks
+    or an explicit per-rank map selects a smaller family. Candidate-record and
+    complete-multiplet caps are optional, with None meaning exhaustive.
+    """
     if catalogue is not None:
         if channels is not None or block_sizes is not None or tag_count is not None:
             raise ValueError("catalogue and fixed-content tagged requests are mutually exclusive")
@@ -54,8 +64,8 @@ def tagged_cauchy_carriers_request(
     block_sizes = tuple(int(value) for value in block_sizes)
     rank = sum(block_sizes)
     tag_count = int(tag_count)
-    if tag_count not in (0, 1, 2) or tag_count > rank:
-        raise ValueError("tag_count must be 0, 1, or 2 and cannot exceed tensor rank")
+    if tag_count < 0 or tag_count > rank:
+        raise ValueError("tag_count must be nonnegative and cannot exceed tensor rank")
     target_Ls = tuple(sorted(set(int(value) for value in target_Ls)))
     if not target_Ls or min(target_Ls) < 0:
         raise ValueError("target_Ls must be nonempty and nonnegative")
@@ -108,6 +118,36 @@ def _role_copy_swap_character(size, kappa, copy):
     return None
 
 
+def _tag_partitions(tag_count, policy):
+    if tag_count == 0:
+        return ((),)
+    if policy == "trivial":
+        return ((tag_count,),)
+    from ye3t.core.basis.exhaustive_enumeration import integer_partitions
+    return tuple(tuple(partition) for partition in integer_partitions(tag_count))
+
+
+@lru_cache(maxsize=512)
+def _tag_irrep_matrix(partition, permutation):
+    """Young-orthogonal matrix for one tag permutation, without a rank cap."""
+    partition, permutation = tuple(partition), tuple(permutation)
+    size = sum(partition)
+    if sorted(permutation) != list(range(size)):
+        raise ValueError("invalid tag permutation")
+    if size <= 5:
+        return canonical_irrep_matrices(partition)[permutation]
+    sp = _scalar._sympy()
+    matrix = sp.eye(int(Partition(partition).dimension))
+    current = list(range(size))
+    for destination, value in enumerate(permutation):
+        position = current.index(value)
+        while position > destination:
+            matrix = adjacent_transposition_representation_matrix(partition, position - 1) * matrix
+            current[position - 1], current[position] = current[position], current[position - 1]
+            position -= 1
+    return matrix
+
+
 def tagged_cauchy_carriers_count(request):
     """Count exact representation opportunities before physical-image pivots.
 
@@ -132,6 +172,22 @@ def tagged_cauchy_carriers_count(request):
             ]
             total = tuple(sum(content[index] for content in contents) for index in range(role_dimension))
             if total != request["role_content"]:
+                continue
+            if request["tag_count"] >= 3:
+                for partition in _tag_partitions(request["tag_count"], request["tag_sectors"]):
+                    dimension = int(Partition(partition).dimension)
+                    for seed in range(dimension):
+                        label = {**raw, "formal_parent": request["formal_parent"],
+                                 "tag_count": request["tag_count"],
+                                 "tag_character": (1 if partition == (request["tag_count"],)
+                                                   else -1 if partition == (1,) * request["tag_count"] else None),
+                                 "tag_partition": partition, "tag_seed_tableau": seed,
+                                 "tag_tableau_count": dimension,
+                                 "block_role_contents": tuple(contents), "convention_id": _CONVENTION}
+                        label.pop("descriptor_index")
+                        label["coordinate_id"] = "tagged_carrier:" + _scalar._stable_hash(
+                            _scalar._freeze_json({"channels": request["channels"], "label": label}))
+                        labels.append(label)
                 continue
             signs = (1, -1) if request["tag_count"] == 2 and request["tag_sectors"] == "all" else (1,)
             if request["tag_count"] == 2:
@@ -237,6 +293,135 @@ def _outer_rows(block_Ls, target_L, copy):
     return {M: _outer_tree_row(paths[copy]["tree"], M) for M in range(-target_L, target_L + 1)}
 
 
+def _permute_tag_row(row, permutation, tag_count):
+    # A role permutation is a bijection on monomials, so no symbolic
+    # simplification is needed when moving an already coalesced row.
+    return {tuple(sorted(
+        (channel, permutation[role] if role < tag_count else role, magnetic)
+        for channel, role, magnetic in monomial)): value
+        for monomial, value in row.items()}
+
+
+def _tag_expanded_row(terms):
+    sp = _scalar._sympy()
+    return {monomial: expanded for monomial, coefficient in terms.items()
+            if (expanded := sp.expand(coefficient)) != 0}
+
+
+@lru_cache(maxsize=512)
+def _tag_projector_plan(partition, seed):
+    """Cache the tableau-content projectors and adjacent-tableau transfers."""
+    partition = tuple(partition)
+    tableaux = standard_tableaux(partition)
+    size = sum(partition)
+    if seed < 0 or seed >= len(tableaux):
+        raise ValueError("tag seed tableau lies outside its partition")
+    positions = tableau_positions(tableaux[seed])
+    stages = []
+    for value in range(2, size + 1):
+        prefix = tuple(sum(entry < value for entry in row) for row in tableaux[seed])
+        prefix = tuple(length for length in prefix if length)
+        alternatives = []
+        for row, length in enumerate(prefix):
+            if row == 0 or prefix[row - 1] > length:
+                alternatives.append(length - row)
+        alternatives.append(-len(prefix))
+        target = positions[value][1] - positions[value][0]
+        if alternatives.count(target) != 1:
+            raise RuntimeError("tableau content is not a unique branching eigenvalue")
+        stages.append((value - 1, target, tuple(content for content in alternatives if content != target)))
+    tableau_index = {tableau: index for index, tableau in enumerate(tableaux)}
+    reached, pending, transfers = {seed}, [seed], []
+    while pending:
+        source = pending.pop(0)
+        for generator in range(size - 1):
+            swapped = [list(row) for row in tableaux[source]]
+            locations = tableau_positions(tableaux[source])
+            left, right = locations[generator + 1], locations[generator + 2]
+            swapped[left[0]][left[1]], swapped[right[0]][right[1]] = (
+                swapped[right[0]][right[1]], swapped[left[0]][left[1]])
+            destination = tableau_index.get(tuple(tuple(row) for row in swapped))
+            if destination is None or destination in reached:
+                continue
+            matrix = adjacent_transposition_representation_matrix(partition, generator)
+            if matrix[destination, source] == 0:
+                raise RuntimeError("standard-tableau transfer has zero coefficient")
+            transfers.append((source, destination, generator,
+                              matrix[source, source], matrix[destination, source]))
+            reached.add(destination)
+            pending.append(destination)
+    if len(reached) != len(tableaux):
+        raise RuntimeError("adjacent generators did not connect all standard tableaux")
+    return tuple(stages), tuple(transfers), len(tableaux)
+
+
+def _tag_jucys_factor(row, value_index, target, alternative, tag_count):
+    """Apply (J_value - alternative)/(target - alternative) to one sparse row."""
+    sp = _scalar._sympy()
+    result = defaultdict(lambda: sp.Integer(0))
+    factor = sp.Rational(1, target - alternative)
+    for monomial, coefficient in row.items():
+        result[monomial] -= factor * alternative * coefficient
+        for earlier in range(value_index):
+            transposition = list(range(tag_count))
+            transposition[earlier], transposition[value_index] = (
+                transposition[value_index], transposition[earlier])
+            moved = tuple(sorted((channel, transposition[role] if role < tag_count else role, magnetic)
+                                 for channel, role, magnetic in monomial))
+            result[moved] += factor * coefficient
+    return _tag_expanded_row(result)
+
+
+def _project_tag_rows(canonical, tag_count, partition, seed):
+    """Apply exact tableau idempotents and transfers to all angular components.
+
+    Algorithmic reference: Vershik and Okounkov (2005), Sections 3, 6, and 7,
+    Young--Jucys--Murphy content eigenvalues and Young orthogonal form.
+    Independent implementation; no source code copied:
+    P_T is the branching product of (J_m-c)/(c_T(m)-c), followed by the exact
+    adjacent-generator matrix-unit transfers. No full symmetric group sum.
+    """
+    sp = _scalar._sympy()
+    stages, transfers, dimension = _tag_projector_plan(partition, seed)
+    projected = []
+    for row in canonical:
+        for value_index, target, alternatives in stages:
+            for alternative in alternatives:
+                row = _tag_jucys_factor(row, value_index, target, alternative, tag_count)
+        projected.append(row)
+    rows = [None] * dimension
+    rows[seed] = tuple(projected)
+    for source, destination, generator, diagonal, off_diagonal in transfers:
+        transposition = list(range(tag_count))
+        transposition[generator], transposition[generator + 1] = (
+            transposition[generator + 1], transposition[generator])
+        components = []
+        for row in rows[source]:
+            moved = _permute_tag_row(row, transposition, tag_count)
+            components.append(_tag_expanded_row({monomial:
+                (moved.get(monomial, 0) - diagonal * row.get(monomial, 0)) / off_diagonal
+                for monomial in moved.keys() | row.keys()}))
+        rows[destination] = tuple(components)
+    rows = tuple(tuple(_scalar._coalesce_terms(row) for row in components)
+                 for components in rows)
+    for index in range(tag_count - 1):
+        transposition = list(range(tag_count))
+        transposition[index], transposition[index + 1] = transposition[index + 1], transposition[index]
+        matrix = adjacent_transposition_representation_matrix(partition, index)
+        for tableau in range(dimension):
+            for component in range(len(canonical)):
+                expected = defaultdict(lambda: sp.Integer(0))
+                for other in range(dimension):
+                    for monomial, value in rows[other][component].items():
+                        expected[monomial] += matrix[other, tableau] * value
+                actual = _permute_tag_row(rows[tableau][component], transposition, tag_count)
+                for monomial in actual.keys() | expected.keys():
+                    difference = sp.expand(actual.get(monomial, 0) - expected.get(monomial, 0))
+                    if difference != 0 and sp.simplify(difference) != 0:
+                        raise RuntimeError("tag source failed exact Young-generator covariance")
+    return rows
+
+
 def _source_rows(request, label):
     sp = _scalar._sympy()
     block_rows = []
@@ -251,7 +436,10 @@ def _source_rows(request, label):
     target_L = label["target_L"]
     outer = _outer_rows(tuple(label["block_Lambdas"]), target_L, label["outer_copy_index"])
     canonical = {M: _scalar._combine_block_rows(block_rows, outer[M]) for M in range(-target_L, target_L + 1)}
-    if request["tag_count"] == 2:
+    if request["tag_count"] >= 3:
+        projected = _project_tag_rows(tuple(canonical.values()), request["tag_count"],
+                                      tuple(label["tag_partition"]), int(label["tag_seed_tableau"]))
+    elif request["tag_count"] == 2:
         for M, row in canonical.items():
             projected = defaultdict(lambda: sp.Integer(0))
             for monomial, value in row.items():
@@ -260,11 +448,15 @@ def _source_rows(request, label):
                 projected[monomial] += value / 2
                 projected[swapped] += label["tag_character"] * value / 2
             canonical[M] = _scalar._coalesce_terms(projected)
+        projected = (tuple(canonical.values()),)
+    else:
+        projected = (tuple(canonical.values()),)
     parent = covariant_cauchy_request(request["channels"], request["block_sizes"], target_L=target_L,
                                      role_dimension=request["tag_count"] + 1)
     phase = (sum(size * channel["l"] for size, channel in zip(request["block_sizes"], request["channels"], strict=True)) - target_L) % 2
     rows = tuple({key: exact_scalar(value) for key, value in row.items()}
-                 for row in _real_rows(canonical, parent, phase))
+                 for tableau_rows in projected
+                 for row in _real_rows(dict(zip(canonical, tableau_rows, strict=True)), parent, phase))
     for row in rows:
         for monomial, coefficient in row.items():
             role_degrees = Counter(factor[1] for factor in monomial)
@@ -290,7 +482,9 @@ def compile_tagged_cauchy_carriers(request, *, cache_dir=None):
     raw = tuple(_source_rows(request, label) for label in labels)
     groups = defaultdict(list)
     for index, label in enumerate(labels):
-        groups[(label["target_L"], label["target_parity"], label["tag_character"])].append(index)
+        tag_sector = (tuple(label["tag_partition"]) if request["tag_count"] >= 3
+                      else label["tag_character"])
+        groups[(label["target_L"], label["target_parity"], tag_sector)].append(index)
     selected = []
     reconstruction = [{} for _ in labels]
     for indices in groups.values():
@@ -352,12 +546,15 @@ def compile_tagged_cauchy_carriers(request, *, cache_dir=None):
         "reconstruction": tuple(tuple({"raw_index": index, "coefficient": _scalar._exact_scalar_payload(value)}
                                        for index, value in sorted(row.items())) for row in reconstruction),
         "multiplet_count": len(descriptors),
-        "component_count": sum(2 * record["label"]["target_L"] + 1 for record in descriptors),
+        "component_count": sum(record["label"].get("tag_tableau_count", 1) *
+                               (2 * record["label"]["target_L"] + 1) for record in descriptors),
         "coordinate_metric_blocks": tuple(metric_blocks),
         "certificate": {
             "passed": True, "formal_source_parent": request["formal_parent"],
             "source_coordinate_convention": _CONVENTION, "source_image_reconstruction": "exact_all_M",
-            "tag_swap": "exact_polynomial_identity", "complete_multiplets": True,
+            "tag_swap": ("exact_polynomial_identity" if request["tag_count"] <= 2 else
+                         "subsumed_by_exact_young_generator_action"),
+            "complete_multiplets": True,
             "angular_backend": "exact_requested_weight_space_coset",
             "orthogonalization": "none", "coordinate_metric": "nonorthogonal_original_synthesis",
             "density_context": "inclusive", "tag_degree": "one_factor_per_tag",
@@ -373,6 +570,8 @@ def compile_tagged_cauchy_carriers(request, *, cache_dir=None):
             "hidden_polynomial_independence": "not_claimed",
         },
     }
+    if request["tag_count"] > 2:
+        payload["certificate"]["tag_action"] = "exact_young_generator_action"
     payload["self_hash"] = _scalar._stable_hash(_scalar._freeze_json(payload))
     return payload
 
@@ -392,8 +591,9 @@ def validate_tagged_cauchy_carriers(payload, *, exact_reconstruction=False):
         label = descriptor["label"]
         if tuple(label["formal_parent"]) != (rank,):
             raise ValueError("commutative tagged sources require formal parent (N)")
-        if len(descriptor["real_terms_by_component"]) != 2 * label["target_L"] + 1:
-            raise ValueError("tagged source does not retain a complete magnetic multiplet")
+        if len(descriptor["real_terms_by_component"]) != (
+                label.get("tag_tableau_count", 1) * (2 * label["target_L"] + 1)):
+            raise ValueError("tagged source does not retain complete tag and magnetic multiplets")
     if exact_reconstruction:
         expected = compile_tagged_cauchy_carriers(request)
         if expected["self_hash"] != payload["self_hash"]:
@@ -625,12 +825,21 @@ def tagged_cauchy_carrier_schedule(payloads, *, coordinate_ids=None, support_rea
         "coefficient_values": tuple(record[2] for record in coefficients),
         "source_hashes": tuple(payload["self_hash"] for payload in payloads),
         "marginal_image_certificate": marginal_certificate,
-        "tag_swap_certificate": {"passed": all(payload["certificate"]["tag_swap"] == "exact_polynomial_identity" for payload in payloads),
-                                 "character_values": tuple(sorted({record["label"]["tag_character"] for record in inventory})),
+        "tag_swap_certificate": {"passed": tag_count <= 2 and all(
+                                     payload["certificate"]["tag_swap"] == "exact_polynomial_identity"
+                                     for payload in payloads),
+                                 "character_values": tuple(sorted({record["label"]["tag_character"]
+                                     for record in inventory if record["label"]["tag_character"] is not None})),
                                  "identity": "P sigma B(j)=tau P B(j)" if support_realization == "edge_marginal"
-                                     else "X(k,j)=tau*X(j,k)"},
+                                     else "X(k,j)=tau*X(j,k)" if tag_count <= 2
+                                     else "complete Young-tableau action"},
         "provenance": "ye3t.couplings.compile", "coefficient_precision": "binary64",
     }
+    if tag_count > 2:
+        schedule["tag_action_certificate"] = {
+            "passed": True, "identity": "rho(s_i) B_t=sum_u D(s_i)[u,t] B_u",
+            "partitions": tuple(sorted({tuple(record["label"]["tag_partition"])
+                for record in inventory})), "exact_generator_checks": True}
     schedule["self_hash"] = _scalar._stable_hash(_scalar._freeze_json(schedule))
     return schedule
 
@@ -755,7 +964,7 @@ def _compile_tagged_role_factor_execution(schedule):
     return result
 
 
-def tagged_cauchy_carrier_model_plan(compiled, *, sector_policy, hidden_channels=4,
+def tagged_cauchy_carrier_model_plan(compiled, *, sector_policy="tagged_mixed", hidden_channels=4,
                                      support_realization="ordered_tags"):
     """Pack source sectors and declare complete hidden input carrier layouts."""
     from ye3t.execution_plan import YE3TCarrierKey, YE3TCarrierLayout, YE3T_O3_PRIMARY_CONVENTION
@@ -769,7 +978,7 @@ def tagged_cauchy_carrier_model_plan(compiled, *, sector_policy, hidden_channels
     if _scalar._stable_hash(_scalar._freeze_json(body)) != compiled.get("self_hash"):
         raise ValueError("tagged catalogue hash mismatch")
     schedules, inventories = [], []
-    for tags in (0, 1, 2):
+    for tags in sorted({source["request"]["tag_count"] for source in compiled["sources"]}):
         if sector_policy == "density" and tags:
             continue
         payloads = [source for source in compiled["sources"] if source["request"]["tag_count"] == tags]
@@ -779,7 +988,7 @@ def tagged_cauchy_carrier_model_plan(compiled, *, sector_policy, hidden_channels
         for source in payloads:
             for descriptor in source["descriptors"]:
                 label = descriptor["label"]
-                trivial = label["tag_character"] == 1 and all(tuple(kappa) == (size,)
+                trivial = tuple(label["tag_partition"]) == ((tags,) if tags else ()) and all(tuple(kappa) == (size,)
                     for kappa, size in zip(label["block_kappas"], label["block_sizes"], strict=True))
                 if sector_policy == "tagged_mixed" or trivial:
                     selected.append(label["coordinate_id"])
@@ -788,6 +997,56 @@ def tagged_cauchy_carrier_model_plan(compiled, *, sector_policy, hidden_channels
         realization = support_realization if tags == 2 else "ordered_tags"
         schedule = tagged_cauchy_carrier_schedule(payloads, coordinate_ids=selected,
             support_realization=realization)
+        if tags > 2:
+            groups = {}
+            for record in schedule["inventory"]:
+                label = record["label"]
+                partition = tuple(label["tag_partition"])
+                branch = "trivial" if partition == (tags,) and all(
+                    tuple(kappa) == (size,) for kappa, size in zip(
+                        label["block_kappas"], label["block_sizes"], strict=True)) else "mixed"
+                sector = (sum(label["block_sizes"]), label["target_L"],
+                          label["target_parity"], partition, branch)
+                groups.setdefault(sector, []).append(record)
+            inventory = []
+            for (rank, L, parity, partition, branch), records in groups.items():
+                dimension = int(Partition(partition).dimension)
+                if any(int(record["label"]["tag_tableau_count"]) != dimension for record in records):
+                    raise RuntimeError("tagged source has an incomplete right-tag multiplet")
+                key = YE3TCarrierKey(rank, (rank,), L,
+                    convention_id=YE3T_O3_PRIMARY_CONVENTION, parity=parity)
+                layout = YE3TCarrierLayout(key, min(int(hidden_channels), len(records)), 1, 2 * L + 1)
+                source_coordinates = tuple(record["label"]["coordinate_id"] for record in records)
+                lineage = _scalar._stable_hash(_scalar._freeze_json({
+                    "source_coordinates": source_coordinates, "operation": "right_tag_multiplet_projection",
+                    "tag_partition": partition, "support_tag_count": tags}))
+                support = {"schema": "ye3t_tagged_occurrence_support_v1", "tag_count": tags,
+                    "source_tag_count": tags, "root": "center_atom",
+                    "row_domain": "same_ordered_distinct_periodic_occurrences",
+                    "density_context": "inclusive", "right_tag_partition": partition}
+                for tableau in range(dimension):
+                    components = tuple(index for record in records for index in range(
+                        record["component_slice"][0] + tableau * (2 * L + 1),
+                        record["component_slice"][0] + (tableau + 1) * (2 * L + 1)))
+                    inventory.append({"source_index": len(inventory),
+                        "path_id": "tagged_input_" + lineage + "_t" + str(tableau),
+                        "source": "tagged_cauchy_occurrence", "rank": rank, "L_R": L,
+                        "permutation_representation": "trivial",
+                        "direct_scalar": L == 0 and parity == 1 and partition == (tags,),
+                        "carrier_layout": layout.to_dict(), "convention_id": YE3T_O3_PRIMARY_CONVENTION,
+                        "tag_character": (1 if partition == (tags,) else
+                                          -1 if partition == (1,) * tags else None),
+                        "tag_partition": partition, "tag_tableau_index": tableau,
+                        "tag_tableau_count": dimension, "right_tag_group_id": lineage,
+                        "tag_count": tags, "support_tag_count": tags, "center_type": None,
+                        "source_sector_branch": branch,
+                        "lineage_id": lineage, "support_contract": support,
+                        "source_coordinate_ids": source_coordinates,
+                        "source_component_indices": components,
+                        "input_channel_count": len(records), "source_catalogue_hash": compiled["self_hash"]})
+            schedules.append(schedule)
+            inventories.append({"tag_count": tags, "sources": tuple(inventory)})
+            continue
         groups = {}
         for record in schedule["inventory"]:
             label = record["label"]
@@ -847,39 +1106,71 @@ def _catalogue_request(catalogue, species):
     ranks = tuple(sorted(set(int(rank) for rank in cfg["ranks"])))
     if not ranks or min(ranks) < 1:
         raise ValueError("tagged catalogue ranks must be positive")
-    def rank_map(name, positive):
-        supplied = {int(rank): value for rank, value in cfg[name].items()}
+    def rank_map(name, shared_name, positive):
+        if name in cfg and shared_name in cfg:
+            raise ValueError(name + " and " + shared_name + " are alternative inputs")
+        if name in cfg:
+            supplied = {int(rank): value for rank, value in cfg[name].items()}
+        elif shared_name in cfg:
+            supplied = {rank: cfg[shared_name] for rank in ranks}
+        else:
+            raise ValueError(name + " or " + shared_name + " is required")
         if set(supplied) != set(ranks):
             raise ValueError(name + " must specify every configured rank exactly")
         result = {str(rank): int(supplied[rank]) for rank in ranks}
         if min(result.values()) < int(positive):
             raise ValueError(name + " contains an invalid cap")
         return result
-    partitions = {int(rank): tuple(tuple(int(size) for size in pattern) for pattern in patterns)
-                  for rank, patterns in cfg["source_block_partitions_by_rank"].items()}
+    if "source_block_partitions_by_rank" in cfg:
+        if "max_source_blocks" in cfg:
+            raise ValueError("source_block_partitions_by_rank and max_source_blocks are alternative inputs")
+        partitions = {int(rank): tuple(tuple(int(size) for size in pattern) for pattern in patterns)
+                      for rank, patterns in cfg["source_block_partitions_by_rank"].items()}
+    else:
+        from ye3t.core.basis.exhaustive_enumeration import integer_partitions
+        max_blocks = cfg.get("max_source_blocks")
+        if max_blocks is not None and int(max_blocks) <= 0:
+            raise ValueError("max_source_blocks must be positive or None (all partitions)")
+        partitions = {rank: tuple(pattern for pattern in integer_partitions(rank)
+                                  if max_blocks is None or len(pattern) <= int(max_blocks))
+                      for rank in ranks}
     if set(partitions) != set(ranks) or any(not patterns for patterns in partitions.values()):
         raise ValueError("source block partitions must specify every configured rank")
     for rank, patterns in partitions.items():
         if len(set(patterns)) != len(patterns) or any(sum(pattern) != rank or min(pattern) < 1 for pattern in patterns):
             raise ValueError("source block partitions must be distinct positive partitions of their rank")
     tag_counts = tuple(sorted(set(int(value) for value in cfg.get("tag_counts", (0, 1, 2)))))
-    if not tag_counts or any(value not in (0, 1, 2) for value in tag_counts):
-        raise ValueError("configured tag counts must be drawn from 0,1,2")
-    caps = {str(rank): value for rank, value in cfg["max_features_per_rank"].items()}
+    if not tag_counts or min(tag_counts) < 0:
+        raise ValueError("configured tag counts must be nonnegative")
+    kappa_policy = cfg.get("kappa_policy", "all")
+    tag_sectors = cfg.get("tag_sectors", "all")
+    if kappa_policy not in {"trivial", "all"} or tag_sectors not in {"trivial", "all"}:
+        raise ValueError("kappa_policy and tag_sectors must be trivial or all")
+    feature_caps = cfg.get("max_features_per_rank")
+    if feature_caps is None or isinstance(feature_caps, int):
+        caps = {str(rank): feature_caps for rank in ranks}
+    else:
+        caps = {str(rank): value for rank, value in feature_caps.items()}
     if set(caps) != {str(rank) for rank in ranks} or any(value is not None and int(value) <= 0 for value in caps.values()):
         raise ValueError("feature caps require every rank and positive limits or None (exhaustive)")
     normalized = {
-        "ranks": ranks, "nmax_per_rank": rank_map("nmax_per_rank", True),
-        "lmax_per_rank": rank_map("lmax_per_rank", False),
+        "ranks": ranks, "nmax_per_rank": rank_map("nmax_per_rank", "nmax", True),
+        "lmax_per_rank": rank_map("lmax_per_rank", "lmax", False),
         "source_block_partitions_by_rank": {str(rank): partitions[rank] for rank in ranks},
         "tag_counts": tag_counts, "input_Lmax": int(cfg.get("input_Lmax", 3)),
-        "max_records_per_rank": int(cfg.get("max_records_per_rank", 256)),
+        "max_records_per_rank": (None if cfg.get("max_records_per_rank") is None else
+                                 int(cfg["max_records_per_rank"])),
         "max_features_per_rank": {key: None if value is None else int(value) for key, value in caps.items()},
         "source_family_id": cfg.get("source_family_id", "orthogonal_shifted_jacobi_origin_regular_v1"),
         "selection_policy": "balanced_content_tag_angular_sector_original_coordinates_v1",
     }
-    if normalized["max_records_per_rank"] <= 0 or normalized["input_Lmax"] < 0:
-        raise ValueError("record cap must be positive and input_Lmax nonnegative")
+    if kappa_policy != "all":
+        normalized["kappa_policy"] = kappa_policy
+    if tag_sectors != "all":
+        normalized["tag_sectors"] = tag_sectors
+    if ((normalized["max_records_per_rank"] is not None and
+         normalized["max_records_per_rank"] <= 0) or normalized["input_Lmax"] < 0):
+        raise ValueError("record cap must be positive or None and input_Lmax nonnegative")
     request = {"family": TAGGED_CAUCHY_CARRIERS_FAMILY, "species": species, "catalogue": normalized}
     request["request_hash"] = _scalar._stable_hash(_scalar._freeze_json(request))
     return request
@@ -927,10 +1218,13 @@ def _catalogue_count(request):
                     candidates.append({"rank": rank, "pattern": pattern,
                         "max_primitive_l": max(channel["l"] for channel in selected_channels),
                         "request": tagged_cauchy_carriers_request(selected_channels, pattern, tag_count=tags,
-                            target_Ls=range(cfg["input_Lmax"] + 1))})
+                            target_Ls=range(cfg["input_Lmax"] + 1),
+                            kappa_policy=cfg.get("kappa_policy", "all"),
+                            tag_sectors=cfg.get("tag_sectors", "all"))})
         selected = _round_robin_groups(candidates,
             lambda record: (record["pattern"], record["request"]["tag_count"], record["max_primitive_l"]),
-            len(candidates) if rank == 1 else cfg["max_records_per_rank"])
+            len(candidates) if rank == 1 or cfg["max_records_per_rank"] is None
+            else cfg["max_records_per_rank"])
         records.extend(selected)
         rank_reports.append({"rank": rank, "available_candidate_records": len(candidates),
                              "selected_candidate_records": len(selected),
@@ -972,7 +1266,8 @@ def _compile_catalogue(request, *, cache_dir=None):
             fixed = tagged_cauchy_carriers_count(record["request"])
             requests[index] = record["request"]
             for label in fixed["labels"]:
-                trivial = (label["tag_character"] == 1 and all(tuple(kappa) == (size,)
+                trivial = (tuple(label["tag_partition"]) == ((label["tag_count"],)
+                           if label["tag_count"] else ()) and all(tuple(kappa) == (size,)
                            for kappa, size in zip(label["block_kappas"], label["block_sizes"], strict=True)))
                 ranked.append({"record_index": index, "label": label, "trivial": trivial,
                                "max_primitive_l": record["max_primitive_l"], "pattern": record["pattern"]})

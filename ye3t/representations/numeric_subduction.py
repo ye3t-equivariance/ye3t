@@ -15,12 +15,15 @@ import json
 import os
 from pathlib import Path
 import time
+from functools import lru_cache
 
+import numpy as np
 import torch
 
 from .generalized_irreps import Partition
-from .projectors import canonical_irrep_matrices_numeric, standard_tableaux
+from .projectors import adjacent_transposition_representation_matrix_numeric, standard_tableaux
 from .young_orthogonal import (
+    _adjacent_word_to_permutation,
     _coerce_partition,
     _constructive_subduction_graph_restricted_intertwiner_basis,
     _split_young_subgroup_permutation,
@@ -161,10 +164,26 @@ def _normalize_partitions(values):
     return tuple(_coerce_partition(value) for value in values)
 
 
-def _torch_young_irrep_matrix_numeric(partition_parts, perm, *, dtype, device):
+@lru_cache(maxsize=256)
+def _young_irrep_matrix_numeric_from_generators(partition_parts, perm):
+    """Compose only the requested Young-orthogonal adjacent generators.
+
+    Algorithmic reference: Young's orthogonal form for adjacent transpositions.
+    Paper/reference: Vershik--Okounkov (2005), section 6, equation (6.5).
+    Implementation note: independent implementation; no source copied.
+    """
     partition_parts = tuple(int(part) for part in partition_parts)
     perm = tuple(int(x) for x in perm)
-    matrix = canonical_irrep_matrices_numeric(partition_parts)[perm]
+    matrix = np.eye(len(standard_tableaux(partition_parts)), dtype=np.float64)
+    for generator in _adjacent_word_to_permutation(perm):
+        matrix = adjacent_transposition_representation_matrix_numeric(
+            partition_parts, generator) @ matrix
+    return matrix
+
+
+def _torch_young_irrep_matrix_numeric(partition_parts, perm, *, dtype, device):
+    matrix = _young_irrep_matrix_numeric_from_generators(
+        tuple(int(part) for part in partition_parts), tuple(int(x) for x in perm))
     return torch.as_tensor(matrix, dtype=dtype, device=device)
 
 

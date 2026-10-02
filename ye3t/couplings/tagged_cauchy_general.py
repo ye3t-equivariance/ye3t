@@ -13,6 +13,7 @@ import logging
 from fractions import Fraction
 from functools import lru_cache
 from itertools import product
+from math import comb
 from threading import RLock
 
 from ye3t.core.cg import cg_exact_integer
@@ -192,8 +193,6 @@ def _exact_pivot_image(raw_rows):
 def _physical_image_rows(compiled, role_bindings):
     """Apply the exact source map to supported compiler Cauchy coordinates."""
     normalized = normalize_role_bindings(role_bindings, compiled.payload["role_dimension"])
-    if normalized["tag_count"] > 2:
-        raise NotImplementedError("The current certified tag-count scope is s=0,1,2.")
     support = tag_support_report(compiled, role_bindings)
     channels = {int(channel["channel_index"]): channel for channel in compiled.payload["channels"]}
     rows = []
@@ -236,7 +235,7 @@ def _general_request(catalogue, species):
     allowed = {"nmax_per_rank", "lmax_per_rank", "source_block_partitions_by_rank",
                "angular_patterns_by_rank", "tag_counts_by_rank", "max_records_per_rank",
                "max_features_per_rank", "selected_basis_coordinates_by_rank",
-               "resource_limits", "angular_basis_backend"}
+               "resource_limits", "angular_basis_backend", "max_tag_set_partitions"}
     if set(catalogue) - allowed:
         raise ValueError(f"Unknown tagged catalogue options: {sorted(set(catalogue)-allowed)}")
     angular_backend = str(catalogue.get("angular_basis_backend", "exact_weight_space_v1"))
@@ -328,6 +327,9 @@ def _general_count(request):
               "maximum_channel_assignment_count": 100000,
               "maximum_loader_symbolic_cells": 40000000,
               **dict(catalogue.get("resource_limits", {}))}
+    partition_budget = int(catalogue.get("max_tag_set_partitions", 4096))
+    if partition_budget < 1:
+        raise ValueError("max_tag_set_partitions must be positive.")
     labels = []
     components = []
     for record in _content_records(request):
@@ -335,10 +337,19 @@ def _general_count(request):
         rank = sum(sizes)
         for tag_count in _rank_value(catalogue.get("tag_counts_by_rank", {}), rank, (0, 1, 2)):
             tag_count = int(tag_count)
-            if tag_count not in (0, 1, 2):
-                raise ValueError("The current certified tag-count scope is s=0,1,2.")
+            if tag_count < 0:
+                raise ValueError("Tag counts must be nonnegative.")
             if tag_count > rank:
                 continue
+            bell = [1]
+            for order in range(1, tag_count + 1):
+                bell.append(sum(comb(order - 1, index) * bell[index]
+                                for index in range(order)))
+            if bell[-1] > partition_budget:
+                raise MemoryError(
+                    f"Tag count {tag_count} needs {bell[-1]} set partitions; "
+                    f"max_tag_set_partitions={partition_budget}."
+                )
             try:
                 parent = lifted_cauchy_fixed_content_scalar_request(
                     record["channels"], sizes, role_dimension=tag_count+1,

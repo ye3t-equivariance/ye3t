@@ -108,6 +108,12 @@ from ye3t.couplings.rank_additive_hidden_lineage import (
     is_rank_additive_hidden_lineage_request,
     hidden_lineage_contract,
 )
+from ye3t.couplings.tagged_right_rank_growth import (
+    tagged_right_rank_growth_request,
+    tagged_right_rank_growth_count,
+    compile_tagged_right_rank_growth,
+    is_tagged_right_rank_growth_request,
+)
 from ye3t.couplings.lifted_cauchy_scalar import (
     CompiledLiftedCauchyScalar,
     LIFTED_CAUCHY_K0_ORDINARY_LOWERING_SCHEMA,
@@ -2601,6 +2607,8 @@ def count(
 ):
     """Return valid labels and multiplicities for a fixed-content request."""
 
+    if is_tagged_right_rank_growth_request(request):
+        return tagged_right_rank_growth_count(request)
     if is_rank_additive_hidden_lineage_request(request):
         return rank_additive_hidden_lineage_count(request)
     if is_tagged_cauchy_carriers_request(request):
@@ -2808,6 +2816,8 @@ def plan(
 ):
     """Return a coupling backend plan with multiplicity provenance."""
 
+    if is_tagged_right_rank_growth_request(request):
+        return tagged_right_rank_growth_count(request)
     if is_rank_additive_hidden_lineage_request(request):
         return rank_additive_hidden_lineage_count(request)
     if is_tagged_cauchy_carriers_request(request):
@@ -4795,6 +4805,8 @@ def compile(
         if request.get("execution") != "role_factorized":
             raise ValueError("unknown tagged carrier execution lowering")
         return _compile_tagged_role_factor_execution(request["source_schedule"])
+    if is_tagged_right_rank_growth_request(request):
+        return compile_tagged_right_rank_growth(request)
     if is_rank_additive_hidden_lineage_request(request):
         return compile_rank_additive_hidden_lineage(request)
     if is_tagged_cauchy_carriers_request(request):

@@ -116,24 +116,57 @@ def test_general_public_compiler_round_trip():
         CompiledTaggedCauchyImage.from_dict(corrupt)
 
 
+def test_general_three_tag_compiler_and_partition_budget():
+    catalogue = {
+        "nmax_per_rank": {3: 3}, "lmax_per_rank": {3: 0},
+        "source_block_partitions_by_rank": {3: [[1, 1, 1]]},
+        "tag_counts_by_rank": {3: [3]},
+        "max_records_per_rank": 1, "max_features_per_rank": 1,
+    }
+    request = tagged_cauchy_image_request(species=["H"], catalogue=catalogue)
+    report = count(request)
+    assert report.labels and all(row["tag_count"] == 3 for row in report.labels)
+    compiled = compile(plan(report))
+    assert compiled.payload["selected_raw_tag_counts"] == (3,)
+    assert len(compiled.payload["image_rows"]) == 1
+    assert CompiledTaggedCauchyImage.from_dict(compiled.to_dict()).self_hash == compiled.self_hash
+    limited = tagged_cauchy_image_request(
+        species=["H"], catalogue={**catalogue, "max_tag_set_partitions": 4})
+    with pytest.raises(MemoryError, match="set partitions"):
+        count(limited)
+
+
 def test_general_requested_weight_backend_has_no_fixed_order_eight_ceiling():
+    rank = 9
     request = tagged_cauchy_image_request(species=["H"], catalogue={
         "angular_basis_backend": "exact_weight_space_v1",
-        "nmax_per_rank": {9: 1}, "lmax_per_rank": {9: 0},
-        "source_block_partitions_by_rank": {9: [[9]]},
-        "tag_counts_by_rank": {9: [1]}, "max_features_per_rank": 1,
+        "nmax_per_rank": {rank: 1}, "lmax_per_rank": {rank: 0},
+        "source_block_partitions_by_rank": {rank: [[rank]]},
+        "tag_counts_by_rank": {rank: [1]}, "max_features_per_rank": 1,
         "max_records_per_rank": 1,
     })
     compiled = compile(plan(count(request)))
     assert len(compiled.payload["image_rows"]) == 1
     coordinate = compiled.payload["image_coordinate_provenance"][0]
-    assert coordinate["tensor_order"] == 9
+    assert coordinate["tensor_order"] == rank
     assert coordinate["tag_count"] == 1
     assert CompiledTaggedCauchyImage.from_dict(compiled.to_dict()).self_hash == compiled.self_hash
     legacy = tagged_cauchy_image_request(species=["H"], catalogue={
         **request["catalogue"], "angular_basis_backend": "legacy_exact"})
     with pytest.raises(MemoryError, match="exact_matrix_unit_rank_limit"):
         count(legacy)
+
+
+def test_rank_sixteen_weight_backend_preflight_has_no_fixed_ceiling():
+    request = tagged_cauchy_image_request(species=["H"], catalogue={
+        "angular_basis_backend": "exact_weight_space_v1",
+        "nmax_per_rank": {16: 1}, "lmax_per_rank": {16: 0},
+        "source_block_partitions_by_rank": {16: [[16]]},
+        "tag_counts_by_rank": {16: [1]}, "max_features_per_rank": 1,
+        "max_records_per_rank": 1,
+    })
+    report = count(request)
+    assert report.labels and report.labels[0]["tensor_order"] == 16
 
 
 def test_named_coordinates_bind_to_their_declared_rank():

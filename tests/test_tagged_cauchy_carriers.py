@@ -1,15 +1,22 @@
 """Independent physical/tag checks for selected covariant source coordinates."""
 
 import copy
+from collections import defaultdict
+from itertools import permutations
+from math import factorial
 
 import pytest
 
 from ye3t.couplings import compile, count, plan, tagged_cauchy_carriers_request
 from ye3t.couplings.tagged_cauchy_carriers import (
-    _edge_marginal_rows, _edge_physical_row, tagged_cauchy_carrier_schedule,
+    _edge_marginal_rows, _edge_physical_row, _project_tag_rows, _tag_irrep_matrix,
+    tagged_cauchy_carrier_schedule,
     validate_tagged_cauchy_carriers,
 )
+from ye3t.couplings import lifted_cauchy_scalar as scalar
+from ye3t._optional_sympy import sp
 from ye3t.couplings.lifted_cauchy_scalar import _exact_scalar_from_payload
+from ye3t.representations.projectors import compose_permutations
 
 
 def _channel(angular_l=1, species="Ni", n=0):
@@ -135,6 +142,86 @@ def test_rank_one_l3_and_complete_channel_keys():
         tagged_cauchy_carriers_request([_channel(), _channel()], [1, 1], tag_count=2)
 
 
+def test_three_tags_resolve_complete_right_s3_irreps():
+    channels = [_channel(0, n=index) for index in range(3)]
+    request = tagged_cauchy_carriers_request(channels, [1, 1, 1],
+        tag_count=3, target_Ls=[0])
+    opportunities = count(request)
+    assert {tuple(label["tag_partition"]) for label in opportunities["labels"]} == {
+        (3,), (2, 1), (1, 1, 1)}
+    compiled = compile(plan(opportunities))
+    assert compiled["component_count"] == 6  # The regular S3 orbit: 1 + 2*2 + 1.
+    assert compiled["multiplet_count"] == 4
+    assert validate_tagged_cauchy_carriers(compiled, exact_reconstruction=True)
+    schedule = tagged_cauchy_carrier_schedule((compiled,))
+    assert schedule["output_dimension"] == 6
+    assert schedule["tag_action_certificate"]["passed"]
+    assert tuple(schedule["tag_action_certificate"]["partitions"]) == ((1, 1, 1), (2, 1), (3,))
+    for descriptor in compiled["descriptors"]:
+        label = descriptor["label"]
+        assert len(descriptor["real_terms_by_component"]) == label["tag_tableau_count"]
+
+
+def test_four_tag_mixed_irrep_and_rank_general_young_generator():
+    channels = [_channel(0, n=index) for index in range(4)]
+    request = tagged_cauchy_carriers_request(channels, [1, 1, 1, 1],
+        tag_count=4, target_Ls=[0])
+    labels = count(request)["labels"]
+    for partition, dimension in (((2, 2), 2), ((3, 1), 3)):
+        label = next(label for label in labels if tuple(label["tag_partition"]) == partition)
+        selected = {**request, "selected_coordinates": (label["coordinate_id"],)}
+        compiled = compile(plan(selected))
+        assert compiled["multiplet_count"] == 1
+        assert compiled["component_count"] == dimension
+        assert tuple(compiled["descriptors"][0]["label"]["tag_partition"]) == partition
+    permutation = (1, 0, 2, 3, 4, 5, 6, 7, 8)
+    assert _tag_irrep_matrix((8, 1), permutation).shape == (8, 8)
+    adjacent = (0, 2, 1, 3, 4, 5, 6, 7, 8)
+    composed = compose_permutations(permutation, adjacent)
+    assert _tag_irrep_matrix((8, 1), composed) == (
+        _tag_irrep_matrix((8, 1), adjacent) * _tag_irrep_matrix((8, 1), permutation))
+
+
+def test_three_tag_mixed_irrep_and_nonzero_rotation_compile_together():
+    channels = [_channel(1, n=index) for index in range(3)]
+    request = tagged_cauchy_carriers_request(channels, [1, 1, 1],
+        tag_count=3, target_Ls=[1])
+    label = next(label for label in count(request)["labels"]
+                 if tuple(label["tag_partition"]) == (2, 1))
+    request["selected_coordinates"] = (label["coordinate_id"],)
+    compiled = compile(plan(request))
+    assert compiled["multiplet_count"] == 1
+    assert compiled["component_count"] == 6  # Two tag tableaux times three magnetic components.
+    assert compiled["descriptors"][0]["label"]["target_L"] == 1
+
+
+@pytest.mark.parametrize("partition", ((3,), (2, 1), (1, 1, 1),
+                                       (4,), (3, 1), (2, 2), (2, 1, 1), (1, 1, 1, 1),
+                                       (4, 1), (3, 2)))
+def test_generator_projector_equals_full_group_matrix_unit(partition):
+    tag_count = sum(partition)
+    monomial = tuple((index, index, 0) for index in range(tag_count))
+    seed = 1 if partition in ((2, 1), (3, 1), (2, 2)) else 0
+    dimension = _tag_irrep_matrix(partition, tuple(range(tag_count))).rows
+    projected = _project_tag_rows(({monomial: sp.Integer(1)},), tag_count, partition, seed)
+    for tableau in range(dimension):
+        reference = defaultdict(lambda: sp.Integer(0))
+        for permutation in permutations(range(tag_count)):
+            coefficient = (sp.Rational(dimension, factorial(tag_count)) *
+                           _tag_irrep_matrix(partition, permutation)[seed, tableau])
+            moved = tuple(sorted((channel, permutation[role], magnetic)
+                                 for channel, role, magnetic in monomial))
+            reference[moved] += coefficient
+        assert projected[tableau][0] == scalar._coalesce_terms(reference)
+
+
+def test_six_tag_generator_projector_keeps_complete_mixed_multiplet():
+    monomial = tuple((index, index, 0) for index in range(6))
+    rows = _project_tag_rows(({monomial: sp.Integer(1)},), 6, (5, 1), 0)
+    assert len(rows) == 5
+    assert all(component[0] for component in rows)
+
+
 def test_role_copy_labels_follow_pivots_not_contiguous_content_counts():
     request = tagged_cauchy_carriers_request([_channel()], [3], tag_count=2, target_Ls=[1])
     report = count(request)
@@ -168,6 +255,28 @@ def test_catalogue_caps_are_precompile_complete_multiplet_choices(tmp_path, monk
         assert record["selected_source_multiplets"] > 0
         assert record["multiplet_cap"] is None or record["selected_source_multiplets"] <= record["multiplet_cap"]
     assert {sum(source["request"]["block_sizes"]) for source in compiled["sources"]} == {1, 2, 3, 4}
+
+
+def test_catalogue_shared_caps_and_partition_limit_match_expanded_request(tmp_path):
+    compact = {"ranks": [1, 2, 3, 4], "nmax": 1, "lmax": 1,
+               "max_source_blocks": 2, "max_features_per_rank": 12}
+    expanded = {"ranks": [1, 2, 3, 4],
+                "nmax_per_rank": {rank: 1 for rank in range(1, 5)},
+                "lmax_per_rank": {rank: 1 for rank in range(1, 5)},
+                "source_block_partitions_by_rank": {1: [[1]], 2: [[2], [1, 1]],
+                    3: [[3], [2, 1]], 4: [[4], [3, 1], [2, 2]]},
+                "max_features_per_rank": {rank: 12 for rank in range(1, 5)}}
+    short = tagged_cauchy_carriers_request(catalogue=compact, species=["Ni"])
+    long = tagged_cauchy_carriers_request(catalogue=expanded, species=["Ni"])
+    assert short == long
+    unrestricted = tagged_cauchy_carriers_request(catalogue={
+        "ranks": [5], "nmax": 1, "lmax": 0}, species=["Ni"])
+    assert (1, 1, 1, 1, 1) in unrestricted["catalogue"]["source_block_partitions_by_rank"]["5"]
+    assert unrestricted["catalogue"]["max_features_per_rank"]["5"] is None
+    one_rank = tagged_cauchy_carriers_request(catalogue={
+        "ranks": [1], "nmax": 1, "lmax": 0}, species=["Ni"])
+    cached = compile(one_rank, cache_dir=tmp_path)
+    assert cached["self_hash"] == compile(one_rank, cache_dir=tmp_path)["self_hash"]
 
 
 def test_requested_scalar_template_uses_exact_cosets_without_full_projector(monkeypatch):

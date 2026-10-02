@@ -3652,10 +3652,8 @@ def _canonical_raw_tag_counts(values):
     if len(set(values)) != len(values):
         raise ValueError("selected_raw_tag_counts must not contain duplicates.")
     selected = tuple(sorted(values))
-    if any(value not in {0, 1, 2} for value in selected):
-        raise ValueError(
-            "The bounded tagged compiler supports raw tag counts 0, 1, and 2."
-        )
+    if any(value < 0 for value in selected):
+        raise ValueError("selected_raw_tag_counts must be nonnegative.")
     return selected
 
 
@@ -3667,6 +3665,8 @@ def _selected_raw_tag_counts(request):
 
 def _bounded_n4_image_dimension(source_count, selected_raw_tag_counts):
     selected = _canonical_raw_tag_counts(selected_raw_tag_counts)
+    if not set(selected).issubset({0, 1, 2}):
+        raise ValueError("The bounded tagged compiler supports raw tag counts 0, 1, and 2.")
     source_count = int(source_count)
     if source_count < 1:
         raise ValueError("The bounded tagged image requires at least one source.")
@@ -3772,6 +3772,8 @@ def tagged_cauchy_image_request(
     selected_raw_tag_counts = _canonical_raw_tag_counts(
         selected_raw_tag_counts
     )
+    if not set(selected_raw_tag_counts).issubset({0, 1, 2}):
+        raise ValueError("The bounded tagged compiler supports raw tag counts 0, 1, and 2.")
     scope = {
         "tensor_order": int(tensor_order),
         "tag_count": int(tag_count),

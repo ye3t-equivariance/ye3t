@@ -4,7 +4,7 @@ import pytest
 import torch
 
 
-def test_numeric_subduction_young_matrix_uses_shared_projector_cache():
+def test_numeric_subduction_young_matrix_matches_small_exact_group_reference():
     import numpy as np
 
     from ye3t.representations.numeric_subduction import _torch_young_irrep_matrix_numeric
@@ -17,17 +17,18 @@ def test_numeric_subduction_young_matrix_uses_shared_projector_cache():
     np.testing.assert_allclose(matrix.numpy(), expected, atol=1.0e-12, rtol=1.0e-12)
 
 
-def test_numeric_subduction_constraint_assembly_uses_shared_young_matrix_cache(monkeypatch):
+def test_numeric_subduction_constraint_assembly_uses_only_adjacent_generators(monkeypatch):
     import ye3t.representations.numeric_subduction as numeric_subduction
 
     calls = []
-    real = numeric_subduction.canonical_irrep_matrices_numeric
+    real = numeric_subduction.adjacent_transposition_representation_matrix_numeric
 
-    def wrapped(partition):
-        calls.append(tuple(int(part) for part in partition))
-        return real(partition)
+    def wrapped(partition, generator):
+        calls.append((tuple(int(part) for part in partition), int(generator)))
+        return real(partition, generator)
 
-    monkeypatch.setattr(numeric_subduction, "canonical_irrep_matrices_numeric", wrapped)
+    numeric_subduction._young_irrep_matrix_numeric_from_generators.cache_clear()
+    monkeypatch.setattr(numeric_subduction, "adjacent_transposition_representation_matrix_numeric", wrapped)
     constraints, _target, _child, backend, _timings = numeric_subduction.assemble_numeric_subduction_constraints(
         ((2,), (1,)),
         (2, 1),
@@ -36,7 +37,20 @@ def test_numeric_subduction_constraint_assembly_uses_shared_young_matrix_cache(m
 
     assert backend == "python"
     assert constraints.shape[1] == 2
-    assert (2, 1) in calls
+    assert ((2, 1), 0) in calls
+
+
+def test_numeric_subduction_young_matrix_is_rank_general_without_full_group_enumeration():
+    import numpy as np
+
+    from ye3t.representations.numeric_subduction import _torch_young_irrep_matrix_numeric
+    from ye3t.representations.young_orthogonal import _young_irrep_matrix
+
+    permutation = (0, 1, 2, 3, 5, 4, 6, 7, 8)
+    actual = _torch_young_irrep_matrix_numeric((8, 1), permutation,
+        dtype=torch.float64, device="cpu").numpy()
+    exact = np.asarray(_young_irrep_matrix((8, 1), permutation), dtype=np.float64)
+    np.testing.assert_allclose(actual, exact, atol=1e-13, rtol=1e-13)
 
 
 def test_numeric_subduction_nullspace_matches_exact_restricted_projector_for_multiplicity_case(tmp_path):
