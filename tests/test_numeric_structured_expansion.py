@@ -673,6 +673,145 @@ def test_real_factorized_schedule_preserves_odd_pair_coupling_phase():
     torch.testing.assert_close(direct_real, direct_expected, atol=1.0e-10, rtol=1.0e-10)
 
 
+@pytest.mark.parametrize(
+    ("left_L", "right_L", "out_L"),
+    ((1, 1, 1), (1, 2, 2), (2, 2, 1), (1, 1, 0), (1, 2, 1)),
+)
+def test_native_product_coupling_matches_packed_reference(left_L, right_L, out_L):
+    import torch
+    from ye3t.runtime.native import NativeYE3TOperatorModule
+    from ye3t.paired_cg import couple_packed_real_tesseral
+
+    generator = torch.Generator().manual_seed(1840 + 100 * left_L + 10 * right_L + out_L)
+    left = torch.randn(4, 2 * left_L + 1, dtype=torch.float64, generator=generator).requires_grad_()
+    right = torch.randn(4, 2 * right_L + 1, dtype=torch.float64, generator=generator).requires_grad_()
+    expected, _ = couple_packed_real_tesseral(
+        left.unsqueeze(1), right.unsqueeze(1), left_L, right_L, out_L, backend="pytorch",
+    )
+    actual = NativeYE3TOperatorModule._couple_single(left, right, left_L, right_L, out_L)
+    assert expected.abs().max().item() > 1.0e-10
+    torch.testing.assert_close(actual, expected.squeeze(1), atol=1.0e-12, rtol=1.0e-12)
+    actual_grad = torch.autograd.grad(actual.square().sum(), (left, right), retain_graph=True)
+    expected_grad = torch.autograd.grad(expected.square().sum(), (left, right))
+    for value, reference in zip(actual_grad, expected_grad):
+        torch.testing.assert_close(value, reference, atol=1.0e-12, rtol=1.0e-12)
+
+
+def test_complex_to_real_tesseral_rejects_unphased_odd_coupling():
+    import torch
+    from ye3t.core.tesseral import (
+        complex_multiplet_to_real_tesseral,
+        real_tesseral_to_complex_multiplet,
+    )
+    from ye3t.paired_cg import _cg_tensor_cpu
+
+    left = torch.tensor([[0.3, -0.5, 0.7]], dtype=torch.float64)
+    right = torch.tensor([[-0.2, 0.9, 0.4]], dtype=torch.float64)
+    coupled = torch.einsum(
+        "na,nb,abm->nm",
+        real_tesseral_to_complex_multiplet(left, 1),
+        real_tesseral_to_complex_multiplet(right, 1),
+        _cg_tensor_cpu(1, 1, 1),
+    )
+    assert coupled.abs().max().item() > 1.0e-10
+    with pytest.raises(ValueError, match="imaginary"):
+        complex_multiplet_to_real_tesseral(coupled, 1, (-1, 0, 1))
+    actual = complex_multiplet_to_real_tesseral(-1j * coupled, 1, (-1, 0, 1))
+    assert actual.abs().max().item() > 1.0e-10
+
+
+def test_rank_three_native_scalar_matches_direct_complex_table_and_gradient():
+    import torch
+    from ye3t.api import compile_ye3t_operator
+    from ye3t.core.basis import ExactACELabeler
+    from ye3t.core.couplings import generate_coefficient_table_for_labels
+    from ye3t.core.tesseral import real_tesseral_to_complex_multiplet
+
+    def primitive(descriptor, features_by_L):
+        radial = int(descriptor.basis_handle.sector.nin[0])
+        return features_by_L[1][:, radial - 1, :]
+
+    features = torch.randn(
+        5, 3, 3, dtype=torch.float64,
+        generator=torch.Generator().manual_seed(31415),
+    ).requires_grad_()
+    compiled = compile_ye3t_operator(
+        (1, 2, 3), (1, 1, 1), 0,
+        primitive_source=primitive,
+        factorization_policy="full", optimization_policy="off", strict_labels=False,
+    )
+    actual = compiled({1: features})[0]
+    labels = ExactACELabeler(
+        (1, 2, 3), (1, 1, 1), strict_target_validation=False,
+    ).compact_labels_for_target(0)
+    table = generate_coefficient_table_for_labels(labels, M_R_values=(0,))
+    magnetic_terms, coefficients = table.component_terms(0)
+    complex_features = real_tesseral_to_complex_multiplet(features, 1)
+    raw = torch.zeros(features.shape[0], dtype=torch.complex128)
+    for m_tuple, coefficient in zip(magnetic_terms, coefficients):
+        term = raw.new_full((), complex(coefficient))
+        for slot, m_value in enumerate(m_tuple):
+            term = term * complex_features[:, slot, int(m_value) + 1]
+        raw = raw + term
+    assert raw.imag.abs().max().item() > 1.0e-10
+    expected = (-1j * raw).real[:, None]
+    torch.testing.assert_close(actual, expected, atol=1.0e-12, rtol=1.0e-12)
+    actual_grad = torch.autograd.grad(actual.square().sum(), features, retain_graph=True)[0]
+    expected_grad = torch.autograd.grad(expected.square().sum(), features)[0]
+    torch.testing.assert_close(actual_grad, expected_grad, atol=1.0e-12, rtol=1.0e-12)
+
+
+def test_rank_three_scalar_product_preserves_batch_axis():
+    import torch
+    from ye3t.api import compile_ye3t_operator
+    from ye3t.core.basis import ExactACELabeler
+    from ye3t.core.couplings import generate_coefficient_table_for_labels
+
+    def primitive(descriptor, features_by_L):
+        radial = int(descriptor.basis_handle.sector.nin[0])
+        return features_by_L[0][:, radial - 1, :]
+
+    features = torch.randn(
+        5, 3, 1, dtype=torch.float64,
+        generator=torch.Generator().manual_seed(2718),
+    ).requires_grad_()
+    compiled = compile_ye3t_operator(
+        (1, 2, 3), (0, 0, 0), 0,
+        primitive_source=primitive,
+        factorization_policy="full", optimization_policy="off", strict_labels=False,
+    )
+    actual = compiled({0: features})[0]
+    labels = ExactACELabeler(
+        (1, 2, 3), (0, 0, 0), strict_target_validation=False,
+    ).compact_labels_for_target(0)
+    table = generate_coefficient_table_for_labels(labels, M_R_values=(0,))
+    magnetic_terms, coefficients = table.component_terms(0)
+    expected = torch.zeros(features.shape[0], dtype=torch.float64)
+    for m_tuple, coefficient in zip(magnetic_terms, coefficients):
+        term = expected.new_full((), float(complex(coefficient).real))
+        for slot, m_value in enumerate(m_tuple):
+            term = term * features[:, slot, int(m_value)]
+        expected = expected + term
+    assert actual.shape == (features.shape[0], 1)
+    torch.testing.assert_close(actual[:, 0], expected, atol=1.0e-12, rtol=1.0e-12)
+    seed = torch.tensor([0.3, -0.7, 0.2, 0.8, -0.4], dtype=torch.float64)
+    actual_grad = torch.autograd.grad((actual[:, 0] * seed).sum(), features, retain_graph=True)[0]
+    expected_grad = torch.autograd.grad((expected * seed).sum(), features)[0]
+    torch.testing.assert_close(actual_grad, expected_grad, atol=1.0e-12, rtol=1.0e-12)
+
+
+@pytest.mark.parametrize("backend", ("pytorch", "auto"))
+def test_packed_scalar_mixed_singleton_shapes_do_not_broadcast_batch(backend):
+    import torch
+    from ye3t.paired_cg import couple_packed_real_tesseral
+
+    left = torch.randn(5, 2, 1, dtype=torch.float64)
+    right = torch.randn(5, 2, dtype=torch.float64)
+    actual, _ = couple_packed_real_tesseral(left, right, 0, 0, 0, backend=backend)
+    assert actual.shape == (5, 2)
+    torch.testing.assert_close(actual, left.squeeze(-1) * right)
+
+
 def test_exact_scalar_accepts_simple_sympy_radical_products():
     sp = pytest.importorskip("sympy")
 

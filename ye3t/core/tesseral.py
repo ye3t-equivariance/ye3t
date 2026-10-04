@@ -50,10 +50,16 @@ def complex_multiplet_to_real_tesseral(values, L, M_values):
         values.real.dtype,
         values.device,
     )
-    return (
+    transformed = (
         values.to(dtype=matrix.dtype)
         @ matrix.conj().transpose(0, 1)
-    ).real
+    )
+    if transformed.numel():
+        tolerance = 1.0e-5 if transformed.dtype == torch.complex64 else 1.0e-10
+        scale = transformed.real.abs().amax().clamp_min(1.0)
+        if not torch.isfinite(transformed).all() or transformed.imag.abs().amax() > tolerance * scale:
+            raise ValueError("Complex multiplet has a non-negligible imaginary real-form component.")
+    return transformed.real
 
 
 def real_tesseral_to_complex_multiplet(values, L):

@@ -259,6 +259,15 @@ def couple_packed_real_tesseral(
     may be ``[N, C]``; otherwise they are ``[N, C, 2L+1]``.
     """
 
+    scalar_product = int(L1) == 0 and int(L2) == 0 and int(Lout) == 0
+    if scalar_product:
+        if left.ndim == 3 and left.shape[-1] == 1:
+            left = left.squeeze(-1)
+        if right.ndim == 3 and right.shape[-1] == 1:
+            right = right.squeeze(-1)
+        if left.ndim != 2 or right.ndim != 2 or left.shape != right.shape:
+            raise ValueError("Packed scalar inputs must have matching [batch, channel] shapes.")
+
     backend_name = normalize_packed_cg_backend(backend)
     prefer_oeq = backend_name in {"openequivariance", "auto"}
     prefer_triton = backend_name in {"triton", "auto"}
@@ -267,7 +276,11 @@ def couple_packed_real_tesseral(
         or os.environ.get("GNE3_DISABLE_OPENEQUIVARIANCE") == "1"
     )
     if bool(prefer_oeq) and int(L1) >= 0 and int(L2) >= 0 and not oeq_disabled:
-        oeq_result = _couple_packed_openequivariance(left, right, int(L1), int(L2), int(Lout))
+        oeq_left = left.unsqueeze(-1) if scalar_product else left
+        oeq_right = right.unsqueeze(-1) if scalar_product else right
+        oeq_result = _couple_packed_openequivariance(
+            oeq_left, oeq_right, int(L1), int(L2), int(Lout),
+        )
         if oeq_result is not None and oeq_result[1] == "openequivariance_paired_uvu":
             should_validate = (
                 os.environ.get(

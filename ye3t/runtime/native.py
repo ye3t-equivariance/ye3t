@@ -372,6 +372,8 @@ class NativeYE3TOperatorModule(torch.nn.Module):
         right_complex = real_tesseral_to_complex_multiplet(right, int(L2))
         cg = _cg_tensor_cpu(int(L1), int(L2), int(Lout)).to(dtype=left_complex.dtype, device=left_complex.device)
         coupled = torch.einsum('nm,np,mpr->nr', left_complex, right_complex, cg)
+        if (int(L1) + int(L2) - int(Lout)) % 2:
+            coupled = -1j * coupled
         real = complex_multiplet_to_real_tesseral(
             coupled,
             L=int(Lout),
@@ -391,6 +393,8 @@ class NativeYE3TOperatorModule(torch.nn.Module):
             return memo[descriptor]
         if descriptor.kind == 'primitive':
             value = self._primitive_feature(descriptor, features_by_L)
+            if int(descriptor.L_R) == 0 and value.ndim == 2 and value.shape[-1] == 1:
+                value = value.squeeze(-1)
         else:
             if descriptor.left is None or descriptor.right is None:
                 raise ValueError("Product descriptor is missing a child descriptor.")
