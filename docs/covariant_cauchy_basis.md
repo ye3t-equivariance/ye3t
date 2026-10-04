@@ -11,6 +11,18 @@ The dimension identities quoted below were checked numerically with exact
 integer arithmetic (the `S_4` character table and the hook-content formula).
 They are listed in "Exact checks" so that they can become unit tests.
 
+New `covariant_cauchy_request(...)` calls use
+`angular_basis_backend="exact_weight_space_v1"`. This exact compiler builds
+the requested angular weight and lowers it to the full multiplet. Set
+`angular_basis_backend="legacy_exact"` to use the full-sector oracle. Saved
+requests without this field retain the legacy interpretation. Neither setting
+selects the generic `numeric_cached` Young subduction backend.
+
+The compiled real-tesseral output applies `(-i)^sigma`, where
+`sigma = (sum_b k_b l_b - L) mod 2`. Imaginary entries in an intermediate
+complex-basis transformation are expected; the compiler rejects any nonzero
+imaginary coefficient after this phase and the real-basis transformation.
+
 ## 1. What is being constructed
 
 A linear covariant model predicts a target `T` that transforms in a

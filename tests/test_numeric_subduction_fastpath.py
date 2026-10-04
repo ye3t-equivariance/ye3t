@@ -99,6 +99,45 @@ def test_numeric_subduction_nullspace_matches_exact_restricted_projector_for_mul
     torch.testing.assert_close(cached.coefficient_matrix(), result.coefficient_matrix())
 
 
+def test_rank_three_ltwo_numeric_young_projector_and_cg_match_exact(tmp_path):
+    import numpy as np
+
+    from ye3t.core.cg import cg_exact_integer, cg_numeric_integer
+    from ye3t.representations.young_subgroup_specht_coupling import (
+        build_cached_young_subgroup_specht_coupling,
+        build_young_subgroup_specht_coupling,
+    )
+
+    subgroup = ((1,), (1,), (1,))
+    exact = build_young_subgroup_specht_coupling(subgroup, (2, 1))
+    numeric = build_cached_young_subgroup_specht_coupling(
+        subgroup, (2, 1), cache_dir=tmp_path,
+        compare_exact_projector=True, exact_reference_max_rank=3,
+    )
+    exact_columns = np.asarray(exact.coefficient_matrix(), dtype=float)
+    numeric_columns = np.asarray(numeric.coefficient_matrix(), dtype=float)
+    exact_projector = exact_columns @ exact_columns.T
+    numeric_projector = numeric_columns @ numeric_columns.T
+    np.testing.assert_allclose(numeric_projector, exact_projector, rtol=0, atol=1e-10)
+    overlap = numeric_columns.T @ exact_columns
+    left, singular, right = np.linalg.svd(overlap)
+    np.testing.assert_allclose(singular, np.ones_like(singular), rtol=0, atol=1e-10)
+    np.testing.assert_allclose(numeric_columns @ left @ right, exact_columns,
+                               rtol=0, atol=1e-10)
+    assert numeric.tensor.coefficient_backend == "numeric_subduction"
+
+    for coupled_L in range(5):
+        for first_m in range(-2, 3):
+            for second_m in range(-2, 3):
+                output_m = first_m + second_m
+                if abs(output_m) <= coupled_L:
+                    exact_value = float(cg_exact_integer(2, first_m, 2, second_m,
+                                                         coupled_L, output_m))
+                    numeric_value = cg_numeric_integer(2, first_m, 2, second_m,
+                                                        coupled_L, output_m)
+                    assert numeric_value == pytest.approx(exact_value, abs=1e-12)
+
+
 def test_numeric_subduction_constraint_cpp_matches_python_when_available():
     from ye3t.representations.numeric_subduction import assemble_numeric_subduction_constraints
 

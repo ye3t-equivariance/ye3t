@@ -12,6 +12,7 @@ from ye3t.couplings.covariant_cauchy import (
     covariant_cauchy_count,
     covariant_cauchy_request,
     evaluate_covariant_cauchy,
+    validate_covariant_cauchy,
 )
 from ye3t.couplings.lifted_cauchy_scalar import (
     _real_form_matrix,
@@ -128,6 +129,50 @@ def test_parity_is_fixed_by_content():
         covariant_cauchy_request((channel(1, 0),), (2,), target_L=2, target_parity=-1)
     request = covariant_cauchy_request((channel(1, 0),), (3,), target_L=1)
     assert request["target"]["o3_parity"] == -1
+
+
+def test_rank_three_ltwo_requested_weight_backend_is_exactly_real():
+    request = covariant_cauchy_request(
+        (channel(2, 0),), (3,), target_L=1, role_dimension=2
+    )
+    assert request["angular_basis_backend"] == "exact_weight_space_v1"
+    compiled = compile_covariant_cauchy(request)
+    assert compiled["real_forms"]["output"]["phase_exponent"] == 1
+    assert compiled["validation_report"]["real_schedule_coefficients_exactly_real"] is True
+    assert any(template["validation_report"]["angular_source"] ==
+               "ye3t.representations.builder.requested_weight_space_coset"
+               for template in compiled["block_templates"])
+    values, _ = evaluate_covariant_cauchy(
+        compiled, {0: np.random.default_rng(17).normal(size=(2, 5))}
+    )
+    assert np.isrealobj(values)
+    assert np.isfinite(values).all()
+    assert validate_covariant_cauchy(compiled)
+
+
+def test_saved_covariant_request_without_backend_keeps_legacy_identity():
+    request = covariant_cauchy_request((channel(0, 0),), (1,), target_L=0)
+    legacy = {key: value for key, value in request.items()
+              if key != "angular_basis_backend"}
+    compiled = compile_covariant_cauchy(legacy)
+    assert compiled["request"] == legacy
+    assert validate_covariant_cauchy(compiled)
+    with pytest.raises(ValueError, match="angular_basis_backend"):
+        covariant_cauchy_request((channel(0, 0),), (1,), target_L=0,
+                                angular_basis_backend="numeric_cached")
+
+
+@pytest.mark.slow
+def test_rank_three_ltwo_weight_space_rows_match_legacy_exact_oracle():
+    from ye3t.couplings.lifted_cauchy_scalar import _build_block_template
+
+    key = (2, 3, (2, 1), 2, 1)
+    legacy = _build_block_template(key, angular_basis_backend="legacy_exact")
+    requested_weight = _build_block_template(
+        key, angular_basis_backend="exact_weight_space_v1"
+    )
+    assert requested_weight["canonical_rows"] == legacy["canonical_rows"]
+    assert requested_weight["ordered_rows"] == legacy["ordered_rows"]
 
 
 @pytest.mark.parametrize(

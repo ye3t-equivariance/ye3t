@@ -53,6 +53,7 @@ def covariant_cauchy_request(
     target_parity=None,
     role_dimension=2,
     kappa_policy="all",
+    angular_basis_backend="exact_weight_space_v1",
 ):
     """Declare one fixed complete-channel content and an ``O(3)`` target.
 
@@ -91,6 +92,9 @@ def covariant_cauchy_request(
     kappa_policy = str(kappa_policy).strip().lower()
     if kappa_policy not in {"trivial", "all"}:
         raise ValueError("kappa_policy must be trivial or all.")
+    angular_basis_backend = str(angular_basis_backend)
+    if angular_basis_backend not in {"legacy_exact", "exact_weight_space_v1"}:
+        raise ValueError("angular_basis_backend must be legacy_exact or exact_weight_space_v1.")
     content_parity = (
         -1
         if sum(
@@ -115,6 +119,7 @@ def covariant_cauchy_request(
         "channels": channels,
         "block_sizes": block_sizes,
         "kappa_policy": kappa_policy,
+        "angular_basis_backend": angular_basis_backend,
         "target": {
             "permutation": "trivial",
             "young_partition": (int(sum(block_sizes)),),
@@ -128,14 +133,18 @@ def covariant_cauchy_request(
 def _normalized(request):
     if not is_covariant_cauchy_request(request):
         raise ValueError("Not a covariant lifted-Cauchy request.")
-    return covariant_cauchy_request(
+    normalized = covariant_cauchy_request(
         request["channels"],
         request["block_sizes"],
         target_L=request["target"]["L"],
         target_parity=request["target"]["o3_parity"],
         role_dimension=request["role_dimension"],
         kappa_policy=request["kappa_policy"],
+        angular_basis_backend=request.get("angular_basis_backend", "legacy_exact"),
     )
+    if "angular_basis_backend" not in request:
+        normalized.pop("angular_basis_backend")
+    return normalized
 
 
 def covariant_cauchy_count(request):
@@ -319,7 +328,9 @@ def compile_covariant_cauchy(request):
                 int(Lambda),
             )
             if key not in block_templates:
-                block_templates[key] = _scalar._compile_block_template(key)["payload"]
+                block_templates[key] = _scalar._compile_block_template(
+                    key, angular_basis_backend=request.get("angular_basis_backend", "legacy_exact")
+                )["payload"]
             template_ids.append(str(block_templates[key]["template_id"]))
         Lambdas = tuple(label["block_Lambdas"])
         if Lambdas not in outer_templates:

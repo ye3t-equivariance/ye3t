@@ -1973,11 +1973,12 @@ def _terms_from_records(records):
             for coordinate in record["coordinates"]
         )
         terms[coordinates] += _exact_scalar_from_payload(record["coefficient"])
-    return {
-        coordinates: sp.simplify(coefficient)
-        for coordinates, coefficient in terms.items()
-        if sp.simplify(coefficient) != 0
-    }
+    result = {}
+    for coordinates, coefficient in terms.items():
+        reduced = sp.simplify(coefficient)
+        if reduced != 0:
+            result[coordinates] = reduced
+    return result
 
 
 def _validate_compiled_payload(plan, payload):
