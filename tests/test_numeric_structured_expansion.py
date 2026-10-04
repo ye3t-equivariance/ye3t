@@ -408,7 +408,17 @@ def test_torch_factorized_schedule_auto_backend_preserves_autograd():
     assert torch.isfinite(block_values.grad).all()
 
 
-def test_real_factorized_schedule_matches_complex_scalar_schedule():
+@pytest.mark.parametrize(
+    ("n_tuple", "l_tuple"),
+    (
+        ((1, 1, 2, 2), (1, 1, 1, 1)),
+        ((1, 2, 3), (1, 1, 1)),
+        ((1, 2, 3), (1, 1, 2)),
+        ((1, 2, 3), (1, 2, 2)),
+        ((1, 2, 3), (2, 2, 2)),
+    ),
+)
+def test_real_factorized_schedule_matches_complex_scalar_schedule(n_tuple, l_tuple):
     import torch
     from ye3t.core.basis import ExactACELabeler
     from ye3t.core.couplings import (
@@ -420,8 +430,9 @@ def test_real_factorized_schedule_matches_complex_scalar_schedule():
     )
     from ye3t.runtime.native import real_tesseral_to_complex_multiplet
 
-    labeler = ExactACELabeler([1, 1, 2, 2], [1, 1, 1, 1], strict_target_validation=False)
+    labeler = ExactACELabeler(n_tuple, l_tuple, strict_target_validation=False)
     labels = labeler.compact_labels_for_target(0)
+    assert labels
     complex_schedule = generate_factorized_coefficient_schedule_for_labels(labels, M_R_values=(0,))
     real_schedule = generate_real_factorized_coefficient_schedule_for_labels(labels, component_indices=(0,))
     torch_complex = complex_schedule.to_torch(dtype=torch.complex128)
@@ -463,8 +474,12 @@ def test_real_factorized_schedule_matches_complex_scalar_schedule():
     real_out = evaluate_real_factorized_schedule_torch(real_blocks, torch_real)
     complex_out = evaluate_factorized_schedule_torch(complex_blocks, torch_complex)
 
-    torch.testing.assert_close(real_out, complex_out.real, atol=1.0e-10, rtol=1.0e-10)
-    assert torch.max(torch.abs(complex_out.imag)).item() <= 1.0e-10
+    phase = -1j if sum(l_tuple) % 2 else 1.0
+    phased = phase * complex_out
+    torch.testing.assert_close(real_out, phased.real, atol=1.0e-10, rtol=1.0e-10)
+    assert torch.max(torch.abs(phased.imag)).item() <= 1.0e-10
+    if sum(l_tuple) % 2:
+        assert torch.max(torch.abs(complex_out.imag)).item() > 1.0e-3
 
 
 @pytest.mark.parametrize("device", ("cpu", "cuda"))

@@ -367,6 +367,7 @@ def test_global_coupler_factorized_slot_evaluator_validates_rank4_role_resolved_
     report = joint_ye3t_factorized_slot_evaluator_report(coupler)
     assert coupler.certificate.passed is True
     assert report["passed"] is True
+    assert report["coset_angular_types_preserved"] is True
     assert report["consumes_global_coupler_record"] is True
     assert report["subgroup_partitions"] == ((1,), (1,), (1,), (1,))
     assert report["target_partition"] == (2, 2)
@@ -2174,3 +2175,70 @@ def test_balanced_tree_compilation_has_no_image_map_for_disjoint_content():
         {"label": 2, "count": 1, "repeated": False},
         {"label": 3, "count": 1, "repeated": False},
     )
+
+
+def test_global_coupler_slot_evaluator_rejects_heterogeneous_coset_widths():
+    import torch
+    from ye3t import CompileYE3TCouplers, YE3TRotationTarget, YE3TSpec
+    from ye3t.global_coupler import (
+        evaluate_joint_ye3t_factorized_slots_torch,
+        joint_ye3t_factorized_slot_evaluator_report,
+    )
+
+    spec = YE3TSpec(
+        content=(1, 2, 3),
+        slot_roles=("first", "second", "third"),
+        target_permutation="trivial",
+        target_rotation=YE3TRotationTarget(L_R=1),
+        carrier="external_tensor",
+        coefficient_backend="global_coupler",
+        fast_path_policy="disable",
+        validation_scope="projectors",
+        runtime_status="planned_not_public",
+        metadata={"input_Ls": (1, 1, 2)},
+    )
+    coupler = CompileYE3TCouplers(spec, input_Ls=(1, 1, 2))
+    report = joint_ye3t_factorized_slot_evaluator_report(coupler)
+    assert coupler.certificate.passed is True
+    assert report["passed"] is False
+    assert report["coset_angular_types_preserved"] is False
+    assert "per-coset angular trees" in report["reason"]
+    slots = (torch.ones(3), torch.ones(3), torch.ones(5))
+    with pytest.raises(ValueError, match="coset permutation changes angular input types"):
+        evaluate_joint_ye3t_factorized_slots_torch(coupler, slots)
+
+
+def test_rank_three_numeric_young_projectors_match_exact(tmp_path):
+    import numpy as np
+    from ye3t.representations.young_subgroup_specht_coupling import (
+        build_cached_young_subgroup_specht_coupling,
+        build_young_subgroup_specht_coupling,
+        young_subgroup_specht_coupling_multiplicity,
+    )
+
+    subgroup_families = (
+        ((3,),), ((2, 1),), ((1, 1, 1),),
+        ((2,), (1,)), ((1, 1), (1,)), ((1,), (1,), (1,)),
+    )
+    targets = ((3,), (2, 1), (1, 1, 1))
+    checked = 0
+    for subgroup in subgroup_families:
+        for target in targets:
+            multiplicity = young_subgroup_specht_coupling_multiplicity(subgroup, target)
+            if not multiplicity:
+                continue
+            exact = build_young_subgroup_specht_coupling(subgroup, target)
+            numeric = build_cached_young_subgroup_specht_coupling(
+                subgroup, target, cache_dir=tmp_path, constraint_backend="python",
+                compare_exact_projector=True, exact_reference_max_rank=3,
+            )
+            exact_columns = np.asarray(exact.coefficient_matrix(), dtype=float)
+            numeric_columns = np.asarray(numeric.coefficient_matrix(), dtype=float)
+            assert exact_columns.shape == numeric_columns.shape
+            np.testing.assert_allclose(
+                exact_columns @ exact_columns.T,
+                numeric_columns @ numeric_columns.T,
+                atol=1.0e-10, rtol=0.0,
+            )
+            checked += 1
+    assert checked == 10

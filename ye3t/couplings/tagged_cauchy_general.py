@@ -265,6 +265,8 @@ def _content_records(request):
             patterns = {tuple(sorted(int(value) for value in values)) for values in patterns}
             if any(len(values) != rank or min(values) < 0 or max(values) > lmax for values in patterns):
                 raise ValueError("An angular pattern violates its rank or lmax.")
+            if any(sum(values) % 2 for values in patterns):
+                raise ValueError("Tagged scalar angular patterns must have even total angular degree.")
         channels = tuple(
             {"neighbor_species": species, "radial_channel": degree, "l": angular_l,
              "source_family_id": request["source_family"]}

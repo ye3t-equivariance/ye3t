@@ -5194,6 +5194,12 @@ def _global_coupler_slot_evaluator_report(coupler, table_index = 0):
     angular = coupler.angular_maps[table_index]
     child_tableau_dims = tuple(int(value) for value in induction.shuffle_metadata.get("child_tableau_dims", ()))
     singleton_child_factors = bool(child_tableau_dims) and all(int(value) == 1 for value in child_tableau_dims)
+    input_Ls = tuple(int(value) for value in angular.input_Ls)
+    coset_angular_types_preserved = all(
+        len(representative) == len(input_Ls)
+        and all(input_Ls[position] == input_Ls[int(source)] for position, source in enumerate(representative))
+        for representative in induction.coset_representatives
+    )
     expected_rows = int(induction.induced_basis_size)
     shape = tuple(int(value) for value in table.get("shape", ()))
     rows_match = bool(len(shape) == 2 and int(shape[0]) == expected_rows)
@@ -5205,6 +5211,7 @@ def _global_coupler_slot_evaluator_report(coupler, table_index = 0):
         and rows_match
         and bool(paths)
         and singleton_child_factors
+        and coset_angular_types_preserved
         and induction.validation.get("passed", False)
         and angular.coefficient_validation.get("passed", False)
     )
@@ -5220,6 +5227,8 @@ def _global_coupler_slot_evaluator_report(coupler, table_index = 0):
             reason = "angular map does not expose factorized paths"
         elif not singleton_child_factors:
             reason = "slot evaluator currently supports singleton child Specht factors only"
+        elif not coset_angular_types_preserved:
+            reason = "coset permutation changes angular input types; per-coset angular trees are required"
         elif not bool(induction.validation.get("passed", False)):
             reason = "Young induction/coset validation did not pass"
         else:
@@ -5241,11 +5250,12 @@ def _global_coupler_slot_evaluator_report(coupler, table_index = 0):
         "coset_representative_count": int(len(induction.coset_representatives)),
         "child_tableau_dims": child_tableau_dims,
         "all_child_specht_factors_singleton": bool(singleton_child_factors),
+        "coset_angular_types_preserved": bool(coset_angular_types_preserved),
         "angular_path_count": int(len(paths)),
         "angular_tree_runtime": "cached_dense_einsum_with_reference_loop_available",
         "angular_tree_reference_loop_available": True,
         "target_L_R": int(angular.output_L),
-        "input_Ls": tuple(int(value) for value in angular.input_Ls),
+        "input_Ls": input_Ls,
         "certificate_passed": bool(coupler.certificate.passed),
     }
 
