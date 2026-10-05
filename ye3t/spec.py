@@ -189,6 +189,49 @@ def _partition_tuple_sequence(value):
     return tuple(tuple(int(part) for part in partition) for partition in value)
 
 
+def _target_partition(target, rank=None):
+    """Resolve a requested Young sector at the tensor rank of the content."""
+
+    text = str(target).strip().lower()
+    if rank is not None:
+        rank = int(rank)
+        if rank <= 0:
+            raise ValueError("target_permutation requires a positive content rank.")
+    if text in {"trivial", "symmetric"}:
+        if rank is None:
+            raise ValueError("target_permutation requires a content rank.")
+        parts = (rank,)
+    elif text in {"antisymmetric", "sign"}:
+        if rank is None:
+            raise ValueError("target_permutation requires a content rank.")
+        parts = (1,) * rank
+    elif text.startswith("young:"):
+        body = text.split(":", 1)[1].strip()
+        if body.startswith("(") and body.endswith(")"):
+            body = body[1:-1].strip()
+        if body == "n":
+            if rank is None:
+                raise ValueError("young:(N) requires a content rank.")
+            parts = (rank,)
+        else:
+            try:
+                parts = tuple(int(part.strip()) for part in body.split(","))
+            except ValueError as exc:
+                raise ValueError(f"target_permutation={target!r} is not a Young partition.") from exc
+    else:
+        raise ValueError(
+            "target_permutation must be 'trivial', 'antisymmetric', or 'young:<partition>'; "
+            f"got {target!r}."
+        )
+    if not parts or any(part <= 0 for part in parts) or tuple(sorted(parts, reverse=True)) != parts:
+        raise ValueError(f"target_permutation={target!r} must be a nonincreasing positive partition.")
+    if rank is not None and sum(parts) != rank:
+        raise ValueError(
+            f"target_permutation={target!r} has size {sum(parts)}, but content rank is {rank}."
+        )
+    return parts
+
+
 def _read_config_mapping(path):
     path = Path(path)
     text = path.read_text(encoding="utf-8")
@@ -573,6 +616,14 @@ class YE3TSpec:
         )
         from ye3t.role import RoleResolvedCarrierSpec
 
+        target = str(self.target_permutation)
+        target_rank = len(self.content) or None
+        if target_rank is None and target.strip().lower() in {
+            "trivial", "symmetric", "antisymmetric", "sign", "young:(n)", "young:n"
+        }:
+            target_rank = slot_count
+        target_partition = _target_partition(target, target_rank)
+        resolved_target = "young:" + ",".join(str(part) for part in target_partition)
         role_contract = RoleResolvedCarrierSpec.from_options(
             slot_count,
             {
@@ -582,13 +633,9 @@ class YE3TSpec:
                 "role_coordinate_discarded_before_young_projection": discarded,
                 "ordinary_ace_symmetric_density": ordinary_ace,
             },
-        ).carrier_policy_report(partitions=partitions, target_permutation=self.target_permutation)
+        ).carrier_policy_report(partitions=partitions, target_permutation=resolved_target)
         nontrivial_partitions = tuple(partition for partition in partitions if len(partition) > 1)
-        target = str(self.target_permutation)
-        target_nontrivial = bool(
-            target not in {"trivial", "symmetric", "young:(0)", "young:(1)"}
-            and not target.startswith("trivial")
-        )
+        target_nontrivial = target_partition != (sum(target_partition),)
         nontrivial_requested = bool(nontrivial_partitions or target_nontrivial)
         collapse_declared = bool(identical and discarded)
         reasons = list(role_contract.get("reasons", ()))
@@ -601,6 +648,7 @@ class YE3TSpec:
             "slot_specht_partitions": partitions,
             "nontrivial_slot_specht_partitions": nontrivial_partitions,
             "target_permutation": target,
+            "target_partition": target_partition,
             "nontrivial_target_permutation_requested": bool(target_nontrivial),
             "nontrivial_sector_requested": bool(nontrivial_requested),
             "collapse_declared": bool(collapse_declared),

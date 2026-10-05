@@ -7,7 +7,8 @@ def _merge_nodes(tree):
     return (tree,) + _merge_nodes(tree["left"]) + _merge_nodes(tree["right"])
 
 
-def test_compile_global_coupler_emits_separated_exact_maps_for_tiny_trivial_sector():
+def test_compile_global_coupler_emits_complete_typed_joint_map_for_tiny_trivial_sector():
+    import numpy as np
     from ye3t import CompileGlobalYE3TCouplers, YE3TRotationTarget, YE3TSpec
 
     spec = YE3TSpec(
@@ -20,175 +21,28 @@ def test_compile_global_coupler_emits_separated_exact_maps_for_tiny_trivial_sect
         runtime_status="planned_not_public",
         metadata={"input_Ls": (1, 1)},
     )
-
     coupler = CompileGlobalYE3TCouplers(spec)
-
-    assert coupler.labels
-    alpha = coupler.labels[0]
-    assert alpha.boldsymbol_mu == ((1,), (1,))
-    assert alpha.boldsymbol_Lambda == (1, 1)
-    assert alpha.boldsymbol_beta == ("beta:0",)
-    assert alpha.gamma == (0,)
-    assert alpha.pi == "balanced"
-    payload = coupler.to_dict()
-    inventory = payload["component_inventory"]
-    assert payload["map_kind"] == "JointYoungE3Coupler"
-    assert payload["composition_order"] == (
-        "block_content_maps",
-        "YoungSubductionMap",
-        "YoungInductionCoupler",
-        "AngularCGMap",
-        "normalization",
-    )
-    assert inventory["all_component_families_present"] is True
-    assert inventory["map_role_separation_status"] == "subduction_induction_angular_roles_recorded_separately"
-    assert inventory["component_map_kinds"] == (
-        "YoungSubductionMap",
-        "YoungInductionCoupler",
-        "AngularCGMap",
-    )
-    assert inventory["component_map_roles"] == (
-        "restriction_to_subgroup_adapted_specht_basis",
-        "induced_coset_shuffle_assembly_before_target_specht_projection",
-        "SO3_or_O3_irrep_angular_momentum_coupling",
-    )
-    assert inventory["all_labels_complete"] is True
-    assert inventory["all_block_maps_validated"] is True
-    assert inventory["all_subduction_maps_validated"] is True
-    assert inventory["all_induction_couplers_validated"] is True
-    assert inventory["all_induction_couplers_have_frobenius_lift_metadata"] is True
-    assert inventory["all_angular_maps_validated"] is True
-    assert inventory["all_angular_maps_have_parity_metadata"] is True
-    assert inventory["all_angular_maps_pass_parity_rule"] is True
-    assert inventory["all_sparse_tables_validated"] is True
-    assert inventory["coefficient_table_kinds"] == ("young_subduction_matrix",)
-    assert inventory["factorized_table_kinds"] == ("young_induction_then_subduction_x_angular_cg",)
-    assert inventory["alpha_label_count"] == 1
-    assert inventory["alpha_label_tuple_order"] == (
-        "boldsymbol_mu",
-        "boldsymbol_Lambda",
-        "boldsymbol_beta",
-        "gamma",
-        "pi",
-    )
-    assert inventory["all_alpha_labels_complete"] is True
-    assert payload["labels"][0]["tuple_order"] == (
-        "boldsymbol_mu",
-        "boldsymbol_Lambda",
-        "boldsymbol_beta",
-        "gamma",
-        "pi",
-    )
-    assert payload["labels"][0]["gamma_axis_status"] == "resolved_alpha_labels_enumerate_each_gamma"
-    assert len(payload["labels"][0]["resolved_alpha_labels"]) == len(payload["labels"][0]["gamma"])
-    assert payload["labels"][0]["resolved_alpha_labels"][0]["gamma"] == 0
-    assert payload["alpha_labels"][0]["tuple_order"] == (
-        "boldsymbol_mu",
-        "boldsymbol_Lambda",
-        "boldsymbol_beta",
-        "gamma",
-        "pi",
-    )
-    assert payload["alpha_labels"][0]["alpha_tuple"] == (((1,), (1,)), (1, 1), ("beta:0",), 0, "balanced")
-    assert payload["alpha_labels"][0]["alpha_index"] == 0
-    assert coupler.alpha_labels()[0]["alpha_tuple"] == payload["alpha_labels"][0]["alpha_tuple"]
-    sequence = coupler.component_map_sequence()
-    assert payload["component_map_sequence"] == sequence
-    assert tuple(row["sequence_index"] for row in sequence) == tuple(range(len(sequence)))
-    assert tuple(row["component_family"] for row in sequence) == (
-        "block_content_map",
-        "block_content_map",
-        "young_subduction",
-        "young_induction_coset",
-        "angular_cg",
-        "normalization",
-    )
-    assert tuple(row["map_kind"] for row in sequence) == (
-        "BlockContentMap",
-        "BlockContentMap",
-        "YoungSubductionMap",
-        "YoungInductionCoupler",
-        "AngularCGMap",
-        "NormalizationMap",
-    )
-    assert tuple(row["map_role"] for row in sequence) == (
-        "fixed_content_block_labeling_and_repeated_channel_partition",
-        "fixed_content_block_labeling_and_repeated_channel_partition",
-        "restriction_to_subgroup_adapted_specht_basis",
-        "induced_coset_shuffle_assembly_before_target_specht_projection",
-        "SO3_or_O3_irrep_angular_momentum_coupling",
-        "global_young_e3_isometry_normalization",
-    )
-    assert all(row["validation_passed"] for row in sequence)
-    assert sequence[3]["frobenius_lift_metadata"]["construction"] == "Ind_H^G(child Specht tensor product)"
-    assert sequence[4]["input_Ls"] == (1, 1)
-    assert sequence[4]["output_L"] == 0
-    assert sequence[5]["normalization"]["joint"] == "factorized Young map composed with angular CG map"
-    assert coupler.subduction_maps[0].target_partition == (2,)
-    assert payload["subduction_maps"][0]["map_kind"] == "YoungSubductionMap"
-    assert payload["subduction_maps"][0]["map_role"] == "restriction_to_subgroup_adapted_specht_basis"
-    assert payload["induction_couplers"][0]["map_kind"] == "YoungInductionCoupler"
-    assert (
-        payload["induction_couplers"][0]["map_role"]
-        == "induced_coset_shuffle_assembly_before_target_specht_projection"
-    )
-    assert payload["angular_maps"][0]["map_kind"] == "AngularCGMap"
-    assert payload["angular_maps"][0]["map_role"] == "SO3_or_O3_irrep_angular_momentum_coupling"
-    assert coupler.subduction_maps[0].projector_validation["projector_idempotent"]
-    assert coupler.subduction_maps[0].projector_validation["orthonormal_columns"]
-    assert coupler.subduction_maps[0].source_validation["generator_equivariant"] is True
-    assert coupler.subduction_maps[0].source_validation["multiplicity_matches_character"] is True
-    assert coupler.subduction_maps[0].validation_residuals["generator_equivariance"] == 0.0
-    assert coupler.subduction_maps[0].validation_residuals["multiplicity_character"] == 0.0
-    assert coupler.induction_couplers[0].coset_representatives
-    assert len(coupler.induction_couplers[0].induced_basis) == coupler.induction_couplers[0].induced_basis_size
-    assert coupler.induction_couplers[0].induced_basis[0]["child_tableau_indices"] == (0, 0)
-    assert coupler.induction_couplers[0].validation["passed"] is True
-    assert coupler.induction_couplers[0].validation["coset_count_matches_young_subgroup_index"] is True
-    assert coupler.induction_couplers[0].validation["induced_basis_size_matches_cosets_times_child_tableaux"] is True
-    assert coupler.induction_couplers[0].validation["trivial_target_checked"] is True
-    assert coupler.induction_couplers[0].validation["trivial_target_uniform_orbit_sum"] is True
-    assert float(
-        coupler.induction_couplers[0].validation["trivial_target_expected_orbit_sum_coefficient"]
-    ) == pytest.approx(
-        float(1.0 / (coupler.induction_couplers[0].induced_basis_size ** 0.5)),
-        abs=1.0e-15,
-    )
-    assert coupler.angular_maps[0].output_L == 0
-    assert coupler.angular_maps[0].coefficient_table
-    assert coupler.angular_maps[0].coefficient_validation["passed"] is True
-    assert coupler.angular_maps[0].coefficient_validation["output_M_columns_normalized"] is True
-    assert coupler.angular_maps[0].coefficient_validation["factorized_path_validation"]["passed"] is True
-    assert coupler.certificate.checks["angular_coefficient_normalization"] is True
     assert coupler.certificate.passed
-    assert coupler.certificate.validation_scope == "projectors"
-    assert coupler.certificate.provenance["backend"] == "global_coupler"
-    assert coupler.certificate.provenance["exact"] is False
-    assert coupler.certificate.checks["global_label_complete"]
-    assert coupler.certificate.checks["subduction_generator_equivariance"]
-    assert coupler.certificate.checks["subduction_multiplicity_matches_character"]
-    assert coupler.certificate.checks["induction_coset_laws"]
-    assert coupler.certificate.checks["induction_trivial_target_uniform_orbit_sum"]
-    assert coupler.sparse_coefficient_tables[0]["hash"].startswith("sha256:")
-    sparse_table = coupler.sparse_coefficient_tables[0]
-    assert sparse_table["entry_format"] == "numeric_real"
-    assert sparse_table["nnz"] == len(sparse_table["entries"])
-    assert all("value_real" in entry for entry in sparse_table["entries"])
-    assert sparse_table["normalization"]["young"] == "orthonormal_subduction_columns"
-    assert sparse_table["provenance"]["target_partition"] == (2,)
-    sparse_reports = coupler.validate_sparse_coefficient_tables()
-    exact_sparse_reports = coupler.validate_sparse_coefficient_tables(exact=True)
-    assert sparse_reports[0]["passed"] is True
-    assert sparse_reports[0]["hash_checked"] is True
-    assert sparse_reports[0]["hash_matches"] is True
-    assert sparse_reports[0]["numeric_payload_present"] is True
-    assert exact_sparse_reports[0]["passed"] is False
-    assert "numeric sparse coefficient tables" in exact_sparse_reports[0]["reason"]
-    assert coupler.factorized_coefficient_tables[0]["kind"] == "young_induction_then_subduction_x_angular_cg"
-    assert coupler.factorized_coefficient_tables[0]["young_table_index"] == 0
-    assert coupler.factorized_coefficient_tables[0]["normalization"]["angular"].startswith("Clebsch-Gordan")
-    assert coupler.factorized_coefficient_tables[0]["provenance"]["target_L_R"] == 0
-
+    assert coupler.certificate.checks["fixed_content_route_count"]
+    assert coupler.certificate.checks["joint_column_orthonormality"]
+    assert coupler.component_inventory()["all_component_families_present"]
+    assert coupler.labels[0].boldsymbol_mu == ((1,), (1,))
+    assert coupler.labels[0].boldsymbol_Lambda == (1, 1)
+    assert coupler.labels[0].boldsymbol_beta == ("beta:0",)
+    assert coupler.labels[0].gamma == (0,)
+    assert coupler.alpha_labels()[0]["alpha_index"] == 0
+    table = coupler.sparse_coefficient_tables[0]
+    assert table["kind"] == "typed_joint_orbit_isometry"
+    assert table["output_axis_order"] == ("alpha", "target_tableau", "target_M")
+    matrix = np.asarray(coupler.sparse_coefficient_matrix(), dtype=float)
+    assert matrix.shape == (18, 1)
+    np.testing.assert_allclose(matrix.T @ matrix, np.eye(1), atol=1e-12)
+    singlet = np.array([
+        ((-1) ** (1 - m1)) / np.sqrt(3) if m2 == -m1 else 0.0
+        for m1 in range(-1, 2) for m2 in range(-1, 2)
+    ])
+    expected = np.kron(np.ones((2, 2)) / 2, np.outer(singlet, singlet))
+    np.testing.assert_allclose(matrix @ matrix.T, expected, atol=1e-12)
 
 def test_compile_global_coupler_emits_o3_parity_metadata_and_rejects_incompatible_parity():
     from ye3t import CompileGlobalYE3TCouplers, YE3TRotationTarget, YE3TSpec
@@ -385,6 +239,18 @@ def test_global_coupler_factorized_slot_evaluator_validates_rank4_role_resolved_
     )
     assert evaluation.shape == (2, 12, 1)
     torch.testing.assert_close(evaluation.values, loop_evaluation.values, atol=1e-12, rtol=1e-12)
+    orbit_rows = []
+    for representative in coupler.sparse_coefficient_tables[0]["coset_representatives"]:
+        ordered_slots = tuple(slots[index] for index in representative)
+        row = ordered_slots[0]
+        for slot in ordered_slots[1:]:
+            row = (row.unsqueeze(-1) * slot.unsqueeze(-2)).flatten(-2)
+        orbit_rows.append(row)
+    orbit_values = torch.stack(orbit_rows, dim=-2).flatten(-2)
+    joint_values = coupler.evaluate_reference_torch(orbit_values).values.reshape_as(
+        evaluation.values
+    )
+    torch.testing.assert_close(evaluation.values, joint_values, atol=1e-12, rtol=1e-12)
     assert evaluation.metadata["coset_representatives_vectorized"] is True
     assert evaluation.metadata["slot_permutations_reused_across_angular_paths"] is True
     assert evaluation.metadata["angular_tree_backend"] == "cached_dense_einsum"
@@ -440,7 +306,7 @@ def test_global_coupler_factorized_slot_evaluator_validates_rank4_role_resolved_
 
     invalid = YE3TSpec(
         content=(1, 1, 1, 1),
-        target_permutation="young:2,2",
+        target_permutation="young:3,1",
         target_rotation=YE3TRotationTarget(L_R=0),
         carrier="external_tensor",
         coefficient_backend="global_coupler",
@@ -449,7 +315,7 @@ def test_global_coupler_factorized_slot_evaluator_validates_rank4_role_resolved_
         runtime_status="planned_not_public",
         metadata={"input_Ls": (1, 1, 1, 1)},
     )
-    with pytest.raises(ValueError, match="zero Young-subgroup Specht multiplicity"):
+    with pytest.raises(ValueError, match="not reachable"):
         CompileYE3TCouplers(invalid, input_Ls=(1, 1, 1, 1))
 
 
@@ -1155,13 +1021,14 @@ def test_compile_global_coupler_supports_explicit_young_partition_label():
     assert coupler.subduction_maps[0].multiplicity > 0
     label_payload = coupler.to_dict()["labels"][0]
     alpha_labels = coupler.to_dict()["alpha_labels"]
+    assert label_payload["gamma"] == [0, 1]
     assert len(label_payload["resolved_alpha_labels"]) == len(label_payload["gamma"])
     assert {row["gamma"] for row in label_payload["resolved_alpha_labels"]} == set(label_payload["gamma"])
     assert len(alpha_labels) == coupler.component_inventory()["alpha_label_count"]
-    assert len(alpha_labels) == len(label_payload["gamma"])
+    assert len(alpha_labels) == 2
     assert {row["alpha_index"] for row in alpha_labels} == set(range(len(alpha_labels)))
     assert all(tuple(row["tuple_order"]) == ("boldsymbol_mu", "boldsymbol_Lambda", "boldsymbol_beta", "gamma", "pi") for row in alpha_labels)
-    assert {row["gamma"] for row in alpha_labels} == set(label_payload["gamma"])
+    assert {row["gamma"] for row in alpha_labels} == {0, 1}
     assert coupler.angular_maps[0].input_Ls == (1, 0, 0)
     assert coupler.angular_maps[0].coefficient_table == tuple()
     assert coupler.angular_maps[0].factorized_paths

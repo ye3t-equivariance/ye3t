@@ -26,7 +26,7 @@ from ye3t.core.api import YE3TAPI
 from ye3t.core.graded_algebra import ExactSymbolicPrimitiveFilter, GradedBasisRegistry
 from ye3t.core.labels import CompactLabel, normalize_compact_label
 from ye3t.core.product_engine import ExactProductExpansionEngine
-from ye3t.fixed_content import FixedContentModule, FixedContentSpec
+from ye3t.fixed_content import FixedContentModule, FixedContentMultiplicityLabel, FixedContentSpec
 from ye3t.execution_plan import (
     _binary64_complex_residual,
     _stable_hash as _execution_plan_stable_hash,
@@ -70,6 +70,7 @@ from ye3t.execution_plan import (
 )
 from ye3t.global_coupler import (
     AngularCGMap,
+    _typed_joint_routes,
     compile_joint_ye3t_slot_permutation_actions,
     compile_ye3t_couplers,
     plan_ye3t_backend,
@@ -196,7 +197,7 @@ from ye3t.couplings.algebraic_curvature_synthesis import (
     compile_algebraic_curvature_synthesis,
     compile_finite_group_intertwiner_basis,
 )
-from ye3t.spec import YE3TBackendPlan, YE3TCouplerCertificate, YE3TSpec
+from ye3t.spec import YE3TBackendPlan, YE3TCouplerCertificate, YE3TSpec, _target_partition
 
 
 def _json_default(value):
@@ -358,7 +359,19 @@ def _coerce_spec(
     return YE3TSpec.from_dict(base)
 
 
-def _normalize_candidate_label(value):
+def _normalize_candidate_label(value, label_kind="compact"):
+    if label_kind == "multiplicity":
+        if isinstance(value, FixedContentMultiplicityLabel):
+            return value
+        if isinstance(value, Mapping):
+            return FixedContentMultiplicityLabel(
+                tuple(value["partition"]), value["L_R"], value["multiplicity_index"]
+            )
+        if all(hasattr(value, attr) for attr in ("partition", "L_R", "multiplicity_index")):
+            return FixedContentMultiplicityLabel(
+                tuple(value.partition), value.L_R, value.multiplicity_index
+            )
+        return FixedContentMultiplicityLabel(*value)
     if isinstance(value, CompactLabel):
         return value
     if all(hasattr(value, attr) for attr in ("n_tuple", "l_tuple", "internal_Ls")):
@@ -380,6 +393,12 @@ def _compact_label_tuple(label):
         str(label.tree_type),
         tuple(label.basis_key),
     )
+
+
+def _report_label_payload(label):
+    if isinstance(label, FixedContentMultiplicityLabel):
+        return label.to_dict()
+    return _compact_label_tuple(label)
 
 
 def _normalize_primitive_basis_mode(value, *, target_L = None):
@@ -2070,12 +2089,12 @@ class MultiplicityReport:
         return tuple(self.labels_by_target.get(int(target_L), ()))
 
     def contains_label(self, label, *, target_L = None):
-        candidate = _normalize_candidate_label(label)
+        candidate = _normalize_candidate_label(label, self.validation_report.get("label_kind", "compact"))
         labels = self.labels if target_L is None else self.labels_for_target(int(target_L))
         return candidate in set(labels)
 
     def require_label(self, label, *, target_L = None):
-        candidate = _normalize_candidate_label(label)
+        candidate = _normalize_candidate_label(label, self.validation_report.get("label_kind", "compact"))
         if not self.contains_label(candidate, target_L=target_L):
             target_text = "any target" if target_L is None else f"L_R={int(target_L)}"
             raise ValueError(
@@ -2094,7 +2113,7 @@ class MultiplicityReport:
             "validation_report": dict(self.validation_report),
             "counts_by_target": {int(k): int(v) for k, v in self.counts_by_target.items()},
             "labels_by_target": {
-                int(k): [_compact_label_tuple(label) for label in labels]
+                int(k): [_report_label_payload(label) for label in labels]
                 for k, labels in self.labels_by_target.items()
             },
             "provenance": dict(self.provenance),
@@ -2654,6 +2673,16 @@ def count(
         metadata=metadata,
     )
     resolved_input_Ls = _input_Ls_from_spec(spec, input_Ls=input_Ls)
+    requested_parity = spec.target_rotation.parity
+    natural_parity = "odd" if sum(resolved_input_Ls) % 2 else "even"
+    if requested_parity in {"even", "odd"} and requested_parity != natural_parity:
+        raise ValueError(
+            f"Requested parity={requested_parity!r} is incompatible with the natural product parity "
+            f"{natural_parity!r} for input_Ls={resolved_input_Ls!r}."
+        )
+    target_partition = _target_partition(spec.target_permutation, len(spec.content))
+    if spec.carrier == "ACE_density" and target_partition != (len(spec.content),):
+        raise ValueError("ACE_density supports only the globally trivial Young sector.")
     carrier_validation = {
         "carrier": spec.carrier,
         "passed": True,
@@ -2701,28 +2730,28 @@ def count(
             tree_type=spec.tree_schedule,
         )
     ).decompose()
-    labels_by_target = fixed_content.compact_labels_by_target
-    counts_by_target = fixed_content.compact_counts_by_target
+    if not bool(fixed_content.validation_report.get("passed", False)):
+        raise ValueError("Fixed-content multiplicity dimension validation failed.")
     if target_L is None:
         target_L = int(spec.target_rotation.L_R)
     target_L = int(target_L)
-    labels_by_target = {
-        int(target): tuple(labels)
-        for target, labels in labels_by_target.items()
-        if int(target) == target_L
-    }
-    counts_by_target = {
-        int(target): int(count_value)
-        for target, count_value in counts_by_target.items()
-        if int(target) == target_L
-    }
-    counts_by_target.setdefault(target_L, len(labels_by_target.get(target_L, ())))
+    if spec.carrier == "ACE_density":
+        label_kind = "compact"
+        labels_by_target = {target_L: tuple(fixed_content.compact_labels_by_target.get(target_L, ()))}
+    else:
+        label_kind = "multiplicity"
+        labels_by_target = {
+            target_L: fixed_content.valid_labels(target_L=target_L, partition=target_partition)
+        }
+    counts_by_target = {target_L: len(labels_by_target[target_L])}
     basis_mode = _normalize_primitive_basis_mode(
         spec.carrier_options.get("basis_mode", spec.carrier_options.get("primitive_mode", None)),
         target_L=target_L,
     )
     primitive_validation = None
     if basis_mode is not None:
+        if label_kind != "compact":
+            raise ValueError("Primitive compact basis modes require the trivial ACE_density carrier.")
         primitive_timeout = spec.carrier_options.get(
             "exact_primitive_timeout_seconds",
             spec.carrier_options.get("primitive_timeout_seconds", None),
@@ -2754,12 +2783,15 @@ def count(
     }
     validation_report = {
         "passed": True,
-        "scope": "fixed_content_multiplicity_count",
+        "scope": "fixed_content_young_x_SO3_multiplicity_count_with_natural_input_parity",
         "content_rank": len(spec.content),
         "input_Ls": resolved_input_Ls,
+        "natural_product_parity": natural_parity,
         "target_L": target_L,
         "target_permutation": spec.target_permutation,
+        "target_partition": target_partition,
         "carrier": spec.carrier,
+        "label_kind": label_kind,
         "label_count": len(labels_by_target.get(target_L, ())),
         "count": counts_by_target.get(target_L, 0),
         "fixed_content_validation": dict(fixed_content.validation_report),
@@ -2767,7 +2799,11 @@ def count(
         "valid_labels_from": (
             "ye3t.couplings.primitive_compact_label_report"
             if primitive_validation is not None
-            else "ye3t.fixed_content.FixedContentDecomposition.compact_labels_by_target"
+            else (
+                "ye3t.fixed_content.FixedContentDecomposition.compact_labels_by_target"
+                if label_kind == "compact"
+                else "ye3t.fixed_content.FixedContentDecomposition.valid_labels"
+            )
         ),
         "carrier_validation": carrier_validation,
     }
@@ -2781,7 +2817,7 @@ def count(
         "fixed_content_multiplicity_source": (
             "ye3t.core.product_engine.ExactProductExpansionEngine.primitive_quotient"
             if primitive_validation is not None
-            else "YE3TBasisLabeler"
+            else ("YE3TBasisLabeler" if label_kind == "compact" else "FixedContentModule.decompose")
         ),
         "rank_product_rule": "LR/induction for rank-additive products; Kronecker for same-rank products in lower-level coupler plans",
         "ace_density_young_sector": "globally trivial lambda=(N)" if spec.carrier == "ACE_density" else "carrier-specific",
@@ -2792,7 +2828,7 @@ def count(
         "input_Ls": resolved_input_Ls,
         "target": target,
         "backend": backend_plan.selected_backend,
-        "labels": [_compact_label_tuple(label) for label in labels_by_target.get(target_L, ())],
+        "labels": [_report_label_payload(label) for label in labels_by_target.get(target_L, ())],
     }
     return MultiplicityReport(
         spec=spec,
@@ -2857,13 +2893,33 @@ def plan(
         "backend_plan_selected": backend_plan.selected_backend,
         "backend_plan_reason": backend_plan.reason,
     }
+    if spec.carrier != "ACE_density" and any(_input_Ls_from_spec(spec, input_Ls=input_Ls)):
+        typed_blocks, alpha_bindings = _typed_joint_routes(
+            spec,
+            _input_Ls_from_spec(spec, input_Ls=input_Ls),
+            _target_partition(spec.target_permutation, len(spec.content)),
+        )
+        target_L = int(spec.target_rotation.L_R)
+        expected = tuple(report.labels_by_target.get(target_L, ()))
+        if len(alpha_bindings) != len(expected) or any(
+            int(label.multiplicity_index) != index
+            for index, label in enumerate(expected)
+        ):
+            raise ValueError(
+                "Typed joint route inventory disagrees with exact fixed-content labels."
+            )
+        validation_report.update({
+            "typed_blocks": typed_blocks,
+            "alpha_bindings": alpha_bindings,
+            "alpha_binding_count": len(alpha_bindings),
+            "alpha_binding_convention": "typed_joint_kappa_Lambda_xi_gamma_beta_v1",
+        })
     provenance = {
         **dict(report.provenance),
         "api": "ye3t.couplings.plan",
         "backend_planner": "ye3t.global_coupler.plan_ye3t_backend",
     }
-    convention_hash = _convention_hash(
-        {
+    convention_payload = {
             "report": report.to_dict(),
             "backend_plan": {
                 "requested": backend_plan.requested_backend,
@@ -2871,7 +2927,9 @@ def plan(
                 "fast_path_policy": backend_plan.fast_path_policy,
             },
         }
-    )
+    if "alpha_bindings" in validation_report:
+        convention_payload["alpha_bindings"] = validation_report["alpha_bindings"]
+    convention_hash = _convention_hash(convention_payload)
     return CouplerPlan(
         spec=spec,
         report=report,
@@ -4828,6 +4886,12 @@ def compile(
         return compile_lifted_cauchy_scalar(request)
 
     coupler_plan = request if isinstance(request, CouplerPlan) else plan(request, input_Ls=input_Ls, **kwargs)
+    target_L = int(coupler_plan.spec.target_rotation.L_R)
+    if int(coupler_plan.report.counts_by_target.get(target_L, 0)) == 0:
+        raise ValueError(
+            "Requested Young/rotation sector has zero fixed-content multiplicity: "
+            f"target_permutation={coupler_plan.spec.target_permutation!r}, L_R={target_L}."
+        )
     resolved_input_Ls = _input_Ls_from_spec(coupler_plan.spec, input_Ls=input_Ls)
     coupler = compile_ye3t_couplers(
         coupler_plan.spec,
@@ -4839,6 +4903,40 @@ def compile(
         subduction_exact_reference_max_rank=subduction_exact_reference_max_rank,
     )
     certificate = coupler.certificate
+    if not certificate.passed:
+        raise ValueError(
+            "Requested Young/rotation sector failed the compiled coupler certificate: "
+            f"target_permutation={coupler_plan.spec.target_permutation!r}, L_R={target_L}."
+        )
+    if coupler_plan.report.validation_report.get("label_kind") == "multiplicity":
+        expected = int(coupler_plan.report.counts_by_target[target_L])
+        materialized = len(coupler.alpha_labels())
+        if materialized != expected:
+            raise ValueError(
+                "Fixed-content count/materialization mismatch: "
+                f"count={expected}, compiled_alpha_labels={materialized}, "
+                f"target_permutation={coupler_plan.spec.target_permutation!r}, L_R={target_L}."
+            )
+        if coupler.sparse_coefficient_tables and (
+            coupler.sparse_coefficient_tables[0].get("kind") == "typed_joint_orbit_isometry"
+        ):
+            table = coupler.sparse_coefficient_tables[0]
+            bindings = tuple(coupler_plan.validation_report.get("alpha_bindings", ()))
+            compiled_bindings = tuple(table.get("alpha_bindings", ()))
+            tableau_dim = len(coupler.subduction_maps[0].source.tensor.target_tableaux)
+            magnetic_dim = 2 * target_L + 1
+            if (
+                bindings != compiled_bindings
+                or len(bindings) != expected
+                or int(table["shape"][1]) != expected * tableau_dim * magnetic_dim
+                or tuple(label.multiplicity_index for label in
+                         coupler_plan.report.labels_for_target(target_L))
+                != tuple(range(expected))
+            ):
+                raise ValueError(
+                    "Typed joint compiled axes do not match the exact public "
+                    "multiplicity-label bindings."
+                )
     validation_report = {
         **dict(coupler_plan.validation_report),
         "compiled_certificate_passed": bool(certificate.passed),

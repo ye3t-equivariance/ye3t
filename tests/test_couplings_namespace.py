@@ -1,5 +1,6 @@
 import math
 
+import numpy as np
 import pytest
 
 
@@ -47,6 +48,174 @@ def test_couplings_count_plan_compile_provenance_and_reject_invalid_label():
     assert compiled.convention_hash
     assert "compiled_certificate_passed" in compiled.validation_report
     assert compiled.certificate.provenance
+
+
+@pytest.mark.parametrize(
+    "content,target,partition,multiplicity",
+    (
+        ((1, 1), "antisymmetric", (1, 1), 0),
+        ((1, 2), "antisymmetric", (1, 1), 1),
+        ((1, 1, 2), "young:(2,1)", (2, 1), 1),
+        ((1, 1, 2), "antisymmetric", (1, 1, 1), 0),
+        ((1, 2, 3), "young:(2,1)", (2, 1), 2),
+        ((1, 2, 3), "antisymmetric", (1, 1, 1), 1),
+    ),
+)
+def test_fixed_content_target_sector_count_matches_compiled_multiplicity(
+    content, target, partition, multiplicity
+):
+    from ye3t.couplings import compile as compile_coupling
+    from ye3t.couplings import count, plan
+    from ye3t.fixed_content import FixedContentMultiplicityLabel
+
+    report = count(
+        content=content,
+        input_Ls=(0,) * len(content),
+        target_L=0,
+        target_permutation=target,
+        carrier="Phi",
+    )
+    labels = report.labels_for_target(0)
+    assert report.counts_by_target[0] == multiplicity
+    assert labels == tuple(
+        FixedContentMultiplicityLabel(partition, 0, alpha)
+        for alpha in range(multiplicity)
+    )
+    assert report.validation_report["label_kind"] == "multiplicity"
+    assert report.validation_report["target_partition"] == partition
+    assert plan(report).report.labels_for_target(0) == labels
+    assert report.to_dict()["labels_by_target"][0] == [label.to_dict() for label in labels]
+    for label in labels:
+        assert report.contains_label(label.to_dict(), target_L=0)
+        assert report.require_label(label, target_L=0) == label
+    assert not report.contains_label((partition, 0, multiplicity), target_L=0)
+
+    if multiplicity == 0:
+        with pytest.raises(ValueError, match="zero fixed-content multiplicity"):
+            compile_coupling(plan(report), subduction_materialization_backend="exact")
+        return
+
+    compiled = compile_coupling(plan(report), subduction_materialization_backend="exact")
+    assert compiled.certificate.passed
+    assert {label.gamma for label in compiled.coupler.labels} == {tuple(range(multiplicity))}
+    subduction = compiled.coupler.subduction_maps[0]
+    assert subduction.target_partition == partition
+    columns = np.asarray(subduction.coefficient_matrix(), dtype=float)
+    gram = columns.T @ columns
+    projector = columns @ columns.T
+    specht_dim = 2 if partition == (2, 1) else 1
+    assert columns.shape[1] == multiplicity * specht_dim
+    np.testing.assert_allclose(gram, np.eye(columns.shape[1]), atol=1e-12)
+    np.testing.assert_allclose(projector @ projector, projector, atol=1e-12)
+    assert np.trace(projector) == pytest.approx(multiplicity * specht_dim, abs=1e-12)
+    assert subduction.multiplicity == multiplicity
+
+
+@pytest.mark.parametrize("target", ("young:(N)", "young:N", "symmetric"))
+def test_ace_density_rejects_nontrivial_parent_and_preserves_compact_labels(target):
+    from ye3t.core.labels import CompactLabel
+    from ye3t.couplings import compile as compile_coupling
+    from ye3t.couplings import count
+
+    report = count(
+        content=(2, 5), input_Ls=(0, 0), target_L=0,
+        target_permutation=target,
+        fast_path_policy="force:symmetric_power_fast_path",
+    )
+    assert report.validation_report["target_partition"] == (2,)
+    assert report.validation_report["label_kind"] == "compact"
+    assert report.backend == "symmetric_power_fast_path"
+    assert all(isinstance(label, CompactLabel) for label in report.labels_for_target(0))
+    assert compile_coupling(report, subduction_materialization_backend="exact").certificate.passed
+    with pytest.raises(ValueError, match="globally trivial Young sector"):
+        count(content=(1, 2), input_Ls=(0, 0), target_L=0, target_permutation="antisymmetric")
+
+
+@pytest.mark.parametrize("target", ("young:(1,1)", "sign"))
+def test_sign_alias_selects_exterior_backend_and_incompatible_parity_errors_early(target):
+    from ye3t.couplings import compile as compile_coupling
+    from ye3t.couplings import count
+
+    report = count(
+        content=(1, 2), input_Ls=(0, 0), target_L=0,
+        target_permutation=target, carrier="Phi",
+        fast_path_policy="force:exterior_power_fast_path",
+    )
+    assert report.backend == "exterior_power_fast_path"
+    assert compile_coupling(report, subduction_materialization_backend="exact").certificate.passed
+    with pytest.raises(ValueError, match="incompatible with the natural product parity"):
+        count(
+            content=(1, 2), input_Ls=(0, 0), target_L=0,
+            carrier="Phi", request={"target_rotation": {"L_R": 0, "group": "O3", "parity": "odd"}},
+        )
+
+
+@pytest.mark.parametrize(
+    "content,input_Ls,target_L,target,multiplicity",
+    (
+        ((1, 1), (0, 1), 1, "trivial", 1),
+        ((1, 1), (0, 1), 1, "antisymmetric", 1),
+        ((1, 1, 2), (0, 1, 1), 0, "young:(2,1)", 2),
+    ),
+)
+def test_generic_compile_materializes_mixed_angular_typed_orbit(
+    content, input_Ls, target_L, target, multiplicity
+):
+    from ye3t.couplings import compile as compile_coupling
+    from ye3t.couplings import count, plan
+
+    report = count(
+        content=content,
+        input_Ls=input_Ls,
+        target_L=target_L,
+        target_permutation=target,
+        carrier="Phi",
+    )
+    assert report.counts_by_target[target_L] == multiplicity
+    compiled = compile_coupling(plan(report), subduction_materialization_backend="exact")
+    assert compiled.certificate.passed
+    assert len(compiled.coupler.alpha_labels()) == multiplicity
+    assert compiled.coupler.sparse_coefficient_tables[0]["kind"] == "typed_joint_orbit_isometry"
+
+
+def test_direct_global_compiler_uses_full_mixed_angular_stabilizer():
+    from ye3t.couplings import count, plan
+    from ye3t.global_coupler import CompileGlobalYE3TCouplers
+
+    report = count(
+        content=(1, 1), input_Ls=(0, 1), target_L=1,
+        target_permutation="trivial", carrier="Phi",
+    )
+    assert report.counts_by_target[1] == 1
+    compiled = CompileGlobalYE3TCouplers(
+        plan(report).spec,
+        input_Ls=(0, 1),
+        subduction_materialization_backend="exact",
+    )
+    assert compiled.certificate.passed
+    assert tuple(block["type"] for block in compiled.block_maps[0]["blocks"]) == (
+        (1, 0), (1, 1)
+    )
+    assert compiled.sparse_coefficient_matrix().shape == (6, 3)
+
+
+def test_public_compile_materializes_all_angular_beta_labels():
+    from ye3t.couplings import compile as compile_coupling
+    from ye3t.couplings import count, plan
+
+    report = count(
+        content=(1, 2, 3), input_Ls=(1, 1, 1), target_L=1,
+        target_permutation="trivial", carrier="Phi",
+    )
+    assert report.counts_by_target[1] == 3
+    coupler_plan = plan(report)
+    compiled = compile_coupling(coupler_plan, subduction_materialization_backend="exact")
+    assert compiled.certificate.passed
+    assert tuple(
+        row["angular_copy"] for row in
+        compiled.coupler.sparse_coefficient_tables[0]["alpha_bindings"]
+    ) == (0, 1, 2)
+    assert compiled.coupler.sparse_coefficient_matrix().shape == (162, 9)
 
 
 def test_compile_ace_factorized_schedules_by_l_public_facade_matches_counts():

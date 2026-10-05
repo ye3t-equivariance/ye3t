@@ -129,6 +129,32 @@ def test_shared_spec_carrier_policy_report_accepts_role_resolved_A_s():
     assert report["collapse_declared"] is False
 
 
+@pytest.mark.parametrize(
+    "target,partition,passed",
+    (
+        ("trivial", (3,), True),
+        ("young:(N)", (3,), True),
+        ("young:(3)", (3,), True),
+        ("young:(2,1)", (2, 1), False),
+        ("antisymmetric", (1, 1, 1), False),
+    ),
+)
+def test_collapsed_A_s_policy_uses_semantic_target_partition(target, partition, passed):
+    from ye3t import YE3TSpec
+
+    spec = YE3TSpec(
+        content=(1, 2, 3),
+        carrier="A_s",
+        target_permutation=target,
+        carrier_options={"role_coordinate_policy": "collapsed", "slot_count": 3},
+    )
+    report = spec.carrier_policy_report()
+    assert report["target_partition"] == partition
+    assert report["nontrivial_target_permutation_requested"] is (not passed)
+    assert report["passed"] is passed
+    assert report["role_contract"]["target_permutation_report"]["partition"] == partition
+
+
 def test_shared_spec_files_reject_non_strict_status_and_unknown_forced_backend(tmp_path):
     from ye3t import BalancedYE3TMessageStateSpec, YE3TSpec
 

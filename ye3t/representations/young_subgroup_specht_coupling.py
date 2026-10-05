@@ -187,9 +187,10 @@ class YoungSubgroupSpechtCouplingSpec:
         return hashlib.sha256(encoded).hexdigest()
 
 
-@recordclass(('spec', 'tensor', 'validation'), frozen = True)
+@recordclass(('spec', 'tensor', 'validation', 'numeric_validation_report'), frozen = True)
 class YoungSubgroupSpechtCoupling:
     """Validated Young-subgroup Specht coupling matrix and metadata."""
+    numeric_validation_report = None
 
     @property
     def multiplicity(self):
@@ -315,6 +316,10 @@ class YoungSubgroupSpechtCoupling:
             "provenance": getattr(self.tensor, "provenance", ""),
             "codepath": getattr(self.tensor, "codepath", ""),
             "notes": list(getattr(self.tensor, "notes", ())),
+            "numeric_validation_report": (
+                None if self.numeric_validation_report is None
+                else dict(self.numeric_validation_report)
+            ),
         }
 
 
@@ -457,7 +462,12 @@ def build_cached_young_subgroup_specht_coupling(
             else "numeric cached subduction result failed validation"
         ),
     )
-    return YoungSubgroupSpechtCoupling(spec=spec, tensor=tensor, validation=validation)
+    return YoungSubgroupSpechtCoupling(
+        spec=spec,
+        tensor=tensor,
+        validation=validation,
+        numeric_validation_report=numeric_result.validation_report.to_dict(),
+    )
 
 
 def _numeric_cached_nary_subduction_tensor(shell, numeric_result):
