@@ -56,14 +56,14 @@ compiled = couplings.compile(
     full_plan,
     subduction_materialization_backend=cfg_ye3t["runtime"]["subduction_backend"],
 )
+execution_plan = couplings.execution_plan_from_compiled_coupler(compiled)
 factors = torch.tensor(
     cfg_ye3t["basis"]["factor_multiplets"],
     dtype=getattr(torch, cfg_ye3t["runtime"]["dtype"]),
     device=cfg_ye3t["runtime"]["device"],
 )
-runtime = compiled.coupler.bind_factorized_factors_torch(
-    dtype=factors.dtype, device=factors.device,
-)
+runtime = couplings.bind_typed_factorized_execution_plan_torch(
+    execution_plan, dtype=factors.dtype, device=factors.device)
 values = runtime.evaluate(factors)
 message_factors = factors.unsqueeze(0).expand(
     cfg_ye3t["runtime"]["example_message_count"], -1, -1,
@@ -86,3 +86,4 @@ print("message batch axes (edge, a, t, M)", tuple(message_features.shape))
 print("message factor gradient shape", tuple(message_gradient.shape))
 print("factorized routes", compiled.coupler.factorized_coefficient_tables[0]["kind"])
 print("coefficient hash", compiled.coupler.cache_key())
+print("execution plan hash", execution_plan.plan_hash)

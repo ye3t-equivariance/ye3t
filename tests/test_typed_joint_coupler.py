@@ -2,6 +2,104 @@ import numpy as np
 import pytest
 
 
+def _cosets(table):
+    if table["coset_representatives"] is not None:
+        return tuple(tuple(row) for row in table["coset_representatives"])
+    from ye3t.representations.young_orthogonal import (
+        _young_subgroup_shuffle_representatives,
+    )
+    return _young_subgroup_shuffle_representatives(
+        tuple(int(block["size"]) for block in table["blocks"])
+    )
+
+
+def test_precompact_typed_young_table_keeps_saved_factor_results():
+    from copy import deepcopy
+    from types import SimpleNamespace
+
+    import torch
+
+    from ye3t.couplings import compile as compile_coupling, plan
+    from ye3t.couplings.factorized_typed import evaluate_typed_factorized_torch
+    from ye3t.couplings.young_coset_transport import expanded_young_values
+
+    coupler = compile_coupling(plan(
+        content=(1, 2, 3), input_Ls=(1, 1, 1), target_L=1,
+        target_permutation="young:2,1", carrier="Phi",
+    ), subduction_materialization_backend="exact").coupler
+    table = deepcopy(coupler.factorized_coefficient_tables[0])
+    cosets = _cosets(table)
+    table["coset_representatives"] = cosets
+    old_tables = []
+    for young in table["young_tables"]:
+        old = dict(young)
+        if old.get("analytic_character") is None:
+            old["values"] = tuple(tuple(float(value) for value in row)
+                                  for row in expanded_young_values(old, cosets))
+            for compact_key in (
+                "restricted_values", "adjacent_generators", "target_partition",
+                "storage", "restricted_kind", "restricted_scale",
+                "coset_transport_residual", "transport_validation",
+            ):
+                old.pop(compact_key, None)
+        old_tables.append(old)
+    table["young_tables"] = tuple(old_tables)
+    saved = SimpleNamespace(certificate=coupler.certificate,
+                            factorized_coefficient_tables=(table,))
+    factors = torch.tensor([
+        [[0.2, 0.3, -0.5], [0.7, -0.1, 0.4], [0.1, 0.9, -0.2]],
+    ], dtype=torch.complex128)
+    moved = factors[:, [1, 0, 2]]
+    types = ((2, 1), (1, 1), (3, 1))
+    current = coupler.evaluate_factorized_factors_torch(moved, factor_types=types)
+    legacy = evaluate_typed_factorized_torch(saved, moved, factor_types=types)
+    torch.testing.assert_close(legacy, current, atol=1e-12, rtol=1e-12)
+
+
+def test_complete_typed_factors_lower_to_serializable_execution_plan():
+    import json
+
+    import torch
+
+    from ye3t import YE3TRotationTarget, YE3TSpec
+    from ye3t.couplings import (
+        bind_typed_factorized_execution_plan_torch,
+        compile as compile_coupling,
+        execution_plan_from_compiled_coupler,
+        lower_typed_factorized_execution_plan, plan,
+    )
+    from ye3t.execution_plan import YE3TExecutionPlan
+
+    spec = YE3TSpec(
+        content=(1, 2, 3), target_permutation="young:2,1",
+        target_rotation=YE3TRotationTarget(L_R=1, parity="natural", group="O3"),
+        carrier="Phi", metadata={"input_Ls": (1, 1, 1)},
+    )
+    compiled = compile_coupling(plan(spec), subduction_materialization_backend="exact")
+    execution = lower_typed_factorized_execution_plan(compiled)
+    assert execution_plan_from_compiled_coupler(compiled).plan_hash == execution.plan_hash
+    restored = YE3TExecutionPlan.from_dict(json.loads(execution.to_json()))
+    assert restored.plan_hash == execution.plan_hash
+    assert restored.carrier_layouts[0].channel_count == len(
+        compiled.coupler.factorized_coefficient_tables[0]["routes"])
+    assert restored.carrier_layouts[0].tableau_count == 2
+    assert restored.carrier_layouts[0].key.parity == -1
+    factors = torch.tensor([[[0.2, 0.3, -0.5], [0.7, -0.1, 0.4],
+                             [0.1, 0.9, -0.2]]],
+                           dtype=torch.complex128, requires_grad=True)
+    runtime = bind_typed_factorized_execution_plan_torch(
+        restored, dtype=factors.dtype, device=factors.device)
+    actual = runtime.evaluate(factors)
+    expected = compiled.coupler.evaluate_factorized_factors_torch(factors)
+    torch.testing.assert_close(actual, expected, atol=1e-12, rtol=1e-12)
+    gradient = torch.autograd.grad(actual.abs().square().sum(), factors)[0]
+    assert torch.isfinite(gradient).all()
+    damaged = json.loads(execution.to_json())
+    damaged["instructions"][0]["metadata"]["table_hash"] = "sha256:wrong"
+    with pytest.raises(ValueError, match="table hash"):
+        YE3TExecutionPlan.from_dict(damaged)
+
+
 @pytest.mark.parametrize(
     "content,input_Ls,target,output_L",
     (
@@ -54,9 +152,7 @@ def test_complete_factorized_typed_values_match_dense_reference(
         [complex((factor + 1) * (m + 2) / 7, (factor - m) / 9)
          for m in range(-ell, ell + 1)], dtype=torch.complex128
     ) for factor, ell in enumerate(input_Ls))
-    cosets = (table["coset_representatives"]
-              if table["coset_representatives"] is not None
-              else dense.coupler.sparse_coefficient_tables[0]["coset_representatives"])
+    cosets = _cosets(table)
     for rep in cosets[:min(3, len(cosets))]:
         moved = tuple(canonical[index] for index in rep)
         moved_types = tuple((content[index], input_Ls[index]) for index in rep)
@@ -171,10 +267,11 @@ def test_factorized_typed_stably_groups_noncanonical_repeated_factor_word():
     table = reordered.coupler.factorized_coefficient_tables[0]
     word = ((1, 1), (2, 1), (1, 1))
     canonical = ((1, 1), (1, 1), (2, 1))
-    coset = next(index for index, rep in enumerate(table["coset_representatives"])
+    cosets = _cosets(table)
+    coset = next(index for index, rep in enumerate(cosets)
                  if all(word[rep[position]] == canonical[position]
                         for position in range(3)))
-    ordered = factors[list(table["coset_representatives"][coset])]
+    ordered = factors[list(cosets[coset])]
     raw = torch.kron(torch.kron(ordered[0], ordered[1]), ordered[2])
     matrix = torch.as_tensor(
         np.asarray(dense.coupler.sparse_coefficient_matrix(), dtype=float),
@@ -393,10 +490,11 @@ def test_selected_typed_route_matches_full_dense_reference_on_two_cosets():
     for permutation in ((0, 1, 2), (2, 0, 1)):
         moved = slots[list(permutation)]
         types = tuple((request["content"][index], 1) for index in permutation)
-        coset = next(index for index, rep in enumerate(table["coset_representatives"])
+        cosets = _cosets(table)
+        coset = next(index for index, rep in enumerate(cosets)
                      if all(types[int(rep[position])] == (request["content"][position], 1)
                             for position in range(3)))
-        canonical = moved[list(table["coset_representatives"][coset])]
+        canonical = moved[list(cosets[coset])]
         raw = torch.kron(torch.kron(canonical[0], canonical[1]), canonical[2])
         orbit = torch.zeros(matrix.shape[0], dtype=torch.complex128)
         orbit[coset * raw.numel():(coset + 1) * raw.numel()] = raw
@@ -457,7 +555,17 @@ def test_rank_eight_selected_phi_route_has_full_axes_and_s8_o3_covariance(tmp_pa
     assert table["selected_full_alpha"] == 12
     assert table["shape"] == (70 * 3**8, 14 * 5)
     assert not compiled.coupler.sparse_coefficient_tables
-    young = np.asarray(table["young_tables"][0]["values"])
+    from ye3t.couplings.young_coset_transport import transported_young_slice
+
+    compact = table["young_tables"][0]
+    assert compact["storage"] == "identity_coset_plus_sparse_adjacent_generators_v1"
+    assert len(compact["restricted_values"]) == 1
+    young = np.vstack([
+        transported_young_slice(
+            compact, representative, 0, torch.float64, torch.device("cpu")
+        ).numpy()
+        for representative in _cosets(table)
+    ])
     np.testing.assert_allclose(young.T @ young, np.eye(young.shape[1]), atol=1e-9)
     projector = young @ young.T
     np.testing.assert_allclose(projector @ projector, projector, atol=1e-9)
@@ -469,7 +577,7 @@ def test_rank_eight_selected_phi_route_has_full_axes_and_s8_o3_covariance(tmp_pa
     _left, singular, right = np.linalg.svd(restrictions)
     assert singular[-1] < 1e-10 and singular[-2] > 1e-5
     invariant = right[-1]
-    coset_identity = table["coset_representatives"].index(tuple(range(8)))
+    coset_identity = _cosets(table).index(tuple(range(8)))
     compiled_invariant = young[coset_identity]
     compiled_invariant /= np.linalg.norm(compiled_invariant)
     np.testing.assert_allclose(
@@ -977,7 +1085,7 @@ def test_mixed_rank_three_projector_matches_independent_standard_singlet():
     )
     table = compiled.coupler.sparse_coefficient_tables[0]
     matrix = np.asarray(compiled.coupler.sparse_coefficient_matrix(), dtype=float)
-    cosets = tuple(tuple(rep) for rep in table["coset_representatives"])
+    cosets = _cosets(table)
     signs = np.array([
         (-1) ** sum(
             rep[left] > rep[right]
@@ -1025,7 +1133,7 @@ def test_mixed_rank_three_compiled_analysis_intertwines_noninvolutive_cycle_and_
     coupler = compiled.coupler
     table = coupler.sparse_coefficient_tables[0]
     matrix = np.asarray(coupler.sparse_coefficient_matrix(), dtype=float)
-    cosets = tuple(tuple(rep) for rep in table["coset_representatives"])
+    cosets = _cosets(table)
     cycle = (1, 2, 0)
     inverse_cycle = tuple(cycle.index(position) for position in range(3))
     permutation = np.zeros((6, 6))
@@ -1349,7 +1457,7 @@ def test_antisymmetric_local_block_transports_through_nontrivial_cosets():
         route["block_partitions"][0]
         for route in table["alpha_bindings"]
     } == {(1, 1)}
-    cosets = tuple(tuple(rep) for rep in table["coset_representatives"])
+    cosets = _cosets(table)
     signs = np.array([
         (-1) ** sum(
             rep[left] > rep[right]

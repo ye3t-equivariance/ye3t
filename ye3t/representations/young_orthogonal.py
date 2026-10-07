@@ -1508,13 +1508,14 @@ def _constructive_subduction_graph_restricted_intertwiner_basis(
     for dim in child_dims:
         child_dim *= int(dim)
     target_dim = int(target_partition.dimension)
-    child_matrices = tuple(canonical_irrep_matrices(tuple(partition.parts)) for partition in subgroup_partitions)
     constraints = []
     for perm in _young_subgroup_generator_permutations(block_sizes):
         block_perms = _split_young_subgroup_permutation(perm, block_sizes)
+        # These subgroup constraints use adjacent generators only. Their exact
+        # Young-orthogonal actions avoid enumerating each child symmetric group.
         child_action = _kronecker_product_sequence(
-            child_matrices[idx][inverse_permutation(block_perm)]
-            for idx, block_perm in enumerate(block_perms)
+            _young_irrep_matrix(tuple(partition.parts), inverse_permutation(block_perm))
+            for partition, block_perm in zip(subgroup_partitions, block_perms)
         )
         target_action = _young_irrep_matrix(tuple(target_partition.parts), inverse_permutation(perm))
         constraints.append(

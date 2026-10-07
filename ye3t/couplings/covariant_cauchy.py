@@ -23,6 +23,7 @@ implementation; no external source code is adapted.
 
 from collections import defaultdict
 from itertools import product
+import math
 
 from ye3t.representations.builder import GeneralizedExactSymbolicLabeler
 from ye3t.representations.generalized_irreps import Partition
@@ -63,26 +64,41 @@ def covariant_cauchy_request(
     Block ``b`` is the ``block_sizes[b]``-fold repeated product of complete
     channel ``b``. ``kappa_policy`` filters role Schur partitions; for ordered
     factors it does not restrict local diagonal Young or angular partitions.
-    Parity is fixed by the content, ``prod_b (-1)^{l_b k_b}``; a supplied
-    ``target_parity`` must agree with it.
+    Parity is fixed by the factor content. Atomistic channels use polar
+    ``(-1)^l`` parity; supplied factor types may set their own ``parity``.
+    A supplied ``target_parity`` must agree with the product.
     """
 
     block_sizes = tuple(int(value) for value in block_sizes)
-    channels = tuple(
-        _scalar._normalize_channel(channel, index)
-        for index, channel in enumerate(channels)
-    )
+    normalized_channels = []
+    for index, channel in enumerate(channels):
+        if carrier == "ordered_role" and "factor_type" in channel:
+            if (not {"factor_type", "l", "source_family_id"} <= set(channel)
+                    or set(channel) - {"factor_type", "l", "source_family_id", "parity"}):
+                raise ValueError("A supplied factor channel needs factor_type, l, source_family_id, and optional parity.")
+            factor_type = str(channel["factor_type"])
+            source_family_id = str(channel["source_family_id"])
+            ell = int(channel["l"])
+            factor_parity = int(channel.get("parity", (-1) ** ell))
+            if (not factor_type or not source_family_id or ell < 0
+                    or factor_parity not in {-1, 1}):
+                raise ValueError("Supplied factor identity must be nonempty and l nonnegative.")
+            normalized_channels.append({"factor_type": factor_type, "l": ell,
+                                        "source_family_id": source_family_id,
+                                        "parity": factor_parity})
+        else:
+            normalized_channels.append(_scalar._normalize_channel(channel, index))
+    channels = tuple(normalized_channels)
     if not channels or len(channels) != len(block_sizes):
         raise ValueError("channels and block_sizes must align and be nonempty.")
     if any(value <= 0 for value in block_sizes):
         raise ValueError("block_sizes must be positive.")
     keys = tuple(
-        (
-            channel["neighbor_species"],
-            channel["radial_channel"],
-            channel["l"],
-            channel["source_family_id"],
-        )
+        (("factor_type", channel["factor_type"], channel["l"],
+          channel["source_family_id"], channel["parity"])
+         if "factor_type" in channel else
+         ("atomistic", channel["neighbor_species"],
+          channel["radial_channel"], channel["l"], channel["source_family_id"]))
         for channel in channels
     )
     if len(set(keys)) != len(keys):
@@ -102,20 +118,15 @@ def covariant_cauchy_request(
     angular_basis_backend = str(angular_basis_backend)
     if angular_basis_backend not in {"legacy_exact", "exact_weight_space_v1"}:
         raise ValueError("angular_basis_backend must be legacy_exact or exact_weight_space_v1.")
-    content_parity = (
-        -1
-        if sum(
-            size * channel["l"]
-            for size, channel in zip(block_sizes, channels, strict=True)
-        )
-        % 2
-        else 1
+    content_parity = math.prod(
+        int(channel.get("parity", (-1) ** int(channel["l"]))) ** size
+        for size, channel in zip(block_sizes, channels, strict=True)
     )
     if target_parity is None:
         target_parity = content_parity
     if int(target_parity) != content_parity:
         raise ValueError(
-            "The content fixes O(3) parity prod_b (-1)^(l_b k_b) = "
+            "The content fixes O(3) parity as the product of factor parities = "
             + str(content_parity)
             + "; a request selects contents and cannot project parity."
         )

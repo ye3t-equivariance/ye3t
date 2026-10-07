@@ -93,7 +93,15 @@ from ye3t.couplings.covariant_cauchy import (
     is_covariant_cauchy_request,
     validate_covariant_cauchy,
 )
-from ye3t.couplings.ordered_role_cauchy import bind_ordered_role_cauchy_torch
+from ye3t.couplings.ordered_role_cauchy import (
+    bind_ordered_role_cauchy_torch,
+    bind_ordered_role_execution_plan_torch,
+    lower_ordered_role_cauchy_execution_plan,
+)
+from ye3t.couplings.factorized_typed import (
+    bind_typed_factorized_execution_plan_torch,
+    lower_typed_factorized_execution_plan,
+)
 from ye3t.couplings.tagged_cauchy_carriers import (
     _compile_tagged_role_factor_execution,
     compile_tagged_cauchy_carriers,
@@ -7850,9 +7858,9 @@ def execution_plan_from_compiled_coupler(
 ):
     """Lower one validated compiled coupler into the runtime schema.
 
-    Rank-one and rank-two maps use an exact Young x dense-CG synthesis map.
-    Higher ranks retain the compiler's factorized angular forest, binary CG
-    tables, coset placements, and Young analysis as a shared subtree DAG.
+    Complete typed factor schedules lower to a source-neutral factorized
+    instruction. Older Young-matrix schedules retain their original plan
+    representation for saved-plan compatibility and reference checks.
     """
 
     if not isinstance(compiled_coupler, CompiledCoupler):
@@ -7860,6 +7868,14 @@ def execution_plan_from_compiled_coupler(
     target_rotation = dict(compiled_coupler.target.get("rotation", {}))
     target_L = int(target_rotation.get("L_R", 0))
     coupler = compiled_coupler.coupler
+    factorized_tables = tuple(coupler.factorized_coefficient_tables)
+    if (len(factorized_tables) == 1 and
+            factorized_tables[0].get("kind") == "typed_joint_factorized_v1"):
+        if int(table_index) != 0:
+            raise IndexError("The complete factorized plan has one schedule table.")
+        if source_realization is not None or source_assembly is not None:
+            raise ValueError("Bind physical sources to the factorized plan in the application runtime.")
+        return lower_typed_factorized_execution_plan(compiled_coupler)
     tables = tuple(coupler.sparse_coefficient_tables)
     table_index = int(table_index)
     if table_index < 0 or table_index >= len(tables):
@@ -8233,6 +8249,10 @@ __all__ = [
     "execution_plan_from_same_rank_kronecker",
     "evaluate_covariant_cauchy",
     "bind_ordered_role_cauchy_torch",
+    "bind_ordered_role_execution_plan_torch",
+    "lower_ordered_role_cauchy_execution_plan",
+    "lower_typed_factorized_execution_plan",
+    "bind_typed_factorized_execution_plan_torch",
     "evaluate_lifted_cauchy_scalar",
     "evaluate_partition_expression",
     "expand_partition_family_requests",

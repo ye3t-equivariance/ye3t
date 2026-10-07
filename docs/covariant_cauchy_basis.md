@@ -63,11 +63,56 @@ factorization.
 The public path is `covariant_cauchy_request(..., carrier="ordered_role",
 target_permutation=..., target_L=...)` followed by `ye3t.couplings.count`,
 `plan`, and `compile`. Call `ye3t.couplings.validate_covariant_cauchy` when
-loading a saved artifact. For repeated Torch evaluation, bind its constant
-tensors once with `ye3t.couplings.bind_ordered_role_cauchy_torch`; see
+loading a saved artifact. Lower it with
+`ye3t.couplings.lower_ordered_role_cauchy_execution_plan`, then bind the
+tested Torch runtime with `bind_ordered_role_execution_plan_torch`; see
 `examples/ordered_role_cauchy_factors.py`. Inputs are ordered
 `(..., N, d, 2l+1)` for a common `l`, or one `(d, 2l_b+1)` multiplet per factor
 when angular degrees differ. The output shape is `(..., a, t, M)`.
+External sources may name channels with `factor_type`, `l`, and
+`source_family_id`, with optional intrinsic O(3) `parity=+1` or `-1`.
+Omitting `parity` uses the polar value `(-1)^l`. The older atomistic
+`neighbor_species`/`radial_channel` channel form remains readable. The
+compiler fixes output parity to the product of input factor parities.
+
+### Compact Young transport
+
+Let `H = S_{k_1} x ... x S_{k_b}`, `R=[S_N:H]`, `f=dim[lambda]`, and
+`h=prod_b dim[mu_b]`. The Young part of a full coefficient table has
+`R h m f` numbers when its multiplicity is `m`. The exact compiler solves
+the subgroup-generator constraints for only the identity-coset restriction
+`Q` with `h m f` numbers. In the established tableau and multiplicity gauge,
+the other coset rows follow from
+
+\[
+C_{(r,j),(\gamma,t)}
+=\sum_s Q_{j,(\gamma,s)} D^\lambda(r)_{st},
+\qquad r\in S_N/H.
+\]
+
+Each adjacent-transposition action in `D^lambda` has at most two entries
+per column, so the saved transport uses `O((N-1)f)` generator entries rather
+than the orbit-sized table. When every block has size one, `Q` is a scaled
+matrix unit and is stored by its scale and axes. The implementation checks
+low-rank results against the previous full matrix, verifies subgroup
+constraints and the reduced multiplicity Gram, and tests a rank-eight
+nontrivial Young isometry. The numeric cached backend still constructs its
+full Young table during compilation, then saves the compact restriction.
+This is an independent implementation of the subgroup-adapted construction
+in [Goff and Thompson, Eqs. (7)-(12)](https://arxiv.org/abs/2609.31895),
+using [Chilla's reduced subduction constraints](https://arxiv.org/abs/math-ph/0606037)
+and [Young adjacent-generator representations](https://arxiv.org/abs/math/0503040).
+
+A binary LR tree is another possible storage and contraction route. The
+existing `runtime/schur_weyl_tree.py` has a finite-rank tree backend, but
+substituting its intermediate-copy basis here would change the coefficient
+gauge. Saved linear weights would then require an explicit recoupling map.
+The identity-coset transport above reduces storage while preserving their
+current coordinate convention. Historical rank-16384 evidence in the
+workspace is a symmetric ACE **count** calculation, not a materialized
+general-Young coefficient table. The specialized rank-16 product and
+rank-eight nontrivial Young tests likewise establish their stated sectors,
+not universal high-rank runtime scaling.
 
 For commuting `A_s` inputs, the product itself is globally symmetric and only
 `lambda=(N)` is a physical output. The ordered-role API keeps distinct factor

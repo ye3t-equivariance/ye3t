@@ -15,6 +15,14 @@ from itertools import combinations, combinations_with_replacement, product
 import hashlib
 import json
 import math
+from collections.abc import Mapping
+
+from .young_coset_transport import (
+    adjacent_generator_columns, bind_young_restriction,
+    canonical_factor_coset, direct_restricted_young_values,
+    restricted_young_values,
+    transported_young_slice,
+)
 
 
 @lru_cache(maxsize=128)
@@ -407,17 +415,62 @@ def compile_typed_factorized(
             })
             continue
         if subduction_materialization_backend == "exact":
-            coupling = _build_young_subgroup_specht_coupling(
-                kappas, target_partition, bracketing=spec.tree_schedule
-            )
-        else:
-            coupling = _build_cached_young_subgroup_specht_coupling(
-                kappas, target_partition, bracketing=spec.tree_schedule,
-                cache_dir=subduction_cache_dir,
-                constraint_backend=subduction_constraint_backend,
-                compare_exact_projector=len(spec.content) <= 4,
-                exact_reference_max_rank=4,
-            )
+            local_tableau_dim = math.prod(len(standard_tableaux(kappa))
+                                          for kappa in kappas)
+            target_tableau_dim = len(standard_tableaux(target_partition))
+            matrix_units = all(sum(kappa) == 1 for kappa in kappas)
+            if matrix_units:
+                gamma_count = target_tableau_dim
+                scale = math.sqrt(target_tableau_dim / math.factorial(len(input_Ls)))
+                restricted = ((tuple(scale if col == gamma else 0.0
+                                     for gamma in range(gamma_count)
+                                     for col in range(target_tableau_dim)),)
+                              if len(input_Ls) <= 4 else None)
+            else:
+                restricted, gamma_count = direct_restricted_young_values(
+                    kappas, target_partition
+                )
+            if (local_tableau_dim < 1 or gamma_count < 1
+                    or restricted is not None and (
+                        len(restricted) != local_tableau_dim or any(
+                            len(row) != gamma_count * target_tableau_dim
+                            for row in restricted
+                        )
+                    )):
+                raise ArithmeticError("Direct Young restriction has invalid axes.")
+            if len(input_Ls) <= 4:
+                reference = _build_young_subgroup_specht_coupling(
+                    kappas, target_partition, bracketing=spec.tree_schedule
+                )
+                full = reference.coefficient_matrix()
+                if (not reference.validation.passed
+                        or full.cols != gamma_count * target_tableau_dim
+                        or any(abs(float(full[row, col]) - restricted[row][col]) > 1e-10
+                               for row in range(local_tableau_dim)
+                               for col in range(full.cols))):
+                    raise ArithmeticError("Direct Young restriction disagrees with the exact orbit reference.")
+                couplings.append(reference)
+            young_index[kappas] = len(young_tables)
+            young_tables.append({
+                "kappas": kappas, "local_tableau_dim": local_tableau_dim,
+                "target_tableau_dim": target_tableau_dim,
+                "gamma_count": gamma_count,
+                "target_partition": target_partition,
+                **({"restricted_kind": "matrix_units", "restricted_scale": scale}
+                   if matrix_units else {"restricted_values": restricted}),
+                "adjacent_generators": adjacent_generator_columns(target_partition),
+                "coset_transport_residual": 0.0,
+                "transport_validation": "exact_subgroup_generators_and_reduced_gram",
+                "storage": "identity_coset_plus_sparse_adjacent_generators_v1",
+            })
+            continue
+        coupling = _build_cached_young_subgroup_specht_coupling(
+            kappas, target_partition, bracketing=spec.tree_schedule,
+            cache_dir=subduction_cache_dir,
+            constraint_backend=subduction_constraint_backend,
+            compare_exact_projector=len(spec.content) <= 4,
+            exact_reference_max_rank=4,
+        )
         if not coupling.validation.passed:
             raise ArithmeticError("Factorized Young subduction failed validation.")
         numeric = coupling.numeric_validation_report
@@ -476,13 +529,19 @@ def compile_typed_factorized(
                 or len(canonical_rows) != matrix.rows
                 or len(canonical_columns) != matrix.cols):
             raise ArithmeticError("Young basis metadata does not span its matrix axes.")
+        restricted, transport_residual = restricted_young_values(
+            matrix, canonical_rows, canonical_columns, cosets,
+            target_partition, local_tableau_dim, target_tableau_dim,
+        )
         young_index[kappas] = len(young_tables)
         young_tables.append({
             "kappas": kappas, "local_tableau_dim": local_tableau_dim,
             "target_tableau_dim": target_tableau_dim, "gamma_count": gamma_count,
-            "values": tuple(tuple(float(matrix[row, col])
-                                  for col in canonical_columns)
-                            for row in canonical_rows),
+            "target_partition": target_partition,
+            "restricted_values": restricted,
+            "adjacent_generators": adjacent_generator_columns(target_partition),
+            "coset_transport_residual": transport_residual,
+            "storage": "identity_coset_plus_sparse_adjacent_generators_v1",
         })
         couplings.append(coupling)
 
@@ -631,7 +690,8 @@ def compile_typed_factorized(
                 bool(row.get("ok", False)) for row in numeric_reports
             ),
             "exact_projector_compared": (
-                subduction_materialization_backend == "exact"
+                (subduction_materialization_backend == "exact"
+                 and len(input_Ls) <= 4)
                 or bool(numeric_reports) and all(
                     bool(row["exact_reference"].get("projector_compared_to_exact", False))
                     for row in numeric_reports
@@ -647,9 +707,10 @@ def compile_typed_factorized(
             "numeric_subduction_reports": numeric_reports,
         },
         limitations=(
-            "Local sparse maps can grow with rank; general Young subduction "
-            "tables can grow with the orbit count. The full "
-            "orbit-by-coupled-coordinate matrix is never assembled.",
+            "Local sparse maps can grow with rank. Exact general Young routes "
+            "use a restricted subgroup-generator map without a coset list; "
+            "the numeric cached route still constructs its full Young "
+            "orbit matrix. The joint orbit-by-coordinate matrix is never assembled.",
             "Evaluation contracts one ordered factor orbit fiber using Python and "
             "PyTorch; it does not sum physical motif occurrences or use the native "
             "message-passing execution arena.",
@@ -833,36 +894,26 @@ def evaluate_typed_factorized_torch(coupler, factor_values, *, factor_types=None
 
     import torch
 
-    tables = tuple(coupler.factorized_coefficient_tables)
-    if not coupler.certificate.passed or len(tables) != 1 or (
-        tables[0].get("kind") != "typed_joint_factorized_v1"
-    ):
+    if isinstance(coupler, Mapping):
+        table = coupler
+    else:
+        tables = tuple(coupler.factorized_coefficient_tables)
+        if not coupler.certificate.passed or len(tables) != 1:
+            raise ValueError("Coupler has no complete typed factorized schedule.")
+        table = tables[0]
+    if table.get("kind") != "typed_joint_factorized_v1":
         raise ValueError("Coupler has no complete typed factorized schedule.")
-    table = tables[0]
     canonical_types = tuple(tuple(row) for row in table["canonical_factor_types"])
     factor_types = (tuple(tuple(row) for row in table["input_factor_types"])
                     if factor_types is None else
                     tuple((int(row[0]), int(row[1])) for row in factor_types))
     if len(factor_types) != len(canonical_types) or sorted(factor_types) != sorted(canonical_types):
         raise ValueError("factor_types must permute the compiled (content,l) word.")
-    if table["analytic_young"] is not None:
-        rep = tuple(
-            index for factor_type in dict.fromkeys(canonical_types)
-            for index, candidate in enumerate(factor_types)
-            if candidate == factor_type
-        )
-        if len(rep) != len(factor_types):
-            raise ArithmeticError("Analytic Young factor grouping is incomplete.")
-        coset = 0
-    else:
-        coset = next((index for index, candidate in
-                      enumerate(table["coset_representatives"])
-                      if all(factor_types[int(candidate[position])]
-                             == canonical_types[position]
-                             for position in range(len(candidate)))), None)
-        if coset is None:
-            raise ArithmeticError("No typed coset transports this factor word.")
-        rep = table["coset_representatives"][coset]
+    rep = canonical_factor_coset(factor_types, canonical_types)
+    legacy_young = any("values" in young for young in table["young_tables"])
+    coset = (next(index for index, candidate in enumerate(table["coset_representatives"])
+                  if tuple(candidate) == rep)
+             if legacy_young else None)
     if isinstance(factor_values, torch.Tensor):
         if factor_values.ndim < 2 or len(set(ell for _, ell in factor_types)) != 1:
             raise ValueError("Tensor factors require common l and shape (...,N,2l+1).")
@@ -893,6 +944,7 @@ def evaluate_typed_factorized_torch(coupler, factor_values, *, factor_types=None
     outputs = []
     local_cache = {}
     angular_cache = {}
+    young_cache = {}
     for route in table["routes"]:
         binding = route["binding"]
         local_outputs = []
@@ -933,14 +985,14 @@ def evaluate_typed_factorized_torch(coupler, factor_values, *, factor_types=None
                 )
             outputs.append(angular * weight)
             continue
-        young = (
-            bound.young[id(young_table)][coset, :, gamma, :]
-            if bound is not None else torch.as_tensor(
-                [row[gamma * columns:(gamma + 1) * columns]
-                 for row in young_table["values"][coset * rows:(coset + 1) * rows]],
-                dtype=common_dtype, device=common_device,
+        young_key = (int(route["young_index"]), gamma)
+        if young_key not in young_cache:
+            young_cache[young_key] = transported_young_slice(
+                young_table, rep, gamma, common_dtype, common_device,
+                prepared=None if bound is None else bound.young[id(young_table)],
+                coset_index=coset,
             )
-        )
+        young = young_cache[young_key]
         if angular.shape[-2] != rows:
             raise ArithmeticError("Local tableau axes do not match Young subduction.")
         outputs.append(torch.einsum("...jm,jt->...tm", angular, young.conj()))
@@ -962,15 +1014,18 @@ class YE3TFactorizedTorchRuntime:
     def __init__(self, coupler, *, dtype, device):
         import torch
 
-        tables = tuple(coupler.factorized_coefficient_tables)
-        if not coupler.certificate.passed or len(tables) != 1 or (
-            tables[0].get("kind") != "typed_joint_factorized_v1"
-        ):
+        if isinstance(coupler, Mapping):
+            table = coupler
+        else:
+            tables = tuple(coupler.factorized_coefficient_tables)
+            if not coupler.certificate.passed or len(tables) != 1:
+                raise ValueError("Coupler has no complete typed factorized schedule.")
+            table = tables[0]
+        if table.get("kind") != "typed_joint_factorized_v1":
             raise ValueError("Coupler has no complete typed factorized schedule.")
         self.coupler = coupler
         self.dtype = dtype
         self.device = torch.device(device)
-        table = tables[0]
         self.local = {}
         for local in table["local_tables"]:
             entries = tuple(local["entries"])
@@ -1019,13 +1074,9 @@ class YE3TFactorizedTorchRuntime:
         for young in table["young_tables"]:
             if young.get("analytic_character") is not None:
                 continue
-            rows = int(young["local_tableau_dim"])
-            columns = int(young["target_tableau_dim"])
-            gamma = int(young["gamma_count"])
-            cosets = len(table["coset_representatives"])
-            self.young[id(young)] = torch.as_tensor(
-                young["values"], dtype=self.dtype, device=self.device,
-            ).reshape(cosets, rows, gamma, columns)
+            self.young[id(young)] = bind_young_restriction(
+                young, self.dtype, self.device,
+            )
 
     def evaluate(self, factor_values, *, factor_types=None):
         """Return all compiled coordinates for an ordered factor batch."""
@@ -1034,3 +1085,87 @@ class YE3TFactorizedTorchRuntime:
             self.coupler, factor_values, factor_types=factor_types,
             dtype=self.dtype, device=self.device, bound=self,
         )
+
+
+def lower_typed_factorized_execution_plan(compiled):
+    """Lower a complete external-factor coupling to a source-neutral plan."""
+    from ye3t.couplings import compile_execution_plan
+    from ye3t.execution_plan import (
+        YE3TCarrierKey, YE3TCarrierLayout, YE3TRuntimeInstruction,
+        YE3T_PRIMARY_CONVENTION, YE3T_O3_PRIMARY_CONVENTION,
+    )
+    from ye3t.global_coupler import _partition_from_target, standard_tableaux
+
+    coupler = compiled.coupler
+    tables = tuple(coupler.factorized_coefficient_tables)
+    if not compiled.certificate.passed or len(tables) != 1 or (
+        tables[0].get("kind") != "typed_joint_factorized_v1"
+    ):
+        raise ValueError("Compiled coupler has no complete factorized factor schedule.")
+    table = tables[0]
+    spec = coupler.spec
+    rank = len(spec.content)
+    parent = _partition_from_target(spec.target_permutation, rank)
+    output_L = int(spec.target_rotation.L_R)
+    input_Ls = tuple(int(row[1]) for row in table["input_factor_types"])
+    group = str(spec.target_rotation.group)
+    if group not in {"SO3", "O3"}:
+        raise ValueError("Factor plan requires SO3 or O3 rotation conventions.")
+    convention = (YE3T_O3_PRIMARY_CONVENTION if group == "O3"
+                  else YE3T_PRIMARY_CONVENTION)
+    parity = (-1) ** sum(input_Ls) if group == "O3" else None
+    factors = tuple(YE3TCarrierKey(
+        rank=1, partition=(1,), rotation_L=ell,
+        parity=(-1) ** ell if group == "O3" else None,
+        convention_id=convention,
+    ) for ell in input_Ls)
+    output = YE3TCarrierKey(
+        rank=rank, partition=parent, rotation_L=output_L,
+        parity=parity, convention_id=convention,
+    )
+    tableau_count = len(standard_tableaux(parent))
+    if int(table["shape"][1]) != len(table["routes"]) * tableau_count * (2 * output_L + 1):
+        raise ArithmeticError("Factorized route axes disagree with the compiled count.")
+    layout = YE3TCarrierLayout(
+        key=output, channel_count=len(table["routes"]),
+        tableau_count=tableau_count, magnetic_count=2 * output_L + 1,
+    )
+    instruction = YE3TRuntimeInstruction(
+        instruction_id="typed_joint_factors", opcode="typed_joint_factorized",
+        input_carriers=factors, output_carrier=output,
+        metadata={"schema": "ye3t_typed_joint_factor_execution_v1",
+                  "table": table, "table_hash": table["hash"],
+                  "factor_axis_order": "ordered_factor_m",
+                  "output_axis_order": ("a", "t", "M")},
+    )
+    return compile_execution_plan(
+        carrier_layouts=(layout,), instructions=(instruction,),
+        forward_schedule=(instruction.instruction_id,),
+        reverse_schedule=(instruction.instruction_id,),
+        convention_id=convention,
+        certificate={"passed": True, "scope": "source_neutral_typed_factors"},
+        provenance={"compiler_owner": "ye3t",
+                    "source": "typed_joint_factorized",
+                    "compiled_hash": compiled.convention_hash},
+    )
+
+
+def bind_typed_factorized_execution_plan_torch(plan, *, dtype, device):
+    """Bind the Torch factor runtime from a saved source-neutral plan."""
+    from ye3t.execution_plan import YE3TExecutionPlan
+
+    if not isinstance(plan, YE3TExecutionPlan):
+        plan = YE3TExecutionPlan.from_dict(plan)
+    if (len(plan.instructions) != 1
+            or plan.instructions[0].opcode != "typed_joint_factorized"):
+        raise ValueError("Execution plan has no typed factor instruction.")
+
+    def restore(value):
+        if isinstance(value, list):
+            return tuple(restore(item) for item in value)
+        if isinstance(value, Mapping):
+            return {key: restore(item) for key, item in value.items()}
+        return value
+
+    table = restore(plan.instructions[0].metadata["table"])
+    return YE3TFactorizedTorchRuntime(table, dtype=dtype, device=device)

@@ -39,6 +39,13 @@ output and cache paths visible in `cfg_ye3t`.
 For the shortest core route, run `coupling_multiplicity_counts.py`: its visible
 seven-section config creates `YE3TRepresentation`, and one
 `count_fixed_content` call returns the compiler's count and valid labels.
+For a fixed-content request, `ye3t.couplings.count(request)` exposes
+`counts_by_target` and `labels_for_target(L)` before coefficient compilation.
+`sector_records(n_in, l_in)` inventories Young sectors for bounded contents;
+`counts_for_partitions(n_in, l_in, partitions)` gives exact targeted counts
+without compiling coefficients. A Cauchy count report separately gives
+`multiplet_count`, `tableau_count`, and `component_count`, so independent paths
+are not confused with all `(a,t,M)` components.
 For ACE coefficients, run `coupling_coefficient_materialization.py` with the
 same seven-section shape. It compares the exact count with the factorized
 schedule size and reports the nonzero schedule terms.
@@ -52,21 +59,35 @@ shows how a globally symmetric product can still have a nontrivial *local*
 Cauchy path when role coordinates are retained. The latter uses real tesseral
 input order; the user-supplied example uses complex Condon–Shortley order.
 `ordered_role_cauchy_factors.py` keeps role-resolved factors distinct, so it
-can evaluate nontrivial global Young outputs. The commutative role-density
+can evaluate nontrivial global Young outputs. Here `ordered_role` means the
+factor array retains both its order and a role coordinate; it is not a new
+atomistic density or motif source. The commutative role-density
 example supports a globally symmetric parent with nontrivial local Cauchy
 paths. The user-supplied example evaluates every valid multiplicity coordinate from
 the full exact count. The default external-factor compiler stores separate
-local, binary angular, and Young maps and never builds the full orbit matrix.
+local, binary angular, and Young maps. Exact general Young compilation solves
+identity-coset subgroup-generator equations and transports other factor
+orders with sparse adjacent-generator actions. Outside the small reference
+comparison cases, it does not build or store the full Young orbit table. It
+never builds the full joint orbit matrix. The numeric cached
+Young backend still builds its Young orbit table during compilation. Distinct
+factor channels use scaled matrix-unit storage instead of a dense identity
+block. Small sectors are checked against the older full-table compiler.
 The symmetric and alternating repeated blocks use occupation and determinant
 contractions. Their bound runtimes reuse coefficient tensors, symmetric
 occupation transitions, and alternating minor indices across evaluations.
 `user_supplied_factors.py` also demonstrates a batched message input and its
-factor gradient. These examples evaluate one ordered orbit fiber; physical
-density or motif pooling belongs to the application. The bounded dense
+factor gradient through a source-neutral factorized execution plan. These
+examples evaluate one ordered factor set; physical
+density or motif sums belong to the application. The bounded dense
 typed-orbit matrix remains available with `allow_dense_reference=True` for
-tests and comparisons. The current PyTorch route loop is a correctness
-baseline; production message-passing lowering into the packed execution plan
-and high-rank compiler scaling remain open.
+tests and comparisons. `ordered_role_cauchy_factors.py` lowers its compiler
+result into a source-neutral `YE3TExecutionPlan` and binds the tested Torch
+runtime from that plan. The plan carries every `(a,t,M)` route and O(3) parity.
+Native packed message-passing kernels for this instruction, and a physical
+source that supplies atomistic values and derivatives, remain separate work.
+The existing native linear lifted and tagged Cauchy paths in `ye3t-lammps`
+are unaffected.
 
 In the paper notation, `a` indexes independent multiplicity copies and the
 output axes are `(a,t,M)`. The saved compiler schema retains the older
@@ -79,6 +100,14 @@ the `ye3t-methods` tagged fit example. Core `ye3t` compiles its coordinates;
 and stress labels. The methods example compiles the core tagged-Cauchy artifact
 and passes it to `Basis.from_config(..., compiled_cauchy_artifact=artifact)`.
 The basis checks the request and coefficient hash before evaluating descriptors.
+The artifact is the saved result of the core compiler: its labels, coupling
+data, and convention identity. Passing it to `ye3t-methods` makes the atomistic
+calculation use those same coordinates rather than rebuilding them.
+For arbitrary parent Young type and `L`, the
+`ye3t-methods/examples/quickstart/coupled_factors.py` example accepts a core
+execution plan and supplied role-by-magnetic factor arrays. Scalar energy
+fitting still needs final symmetry adaptation; arbitrary `(a,t,M)` components
+cannot be weighted freely into a scalar potential.
 
 `symmetric_count_formula.py` compares YE3T's counts with the independently
 implemented symmetric formula associated with GE-PI. The example runs offline;

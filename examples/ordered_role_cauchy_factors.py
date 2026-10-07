@@ -74,14 +74,15 @@ request = couplings.covariant_cauchy_request(
 report = couplings.count(request)
 compiled = couplings.compile(couplings.plan(report))
 assert couplings.validate_covariant_cauchy(compiled)
+execution_plan = couplings.lower_ordered_role_cauchy_execution_plan(compiled)
 
 factors = torch.tensor(
     cfg_ye3t["basis"]["factor_multiplets"],
     dtype=getattr(torch, cfg_ye3t["runtime"]["dtype"]),
     device=cfg_ye3t["runtime"]["device"],
 )
-runtime = couplings.bind_ordered_role_cauchy_torch(
-    compiled, dtype=factors.dtype, device=factors.device,
+runtime = couplings.bind_ordered_role_execution_plan_torch(
+    execution_plan, dtype=factors.dtype, device=factors.device,
     basis=cfg_ye3t["runtime"]["magnetic_basis"],
 )
 values, _ = runtime.evaluate(factors)
@@ -102,3 +103,4 @@ torch.testing.assert_close(
 print("independent Cauchy copies", report["multiplet_count"])
 print("coupled axes (a, t, M)", tuple(values.shape))
 print("artifact hash", compiled["self_hash"])
+print("execution plan hash", execution_plan.plan_hash)

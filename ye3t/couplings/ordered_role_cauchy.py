@@ -11,6 +11,12 @@ import hashlib
 import json
 import math
 
+from .young_coset_transport import (
+    adjacent_generator_columns, bind_young_restriction,
+    canonical_factor_coset, direct_restricted_young_values,
+    expanded_young_values, transported_young_slice,
+)
+
 
 ORDERED_ROLE_COPY_GAUGE = "full_family_cholesky_orthonormal_v1"
 
@@ -131,50 +137,51 @@ def _young_table(local_parents, target, bracketing):
                 "analytic_character": character,
                 "local_tableau_dim": 1, "target_tableau_dim": 1,
                 "gamma_count": 1}, None
-    coupling = _build_young_subgroup_specht_coupling(
-        local_parents, target, bracketing=bracketing
-    )
-    if not coupling.validation.passed:
-        raise ArithmeticError("Ordered Cauchy Young subduction failed validation.")
-    matrix = coupling.coefficient_matrix()
-    cosets = tuple(tuple(int(value) for value in row)
-                   for row in coupling.tensor.coset_reps)
     dimensions = tuple(len(standard_tableaux(item)) for item in local_parents)
     local_dim = math.prod(dimensions)
-    target_dim = len(coupling.tensor.target_tableaux)
-    gamma_count = len(coupling.tensor.vectors) // target_dim
-    row_lookup = {
-        (int(item.coset_index), tuple(item.child_tableau_indices)): index
-        for index, item in enumerate(coupling.tensor.induced_basis)
-    }
-    column_lookup = {
-        (int(item.rho), int(item.target_tableau_index)): index
-        for index, item in enumerate(coupling.tensor.vectors)
-    }
-    canonical_rows = tuple(
-        row_lookup[(coset, tableaux)]
-        for coset in range(len(cosets))
-        for tableaux in product(*(range(value) for value in dimensions))
-    )
-    canonical_columns = tuple(
-        column_lookup[(gamma, tableau)]
-        for gamma in range(gamma_count)
-        for tableau in range(target_dim)
-    )
-    if (len(row_lookup) != matrix.rows or len(column_lookup) != matrix.cols
-            or len(canonical_rows) != matrix.rows
-            or len(canonical_columns) != matrix.cols):
-        raise ArithmeticError("Young basis metadata omits matrix coordinates.")
+    target_dim = len(standard_tableaux(target))
+    matrix_units = all(sum(item) == 1 for item in local_parents)
+    if matrix_units:
+        gamma_count = target_dim
+        scale = math.sqrt(target_dim / math.factorial(rank))
+        restricted = ((tuple(scale if col == gamma else 0.0
+                             for gamma in range(gamma_count)
+                             for col in range(target_dim)),)
+                      if rank <= 4 else None)
+    else:
+        restricted, gamma_count = direct_restricted_young_values(
+            local_parents, target
+        )
+    if (local_dim < 1 or gamma_count < 1 or restricted is not None and (
+        len(restricted) != local_dim or any(
+            len(row) != gamma_count * target_dim for row in restricted
+        )
+    )):
+        raise ArithmeticError("Direct ordered Cauchy Young axes are invalid.")
+    if rank <= 4:
+        reference = _build_young_subgroup_specht_coupling(
+            local_parents, target, bracketing=bracketing
+        )
+        full = reference.coefficient_matrix()
+        if (not reference.validation.passed
+                or full.cols != gamma_count * target_dim
+                or any(abs(float(full[row, col]) - restricted[row][col]) > 1e-10
+                       for row in range(local_dim) for col in range(full.cols))):
+            raise ArithmeticError("Direct ordered Cauchy Young map disagrees with exact orbit reference.")
     return {
         "local_parents": local_parents,
         "analytic_character": None,
         "local_tableau_dim": local_dim,
         "target_tableau_dim": target_dim,
         "gamma_count": gamma_count,
-        "values": tuple(tuple(float(matrix[row, column])
-                              for column in canonical_columns)
-                        for row in canonical_rows),
-    }, cosets
+        "target_partition": target,
+        **({"restricted_kind": "matrix_units", "restricted_scale": scale}
+           if matrix_units else {"restricted_values": restricted}),
+        "adjacent_generators": adjacent_generator_columns(target),
+        "coset_transport_residual": 0.0,
+        "transport_validation": "exact_subgroup_generators_and_reduced_gram",
+        "storage": "identity_coset_plus_sparse_adjacent_generators_v1",
+    }, None
 
 
 def compile_ordered_role_cauchy(request):
@@ -328,7 +335,8 @@ def compile_ordered_role_cauchy(request):
             "local_full_copy_orthonormal": True,
             "young_subduction_validated": True,
             "binary_CG_paths": True,
-            "full_orbit_matrix_not_materialized": True,
+            "full_joint_matrix_not_materialized": True,
+            "full_young_orbit_matrix_not_stored": True,
         },
     }
     payload["self_hash"] = _payload_hash(payload)
@@ -413,7 +421,33 @@ def validate_ordered_role_cauchy(compiled):
         raise ValueError("Ordered-role Cauchy route table indices are invalid.")
     request_json = json.dumps(compiled["request"], sort_keys=True,
                               allow_nan=False, separators=(",", ":"))
-    if _recompiled_hash(request_json) != compiled["self_hash"]:
+    if any("values" in young for young in compiled["young_tables"]):
+        # The v2 pre-compact table is still readable. Its hash and every route,
+        # local map, and Young coefficient must match the current compiler.
+        import numpy as np
+        from ye3t.representations.young_orthogonal import (
+            _young_subgroup_shuffle_representatives,
+        )
+
+        current = _recompiled_payload(request_json)
+        if tuple(tuple(row) for row in cosets) != _young_subgroup_shuffle_representatives(sizes):
+            raise ValueError("Legacy ordered-role coset order differs from the canonical source.")
+        for key in ("labels", "blocks", "factor_types", "local_tables",
+                    "angular_trees", "routes"):
+            if json.dumps(compiled[key], sort_keys=True) != json.dumps(current[key], sort_keys=True):
+                raise ValueError("Legacy ordered-role Cauchy schedule differs from compiler replay.")
+        for old, new in zip(compiled["young_tables"], current["young_tables"], strict=True):
+            if "values" not in old:
+                if json.dumps(old, sort_keys=True) != json.dumps(new, sort_keys=True):
+                    raise ValueError("Legacy ordered-role Young character differs from compiler replay.")
+                continue
+            if (json.dumps(old["local_parents"]) != json.dumps(new["local_parents"])
+                    or old["gamma_count"] != new["gamma_count"]
+                    or not np.allclose(np.asarray(old["values"], dtype=np.float64),
+                                       expanded_young_values(new, cosets),
+                                       atol=1e-8, rtol=1e-8)):
+                raise ValueError("Legacy ordered-role Young coefficients differ from compiler replay.")
+    elif _recompiled_hash(request_json) != compiled["self_hash"]:
         raise ValueError("Ordered-role Cauchy coefficients failed compiler replay.")
     return True
 
@@ -421,6 +455,11 @@ def validate_ordered_role_cauchy(compiled):
 @lru_cache(maxsize=32)
 def _recompiled_hash(request_json):
     return compile_ordered_role_cauchy(json.loads(request_json))["self_hash"]
+
+
+@lru_cache(maxsize=32)
+def _recompiled_payload(request_json):
+    return compile_ordered_role_cauchy(json.loads(request_json))
 
 
 def _local_analysis(local, factors, dtype, device, bound=None):
@@ -521,10 +560,12 @@ def _one_block_analysis(compiled, factors, dtype, device, bound):
         if young["analytic_character"] is None:
             rows = int(young["local_tableau_dim"])
             columns = int(young["target_tableau_dim"])
-            matrix = (bound.young[id(young)][0, :, 0, :] if bound is not None else
-                      torch.as_tensor([
-                          row[:columns] for row in young["values"][:rows]
-                      ], dtype=dtype, device=device))
+            matrix = transported_young_slice(
+                young, tuple(range(sum(compiled["request"]["block_sizes"]))),
+                0, dtype, device,
+                prepared=None if bound is None else bound.young[id(young)],
+                coset_index=0,
+            )
             part = torch.einsum("...cjm,jt->...ctm", part, matrix.conj())
         elif young["analytic_character"] not in {"symmetric", "antisymmetric"}:
             raise ArithmeticError("Unknown analytic Young character.")
@@ -617,22 +658,15 @@ def evaluate_ordered_role_cauchy(compiled, values, *, upstream=None,
         dtype = original[0].dtype
         factors = original
     device = factors[0].device
-    if compiled["young_tables"][0]["analytic_character"] is not None:
-        rep = tuple(index for channel in dict.fromkeys(canonical_types)
-                    for index, candidate in enumerate(factor_types)
-                    if candidate == channel)
-        coset = 0
-    else:
-        coset = next((index for index, candidate in enumerate(
-            compiled["coset_representatives"]
-        ) if all(factor_types[candidate[position]] == canonical_types[position]
-                 for position in range(len(candidate)))), None)
-        if coset is None:
-            raise ArithmeticError("No Cauchy coset transports the factor word.")
-        rep = compiled["coset_representatives"][coset]
+    rep = canonical_factor_coset(factor_types, canonical_types)
+    legacy_young = any("values" in young for young in compiled["young_tables"])
+    coset = (next(index for index, candidate in enumerate(compiled["coset_representatives"])
+                  if tuple(candidate) == rep)
+             if legacy_young else None)
     one_block = _one_block_analysis(compiled, factors, dtype, device, bound)
     local_cache = {}
     angular_cache = {}
+    young_cache = {}
     outputs = []
     for route in (() if one_block is not None else compiled["routes"]):
         local_outputs = []
@@ -670,13 +704,14 @@ def evaluate_ordered_role_cauchy(compiled, values, *, upstream=None,
         rows = int(young["local_tableau_dim"])
         columns = int(young["target_tableau_dim"])
         gamma = int(route["young_copy"])
-        matrix = (
-            bound.young[id(young)][coset, :, gamma, :]
-            if bound is not None else torch.as_tensor([
-                row[gamma * columns:(gamma + 1) * columns]
-                for row in young["values"][coset * rows:(coset + 1) * rows]
-            ], dtype=dtype, device=device)
-        )
+        young_key = (int(route["young_index"]), gamma)
+        if young_key not in young_cache:
+            young_cache[young_key] = transported_young_slice(
+                young, rep, gamma, dtype, device,
+                prepared=None if bound is None else bound.young[id(young)],
+                coset_index=coset,
+            )
+        matrix = young_cache[young_key]
         if angular.shape[-2] != rows:
             raise ArithmeticError("Local and Young tableau axes disagree.")
         outputs.append(torch.einsum("...jm,jt->...tm", angular, matrix.conj()))
@@ -807,12 +842,9 @@ class YE3TOrderedRoleCauchyTorchRuntime:
         for young in compiled["young_tables"]:
             if young["analytic_character"] is not None:
                 continue
-            rows = int(young["local_tableau_dim"])
-            columns = int(young["target_tableau_dim"])
-            gamma = int(young["gamma_count"])
-            self.young[id(young)] = torch.as_tensor(
-                young["values"], dtype=self.dtype, device=self.device,
-            ).reshape(int(compiled["orbit_count"]), rows, gamma, columns)
+            self.young[id(young)] = bind_young_restriction(
+                young, self.dtype, self.device,
+            )
         self.real_form = {}
         if basis == "real_tesseral":
             angular_momenta = {
@@ -838,4 +870,68 @@ def bind_ordered_role_cauchy_torch(compiled, *, dtype, device,
 
     return YE3TOrderedRoleCauchyTorchRuntime(
         compiled, dtype=dtype, device=device, basis=basis,
+    )
+
+
+def lower_ordered_role_cauchy_execution_plan(compiled):
+    """Put a source-neutral Cauchy factor schedule in the core plan format."""
+    from ye3t.couplings import compile_execution_plan
+    from ye3t.execution_plan import (
+        YE3TCarrierKey, YE3TCarrierLayout, YE3TRuntimeInstruction,
+        YE3T_O3_PRIMARY_CONVENTION,
+    )
+
+    validate_ordered_role_cauchy(compiled)
+    request = compiled["request"]
+    parent = request["target"]
+    factors = tuple(YE3TCarrierKey(
+        rank=1, partition=(1,), rotation_L=int(channel["l"]),
+        parity=int(channel.get("parity", (-1) ** int(channel["l"]))),
+        convention_id=YE3T_O3_PRIMARY_CONVENTION,
+    ) for channel, size in zip(request["channels"], request["block_sizes"], strict=True)
+        for _ in range(int(size)))
+    output = YE3TCarrierKey(
+        rank=sum(request["block_sizes"]),
+        partition=tuple(parent["young_partition"]),
+        rotation_L=int(parent["L"]), parity=int(parent["o3_parity"]),
+        convention_id=YE3T_O3_PRIMARY_CONVENTION,
+    )
+    layout = YE3TCarrierLayout(
+        key=output, channel_count=int(compiled["multiplet_count"]),
+        tableau_count=int(compiled["tableau_count"]),
+        magnetic_count=2 * int(parent["L"]) + 1,
+    )
+    instruction = YE3TRuntimeInstruction(
+        instruction_id="ordered_role_cauchy", opcode="ordered_role_cauchy_factorized",
+        input_carriers=factors, output_carrier=output,
+        metadata={"schema": "ye3t_ordered_role_cauchy_execution_v1",
+                  "compiled": compiled, "compiler_hash": compiled["self_hash"],
+                  "factor_axis_order": "ordered_factor_role_m",
+                  "output_axis_order": ("a", "t", "M")},
+    )
+    return compile_execution_plan(
+        carrier_layouts=(layout,), instructions=(instruction,),
+        forward_schedule=(instruction.instruction_id,),
+        reverse_schedule=(instruction.instruction_id,),
+        convention_id=YE3T_O3_PRIMARY_CONVENTION,
+        certificate={"passed": True, "scope": "source_neutral_ordered_role_factors"},
+        provenance={"compiler_owner": "ye3t",
+                    "source": "ordered_role_cauchy_factorized",
+                    "compiled_hash": compiled["self_hash"]},
+    )
+
+
+def bind_ordered_role_execution_plan_torch(plan, *, dtype, device,
+                                           basis="complex_condon_shortley"):
+    """Bind a core Cauchy plan for repeated factor evaluations and gradients."""
+    from ye3t.execution_plan import YE3TExecutionPlan
+
+    if not isinstance(plan, YE3TExecutionPlan):
+        plan = YE3TExecutionPlan.from_dict(plan)
+    if (len(plan.instructions) != 1
+            or plan.instructions[0].opcode != "ordered_role_cauchy_factorized"):
+        raise ValueError("Execution plan has no ordered role Cauchy factor instruction.")
+    return bind_ordered_role_cauchy_torch(
+        plan.instructions[0].metadata["compiled"],
+        dtype=dtype, device=device, basis=basis,
     )

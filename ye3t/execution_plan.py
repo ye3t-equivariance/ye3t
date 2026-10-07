@@ -64,6 +64,8 @@ YE3T_RUNTIME_OPCODES = (
     "block_symmetric_power",
     "exterior_power",
     "mixed_young_projection",
+    "ordered_role_cauchy_factorized",
+    "typed_joint_factorized",
     "ace_coupled_product_dag",
 )
 
@@ -6516,6 +6518,79 @@ class YE3TExecutionPlan:
         if len(instruction_ids) != len(instructions):
             raise ValueError("runtime instruction IDs must be unique")
         for instruction in instructions:
+            if instruction.opcode == "typed_joint_factorized":
+                from ye3t.representations.young_orthogonal import standard_tableaux
+
+                metadata = instruction.metadata
+                table = metadata.get("table")
+                if (metadata.get("schema") != "ye3t_typed_joint_factor_execution_v1"
+                        or not isinstance(table, Mapping)
+                        or table.get("kind") != "typed_joint_factorized_v1"):
+                    raise ValueError("typed factor instruction needs its factorized table")
+                digest = "sha256:" + hashlib.sha256(json.dumps(
+                    {key: value for key, value in table.items() if key != "hash"},
+                    sort_keys=True, separators=(",", ":"), allow_nan=False,
+                ).encode("utf-8")).hexdigest()
+                if table.get("hash") != digest or metadata.get("table_hash") != digest:
+                    raise ValueError("typed factor instruction table hash is invalid")
+                output = instruction.output_carrier
+                routes = tuple(table["routes"])
+                tableau_count = len(standard_tableaux(output.partition))
+                if (len(instruction.input_carriers) != output.rank
+                        or len(table["input_factor_types"]) != output.rank
+                        or int(table["shape"][1]) != len(routes)
+                        * tableau_count * (2 * output.rotation_L + 1)
+                        or (output.parity is not None and output.parity !=
+                            (-1) ** sum(int(factor[1]) for factor in
+                                        table["input_factor_types"]))):
+                    raise ValueError("typed factor instruction axes differ from compiler table")
+                if any(key.rank != 1 or key.partition != (1,)
+                       or key.rotation_L != int(factor[1])
+                       or key.parity != ((-1) ** int(factor[1])
+                                         if output.parity is not None else None)
+                       for key, factor in zip(instruction.input_carriers,
+                                              table["input_factor_types"], strict=True)):
+                    raise ValueError("typed factor input carriers differ from compiler table")
+                if not any(layout.key == output
+                           and layout.channel_count == len(routes)
+                           and layout.tableau_count == tableau_count
+                           and layout.magnetic_count == 2 * output.rotation_L + 1
+                           for layout in layouts):
+                    raise ValueError("typed factor output layout differs from compiler routes")
+            if instruction.opcode == "ordered_role_cauchy_factorized":
+                metadata = instruction.metadata
+                if metadata.get("schema") != "ye3t_ordered_role_cauchy_execution_v1":
+                    raise ValueError("ordered role Cauchy instruction needs its factorized schema")
+                from ye3t.couplings.ordered_role_cauchy import validate_ordered_role_cauchy
+
+                compiled = metadata.get("compiled")
+                if not isinstance(compiled, Mapping) or not validate_ordered_role_cauchy(compiled):
+                    raise ValueError("ordered role Cauchy instruction has invalid compiler data")
+                if metadata.get("compiler_hash") != compiled["self_hash"]:
+                    raise ValueError("ordered role Cauchy instruction compiler hash differs from its data")
+                request = compiled["request"]
+                target = request["target"]
+                output = instruction.output_carrier
+                if (output.rank != sum(request["block_sizes"])
+                        or output.partition != tuple(target["young_partition"])
+                        or output.rotation_L != int(target["L"])
+                        or output.parity != int(target["o3_parity"])
+                        or len(instruction.input_carriers) != output.rank):
+                    raise ValueError("ordered role Cauchy instruction target axes differ from compiler data")
+                input_channels = tuple(request["channels"][channel]
+                                       for channel, size in enumerate(request["block_sizes"])
+                                       for _ in range(size))
+                if any(key.rank != 1 or key.partition != (1,)
+                       or key.rotation_L != int(channel["l"])
+                       or key.parity != int(channel.get("parity", (-1) ** int(channel["l"])))
+                       for key, channel in zip(instruction.input_carriers,
+                                               input_channels, strict=True)):
+                    raise ValueError("ordered role Cauchy factor carriers differ from compiler data")
+                if not any(layout.key == output
+                           and layout.channel_count == int(compiled["multiplet_count"])
+                           and layout.tableau_count == int(compiled["tableau_count"])
+                           for layout in layouts):
+                    raise ValueError("ordered role Cauchy output layout differs from compiler count")
             if (
                 instruction.opcode == "ace_coupled_product_dag"
                 and schema_version != YE3T_EXECUTION_PLAN_COUPLED_PRODUCT_SCHEMA

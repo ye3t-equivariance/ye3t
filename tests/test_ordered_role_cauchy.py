@@ -316,7 +316,8 @@ def test_ordered_role_cauchy_one_block_swap_and_vjp(parent, L, sign):
     assert report["component_count"] == (
         report["multiplet_count"] * report["tableau_count"] * (2 * L + 1)
     )
-    assert compiled["validation_report"]["full_orbit_matrix_not_materialized"]
+    assert compiled["validation_report"]["full_joint_matrix_not_materialized"]
+    assert compiled["validation_report"]["full_young_orbit_matrix_not_stored"]
     factors = torch.tensor(
         [[[0.2, 0.6, -0.1], [0.7, -0.2, 0.3]],
          [[-0.4, 0.1, 0.8], [0.5, 0.9, -0.3]]],
@@ -432,6 +433,123 @@ def test_ordered_role_cauchy_artifact_roundtrip_and_coefficient_hash():
     restored["local_tables"][0]["entries_by_family"][0]["terms"][0][2] += 0.1
     with pytest.raises(ValueError, match="hash mismatch"):
         validate_ordered_role_cauchy(restored)
+
+
+def test_precompact_general_young_artifact_remains_readable():
+    from ye3t.couplings.ordered_role_cauchy import _payload_hash
+    from ye3t.couplings.young_coset_transport import expanded_young_values
+    from ye3t.representations.young_orthogonal import (
+        _young_subgroup_shuffle_representatives,
+    )
+
+    request = covariant_cauchy_request(
+        (channel(1, 0), channel(1, 1), channel(1, 2)),
+        (1, 1, 1), target_L=1, role_dimension=1,
+        target_permutation="young:2,1", carrier="ordered_role",
+    )
+    current = compile(plan(count(request)))
+    legacy = json.loads(json.dumps(current))
+    legacy["coset_representatives"] = _young_subgroup_shuffle_representatives((1, 1, 1))
+    for young in legacy["young_tables"]:
+        if young["analytic_character"] is None:
+            young["values"] = expanded_young_values(
+                young, legacy["coset_representatives"]
+            ).tolist()
+            for field in ("restricted_values", "adjacent_generators",
+                          "target_partition", "coset_transport_residual", "storage",
+                          "restricted_kind", "restricted_scale", "transport_validation"):
+                young.pop(field, None)
+    legacy["self_hash"] = _payload_hash(legacy)
+    assert validate_ordered_role_cauchy(legacy)
+    factors = torch.tensor(
+        [[[[0.2, 0.3, -0.5]], [[0.7, -0.1, 0.4]], [[0.1, 0.9, -0.2]]]],
+        dtype=torch.complex128,
+    )
+    expected, _ = evaluate_covariant_cauchy(
+        current, factors, basis="complex_condon_shortley"
+    )
+    actual, _ = evaluate_covariant_cauchy(
+        legacy, factors, basis="complex_condon_shortley"
+    )
+    torch.testing.assert_close(actual, expected, atol=1e-11, rtol=1e-11)
+
+
+def test_ordered_role_cauchy_lowers_to_core_execution_plan():
+    from ye3t.couplings import (
+        bind_ordered_role_execution_plan_torch,
+        lower_ordered_role_cauchy_execution_plan,
+    )
+    from ye3t.execution_plan import YE3TExecutionPlan
+
+    request = covariant_cauchy_request(
+        (channel(1, 0), channel(1, 1), channel(1, 2)),
+        (1, 1, 1), target_L=1, role_dimension=1,
+        target_permutation="young:2,1", carrier="ordered_role",
+    )
+    compiled = compile(plan(count(request)))
+    execution = lower_ordered_role_cauchy_execution_plan(compiled)
+    restored = YE3TExecutionPlan.from_dict(json.loads(execution.to_json()))
+    assert restored.plan_hash == execution.plan_hash
+    assert restored.carrier_layouts[0].channel_count == compiled["multiplet_count"]
+    assert restored.carrier_layouts[0].tableau_count == compiled["tableau_count"]
+    assert restored.carrier_layouts[0].key.partition == (2, 1)
+    assert restored.carrier_layouts[0].key.parity == -1
+    factors = torch.tensor(
+        [[[[0.2, 0.3, -0.5]], [[0.7, -0.1, 0.4]], [[0.1, 0.9, -0.2]]]],
+        dtype=torch.complex128, requires_grad=True,
+    )
+    runtime = bind_ordered_role_execution_plan_torch(
+        restored, dtype=factors.dtype, device=factors.device,
+    )
+    result, _ = runtime.evaluate(factors)
+    expected, _ = evaluate_covariant_cauchy(
+        compiled, factors, basis="complex_condon_shortley"
+    )
+    torch.testing.assert_close(result, expected, atol=1e-11, rtol=1e-11)
+    gradient = torch.autograd.grad(result.abs().square().sum(), factors)[0]
+    assert gradient.shape == factors.shape and torch.isfinite(gradient).all()
+    damaged = json.loads(execution.to_json())
+    damaged["instructions"][0]["metadata"]["compiled"]["request"]["target"]["L"] = 0
+    with pytest.raises((KeyError, ValueError)):
+        YE3TExecutionPlan.from_dict(damaged)
+    wrong_hash = json.loads(execution.to_json())
+    wrong_hash["instructions"][0]["metadata"]["compiler_hash"] = "sha256:wrong"
+    with pytest.raises(ValueError, match="compiler hash"):
+        YE3TExecutionPlan.from_dict(wrong_hash)
+
+
+def test_source_neutral_factor_types_and_intrinsic_parity():
+    from ye3t.couplings import lower_ordered_role_cauchy_execution_plan
+
+    channels = tuple({"factor_type": f"u_{index}", "l": 1,
+                      "source_family_id": "external_tensor_source",
+                      "parity": 1 if index == 0 else -1}
+                     for index in range(3))
+    request = covariant_cauchy_request(
+        channels, (1, 1, 1), target_L=1, target_parity=1,
+        role_dimension=1, target_permutation="young:2,1",
+        carrier="ordered_role",
+    )
+    report = count(request)
+    compiled = compile(plan(report))
+    execution = lower_ordered_role_cauchy_execution_plan(compiled)
+    assert report["component_count"] == (report["multiplet_count"]
+                                          * report["tableau_count"] * 3)
+    assert tuple(key.parity for key in execution.instructions[0].input_carriers) == (1, -1, -1)
+    assert execution.carrier_layouts[0].key.parity == 1
+    factors = torch.tensor([[[[0.2, 0.3, -0.5]], [[0.7, -0.1, 0.4]],
+                             [[0.1, 0.9, -0.2]]]], dtype=torch.complex128)
+    original, _ = evaluate_covariant_cauchy(compiled, factors)
+    inverted = factors.clone()
+    inverted[:, 1:] *= -1
+    moved, _ = evaluate_covariant_cauchy(compiled, inverted)
+    torch.testing.assert_close(moved, original, atol=1e-12, rtol=1e-12)
+    with pytest.raises(ValueError, match="parity"):
+        covariant_cauchy_request(
+            channels, (1, 1, 1), target_L=1, target_parity=-1,
+            role_dimension=1, target_permutation="young:2,1",
+            carrier="ordered_role",
+        )
 
 
 def test_ordered_cauchy_low_rank_projector_matches_role_symmetry_and_spin_singlet():
