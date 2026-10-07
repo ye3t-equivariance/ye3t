@@ -21,7 +21,7 @@ def test_compile_global_coupler_emits_complete_typed_joint_map_for_tiny_trivial_
         runtime_status="planned_not_public",
         metadata={"input_Ls": (1, 1)},
     )
-    coupler = CompileGlobalYE3TCouplers(spec)
+    coupler = CompileGlobalYE3TCouplers(spec, dense_reference=True)
     assert coupler.certificate.passed
     assert coupler.certificate.checks["fixed_content_route_count"]
     assert coupler.certificate.checks["joint_column_orthonormality"]
@@ -217,7 +217,9 @@ def test_global_coupler_factorized_slot_evaluator_validates_rank4_role_resolved_
         runtime_status="planned_not_public",
         metadata={"input_Ls": (1, 1, 1, 1)},
     )
-    coupler = CompileYE3TCouplers(spec, input_Ls=(1, 1, 1, 1))
+    coupler = CompileYE3TCouplers(
+        spec, input_Ls=(1, 1, 1, 1), dense_reference=True
+    )
     report = joint_ye3t_factorized_slot_evaluator_report(coupler)
     assert coupler.certificate.passed is True
     assert report["passed"] is True
@@ -290,7 +292,9 @@ def test_global_coupler_factorized_slot_evaluator_validates_rank4_role_resolved_
         runtime_status="planned_not_public",
         metadata={"input_Ls": (1, 1, 1, 1)},
     )
-    trivial_coupler = CompileYE3TCouplers(trivial_spec, input_Ls=(1, 1, 1, 1))
+    trivial_coupler = CompileYE3TCouplers(
+        trivial_spec, input_Ls=(1, 1, 1, 1), dense_reference=True
+    )
     raw_evaluation = evaluate_joint_ye3t_factorized_raw_slots_torch(coupler, slots)
     assert raw_evaluation.metadata["raw_global_induction_coset_lift_evaluated"] is True
     assert raw_evaluation.metadata["raw_evaluation_signature"] == joint_ye3t_factorized_raw_slot_signature(
@@ -337,7 +341,9 @@ def test_global_coupler_slot_evaluator_intertwines_rank4_target_young_action():
         runtime_status="planned_not_public",
         metadata={"input_Ls": (1, 1, 1, 1)},
     )
-    coupler = CompileYE3TCouplers(spec, input_Ls=(1, 1, 1, 1))
+    coupler = CompileYE3TCouplers(
+        spec, input_Ls=(1, 1, 1, 1), dense_reference=True
+    )
     torch.manual_seed(57)
     slots = tuple(torch.randn(4, 3, dtype=torch.float64) for _ in range(4))
     base = evaluate_joint_ye3t_factorized_slots_torch(coupler, slots).values
@@ -373,7 +379,9 @@ def test_global_coupler_slot_evaluator_intertwines_rank3_antisymmetric_action():
         runtime_status="planned_not_public",
         metadata={"input_Ls": (1, 1, 1)},
     )
-    coupler = CompileYE3TCouplers(spec, input_Ls=(1, 1, 1))
+    coupler = CompileYE3TCouplers(
+        spec, input_Ls=(1, 1, 1), dense_reference=True
+    )
     torch.manual_seed(61)
     slots = tuple(torch.randn(5, 3, dtype=torch.float64) for _ in range(3))
     base = evaluate_joint_ye3t_factorized_slots_torch(coupler, slots).values
@@ -1015,7 +1023,7 @@ def test_compile_global_coupler_supports_explicit_young_partition_label():
         metadata={"input_Ls": (1, 0, 0), "subgroup_partitions": ((1,), (1,), (1,))},
     )
 
-    coupler = CompileGlobalYE3TCouplers(spec)
+    coupler = CompileGlobalYE3TCouplers(spec, dense_reference=True)
 
     assert coupler.subduction_maps[0].target_partition == (2, 1)
     assert coupler.subduction_maps[0].multiplicity > 0
@@ -2064,7 +2072,8 @@ def test_global_coupler_slot_evaluator_rejects_heterogeneous_coset_widths():
         runtime_status="planned_not_public",
         metadata={"input_Ls": (1, 1, 2)},
     )
-    coupler = CompileYE3TCouplers(spec, input_Ls=(1, 1, 2))
+    coupler = CompileYE3TCouplers(spec, input_Ls=(1, 1, 2),
+                                 dense_reference=True)
     report = joint_ye3t_factorized_slot_evaluator_report(coupler)
     assert coupler.certificate.passed is True
     assert report["passed"] is False

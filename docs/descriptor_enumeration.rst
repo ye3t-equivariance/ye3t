@@ -47,30 +47,34 @@ coefficients should be requested through ``ye3t.couplings``:
 
 .. code-block:: python
 
-   from ye3t.couplings import count, plan, compile
+   from ye3t.couplings import count, plan, compile_ace_factorized_schedules_by_L
 
    report = count(content=(1, 1, 2), input_Ls=(1, 1, 0), target_L=0)
    labels = report.labels_for_target(0)
    report.require_label(labels[0], target_L=0)
 
    coupler_plan = plan(report)
-   compiled = compile(coupler_plan)
+   compiled = compile_ace_factorized_schedules_by_L(
+       content=report.content, input_Ls=(1, 1, 0),
+   )
+   assert compiled.schedules_by_L[0].basis_count == len(labels)
 
 ``count`` is the public fixed-content multiplicity report.  ``plan`` records
 the backend choice and count provenance before coefficient construction.
-``compile`` materializes coefficients through the selected lower-level YE3T
-compiler and attaches the validation certificate.  Downstream packages such as
+The factorized ACE compiler materializes practical coupling schedules and
+attaches a validation report. Downstream packages such as
 ``ye3t-methods`` may materialize descriptors from these reports and plans, but
 they should not decide locally which symmetry labels are valid.
 
-For nonzero angular factors in ordinary density, ``compile`` checks the full
+For nonzero angular factors in ordinary density,
+``compile(..., allow_dense_reference=True)`` can check the full
 ``(content, l)`` block decomposition and every angular path. It projects the
 globally trivial Young output onto commutative density and verifies that the
 compact ACE labels span the same physical space with one common change of
 basis across all magnetic components. The compact coefficients remain the
 evaluation and serialization convention. This joint reference compilation
-has a declared dense-table size cap; ``count`` and ``plan`` do not materialize
-the table.
+has a bounded dense-table size cap and is meant for tests and comparisons;
+``count`` and ``plan`` do not materialize the table.
 
 For an ordinary commutative ACE-density label, ``compile_ace_coordinate``
 materializes all ``2L+1`` complex-magnetic components. It composes the

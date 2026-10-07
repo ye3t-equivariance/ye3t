@@ -28,7 +28,7 @@ cfg_ye3t = {
     "metadata": {
         "status": "experimental",  # Maturity of this workflow.
         "name": "compile_scalar_ace_lammps_plans",
-        "config_schema": "ye3t_example_config_v1",
+        "schema": "ye3t_config_v1",
     },
     "basis": {
         "type": "ACE",
@@ -61,11 +61,11 @@ cfg_ye3t = {
         "dtype": "float64",
         "device": "cpu",
         "maximum_coordinate_bytes": 128 * 1024 * 1024,  # Exact-symbolic and coordinate byte cap per case.
-        "output_dir": str(Path("examples") / "generated" / "scalar_ace_lammps_plans"),  # Must be new or empty.
+        "output_dir": str(Path.home() / "ye3t-workflows" / "benchmarks" / "scalar_ace_lammps_plans"),  # Must be new or empty.
     },
     "model": {
         "type": "linear_ace_execution_plan",
-        "readout": "external_linear_coefficients",  # Coefficients are bound downstream in ye3t-ace.
+        "readout": "external_linear_coefficients",  # Coefficients are bound downstream in ye3t-methods.
     },
     "targets": {"energy": "scalar_site_energy", "forces": "plan_adjoint"},
     "validation": {
@@ -309,7 +309,7 @@ def run_compile_scalar_ace_lammps_plans(config=None):
         gram_plan,
     )
     manifest["rank3_coupled_product_candidate"]["deployment_status"] = (
-        "compiler_candidate_requires_ye3t_ace_model_binding"
+        "compiler_candidate_requires_ye3t_methods_model_binding"
     )
     manifest_path = output_dir / "manifest.json"
     manifest_path.write_text(

@@ -151,6 +151,10 @@ def exact_kronecker_intertwiners(parent, left, right):
     child_dimension = left_scale.rows * right_scale.rows
     if multiplicity == 0:
         return {"multiplicity": 0, "intertwiners": tuple(), "gauge": _GAUGE}
+    if sum(parent) == 1:
+        if parent != (1,) or left != (1,) or right != (1,) or multiplicity != 1:
+            raise ArithmeticError("Rank-one Kronecker labels are inconsistent.")
+        return {"multiplicity": 1, "intertwiners": (sp.eye(1),), "gauge": _GAUGE}
     # vec(T) with T[child, parent] stored at child * parent_dimension + parent.
     equations = []
     for parent_matrix, left_matrix, right_matrix in zip(

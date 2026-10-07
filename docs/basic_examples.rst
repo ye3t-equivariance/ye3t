@@ -58,10 +58,11 @@ already-valid branches are materialized.
 Importable Examples
 -------------------
 
-Each example exposes a visible, editable ``cfg_ye3t`` dictionary. The
-fixed-content count example is a direct top-to-bottom
-``YE3TRepresentation.from_config`` → ``count_fixed_content`` workflow;
-older examples retain a purpose-named ``run_*`` function while they migrate.
+Each example exposes a visible, editable seven-section ``cfg_ye3t``
+dictionary. The fixed-content count, coefficient, and supplied-factor
+examples read top-to-bottom through public YE3T objects and coupling calls;
+specialized catalogues and benchmarks retain a purpose-named ``run_*``
+function where they cover several cases.
 The recipe files keep their rank, sector, label-limit, and runtime knobs
 visible so users can edit them directly.
 
@@ -76,7 +77,7 @@ small vocabulary:
    slot angular momenta, and target ``L_R``. The migrated
    ``examples/coupling_multiplicity_counts.py`` places the target under
    ``representation.parent.L`` and the first two values under ``basis``;
-   ``coupling_coefficient_materialization.py`` retains its older request shape.
+   ``coupling_coefficient_materialization.py`` uses the same seven-section shape.
 
 ``rank``
    The product rank ``N`` of a feature. In atomistic language this is related
@@ -155,11 +156,47 @@ schedule metadata.
    the canonical script for basis-size and label-validity checks.
 
 ``examples/coupling_coefficient_materialization.py``
-   Builds the matching ``ye3t.couplings.plan`` and
-   ``ye3t.couplings.compile`` records, then prints the selected backend,
-   convention hash, validation status, certificate status, and coefficient
-   hash. This is the canonical script for checking coefficient-materialization
-   provenance before downstream runtimes consume a coupler.
+   Builds the matching ``ye3t.couplings.plan`` and the ACE factorized
+   coefficient schedule, then compares its independent basis count with the
+   exact multiplicity. It prints the factorized term count, convention hash,
+   and validation status before downstream runtimes consume the schedule.
+
+``examples/symmetric_count_formula.py``
+   Compares the independent symmetric fixed-content count formula used for a
+   GE-PI dimension check with compiler counts for every allowed output ``L``.
+   It does not download or execute an external code archive.
+
+``examples/symmetric_density_factors.py``
+   Applies a globally symmetric scalar coupler to supplied complete density
+   multiplets. The single-factor radial basis can come from another package.
+
+``examples/user_supplied_factors.py``
+   Evaluates all three valid multiplicity coordinates for a nontrivial
+   ``(2,1)`` Young and ``L=1`` coupler on user-supplied complex Condon–Shortley
+   multiplets. Its shape is ``(a,t,M)=(3,2,3)``. Tests check a general
+   rotation and nontrivial factor permutations. The full typed-orbit matrix
+   remains a bounded reference that requires explicit opt-in.
+
+``examples/symmetric_external_factors.py``
+   Evaluates every ``(N)`` multiplet for an editable output ``L``. A repeated
+   factor block uses occupation contraction, and the example checks factor
+   permutation invariance.
+
+``examples/antisymmetric_external_factors.py``
+   Evaluates every ``(1^N)`` multiplet for an editable output ``L``. A repeated
+   factor block uses a wedge contraction; the example checks sign changes and
+   annihilation when its two ordered factor values become identical.
+
+``examples/cauchy_supplied_density.py``
+   Counts and applies a nontrivial local ``κ=(1,1)`` Cauchy path to a pair of
+   role-resolved real tesseral densities. The output is an axial ``L=1``
+   multiplet with globally symmetric factor character.
+
+``examples/tagged_cauchy_linear_coordinates.py``
+   Counts and compiles the scalar tagged-Cauchy physical coordinates for the
+   rank-four, two-tag catalogue used by the linear fit in
+   ``ye3t-methods/examples/quickstart/tagged_fit.py``. It reports the raw
+   coordinate count and the independent physical-image count.
 
 ``examples/compile_scalar_ace_lammps_plans.py``
    Compiles four representative Ta scalar ACE coordinates (rank 3,
@@ -199,8 +236,8 @@ schedule metadata.
    ``tagged_cauchy_image_request``. The report gives the raw label count and
    the exact physical-image dimension without materializing coefficients;
    ``runtime.materialize_coefficients`` additionally compiles the hash-bound
-   artifact. Edit ``representation.species``, ``radial_degrees``, and
-   ``selected_raw_tag_counts`` to describe another source set. The public rung
+   artifact. Edit ``basis.single_factors.sources`` and
+   ``basis.tensor_product.selected_raw_tag_counts`` for another source set. The public rung
    is bounded to tensor order 4 with two unit tags and l=1 primitive sources.
 
 Benchmarks
@@ -214,22 +251,23 @@ cache paths visible in the config.
    Times the exact symbolic Young-subgroup subduction path against the numeric
    generator-nullspace path for each configured case, validating the numeric
    result by generator residuals and, for small cases, exact restricted
-   projector comparison. ``include_slow`` enables the larger cases.
+   projector comparison. ``runtime.benchmark.include_slow`` enables the
+   larger cases.
 
 ``examples/benchmarks/coefficient_materialization_benchmarks.py``
    Writes cold and cached coefficient-materialization timing rows, a CSV
    table, and an optional plot for the rotation-only, permutation-only, and
-   joint Young/O(3) families under ``output_dir``. See
+   joint Young/O(3) families under ``runtime.benchmark.output_dir``. See
    :doc:`coefficient_benchmarks` for the row contents.
 
 ``examples/benchmarks/primitive_cache_policies.py``
    Compares primitive-cache lookup policies for one exact sector. The
-   ``runtime.case`` block chooses ``nin``, ``lin``, ``target_L``, and the
+   ``runtime.benchmark.case`` block chooses ``nin``, ``lin``, ``target_L``, and the
    maximum rank stored in the primitive cache.
 
 ``examples/benchmarks/symmetric_power_kernels.py``
    Compares optional folded symmetric-power kernels with reference evaluation.
-   ``catalog_cases`` lists powers and input ``L`` values; timing cases use
+   ``runtime.benchmark.catalog_cases`` lists powers and input ``L`` values; timing cases use
    ``batch``, ``warmups``, and ``runs`` only for bounded benchmarking.
 
 See :doc:`tensor_products` for the product rules,

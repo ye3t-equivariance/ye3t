@@ -230,7 +230,15 @@ def _typed_angular_paths(block_Ls, output_L, bracketing):
 
 
 def _typed_joint_routes(spec, input_Ls, target_partition):
-    """Bind every exact fixed-content copy to one full typed coupling route."""
+    """Bind each paper multiplicity coordinate ``a`` to one valid route.
+
+    For each repeated factor block, the paper's Eq. (7) resolves its Young
+    type kappa, angular Lambda, and local multiplicity space of dimension d.
+    Young and angular path copies then resolve the global ``a`` of Eqs. (9-12).
+    The serialized ``alpha_index`` key is retained for saved-data compatibility;
+    within fixed (lambda, L) it is this ``a``, before the tableau ``t`` and
+    magnetic ``M`` coordinates are attached.
+    """
 
     from ye3t.representations.factorized_product_images import _factor_angular_counts
 
@@ -351,6 +359,21 @@ def _typed_angular_coefficient(tree, block_magnetic):
         return int(tree[1]), magnetic, _sympy().Integer(0)
     cg = cg_exact(left_L, left_M, right_L, right_M, int(tree[1]), magnetic)
     return int(tree[1]), magnetic, left_value * right_value * cg._sympy_()
+
+
+def _typed_outer_angular_convention(spec, block_Ls, input_Ls):
+    """Use SO(3) recoupling when block intrinsic parity differs from (-1)^Lambda.
+
+    A Schur block made from ``k`` polar l-factors has parity ``(-1)^(k*l)``;
+    its output angular momentum Lambda need not have that parity.  The global
+    O(3) parity is checked against the original factors before this call.
+    """
+
+    if sum(int(value) for value in block_Ls) % 2 != sum(
+        int(value) for value in input_Ls
+    ) % 2:
+        return None, "SO3"
+    return spec.target_rotation.parity, spec.target_rotation.group
 
 
 def _block_map_validation(
@@ -2604,10 +2627,10 @@ class AngularCGMap:
 
 @recordclass(('boldsymbol_mu', 'boldsymbol_Lambda', 'boldsymbol_beta', 'gamma', 'pi'), frozen = True)
 class GlobalYE3TLabel:
-    """Named global Young--E3 coefficient label.
+    """Internal route components that resolve the paper's multiplicity index ``a``.
 
-    This records the alpha label components used by the central compiler:
-    ``alpha=(boldsymbol_mu, boldsymbol_Lambda, boldsymbol_beta, gamma, pi)``.
+    The complete coupled index is ``(lambda, L, a, t, M)``.  Serialized
+    field names are retained for compatibility with existing couplers.
     """
 
     def to_tuple(self):
@@ -2648,6 +2671,19 @@ class JointYoungE3Coupler:
     """Certified composition record for one global Young-E3 coupling request."""
 
     def component_cache_keys(self):
+        if self.factorized_coefficient_tables and (
+            self.factorized_coefficient_tables[0].get("kind")
+            == "typed_joint_factorized_v1"
+        ):
+            return {
+                "young_component_key": ",".join(
+                    item.coefficient_hash for item in self.subduction_maps
+                ),
+                "angular_component_key": ",".join(
+                    item.cache_key() for item in self.angular_maps
+                ),
+                "joint_key": str(self.factorized_coefficient_tables[0]["hash"]),
+            }
         if self.factorized_coefficient_tables and (
             self.factorized_coefficient_tables[0].get("kind")
             == "selected_typed_joint_factorization_v1"
@@ -2806,7 +2842,10 @@ class JointYoungE3Coupler:
             device=device,
         )
 
+    # TODO(terminology): Rename this public factor evaluator and its input
+    # names with compatibility aliases; also update action-table schema keys.
     def evaluate_factorized_slots_torch(self, slot_values, *, table_index = 0, dtype=None, device=None):
+        """Evaluate the small, reference-scale all-singleton factor path."""
         return evaluate_joint_ye3t_factorized_slots_torch(
             self,
             slot_values,
@@ -2820,6 +2859,24 @@ class JointYoungE3Coupler:
         return evaluate_selected_typed_slots_torch(
             self, slot_values, slot_types=slot_types, dtype=dtype, device=device
         )
+
+    def evaluate_factorized_factors_torch(self, factor_values, *, factor_types=None,
+                                         dtype=None, device=None):
+        """Return every ``(a,t,M)`` coordinate without assembling global C."""
+
+        from ye3t.couplings.factorized_typed import evaluate_typed_factorized_torch
+
+        return evaluate_typed_factorized_torch(
+            self, factor_values, factor_types=factor_types,
+            dtype=dtype, device=device,
+        )
+
+    def bind_factorized_factors_torch(self, *, dtype, device):
+        """Keep typed local, CG, and Young constants on one torch device."""
+
+        from ye3t.couplings.factorized_typed import YE3TFactorizedTorchRuntime
+
+        return YE3TFactorizedTorchRuntime(self, dtype=dtype, device=device)
 
     def validate_sparse_coefficient_tables(self, exact = False):
         reports = []
@@ -2857,6 +2914,16 @@ class JointYoungE3Coupler:
         """Return one complete resolved alpha label row per multiplicity copy."""
 
         rows = []
+        selected_full_alpha = None
+        typed_factorized = bool(
+            self.factorized_coefficient_tables and
+            self.factorized_coefficient_tables[0].get("kind") ==
+            "typed_joint_factorized_v1"
+        )
+        if typed_factorized:
+            selected_full_alpha = self.factorized_coefficient_tables[0].get(
+                "selected_full_alpha"
+            )
         for label_index, label in enumerate(self.labels):
             payload = label.to_dict() if hasattr(label, "to_dict") else dict(label)
             for resolved_index, row in enumerate(tuple(payload.get("resolved_alpha_labels", ()))): 
@@ -2864,6 +2931,11 @@ class JointYoungE3Coupler:
                 row["label_index"] = int(label_index)
                 row["resolved_label_index"] = int(resolved_index)
                 row["alpha_index"] = int(len(rows))
+                if typed_factorized:
+                    row["full_alpha_index"] = int(
+                        row["alpha_index"] if selected_full_alpha is None
+                        else selected_full_alpha
+                    )
                 row["alpha_tuple"] = (
                     tuple(tuple(int(part) for part in partition) for partition in row["boldsymbol_mu"]),
                     tuple(int(value) for value in row["boldsymbol_Lambda"]),
@@ -2969,15 +3041,18 @@ class JointYoungE3Coupler:
             "all_component_families_present": bool(
                 self.labels
                 and self.block_maps
-                and self.subduction_maps
-                and self.induction_couplers
+                and ((self.subduction_maps and self.induction_couplers)
+                     or (self.factorized_coefficient_tables
+                         and self.factorized_coefficient_tables[0].get("analytic_young")
+                         in {"symmetric", "antisymmetric"}))
                 and self.angular_maps
                 and (
                     (self.sparse_coefficient_tables and self.factorized_coefficient_tables)
                     or (
                         self.factorized_coefficient_tables
                         and self.factorized_coefficient_tables[0].get("kind")
-                        == "selected_typed_joint_factorization_v1"
+                        in {"selected_typed_joint_factorization_v1",
+                            "typed_joint_factorized_v1"}
                         and self.certificate.passed
                     )
                 )
@@ -4359,7 +4434,7 @@ class GlobalCouplerFamilyReferenceEvaluation:
         }
 
 
-def plan_ye3t_backend(spec):
+def plan_ye3t_backend(spec, *, input_Ls=None):
     """Resolve an exact backend choice without constructing coefficients."""
 
     spec = spec if isinstance(spec, YE3TSpec) else YE3TSpec.from_dict(spec)
@@ -4369,6 +4444,9 @@ def plan_ye3t_backend(spec):
     target_partition = _target_partition(spec.target_permutation, rank) if rank else None
     trivial_target = target_partition == (rank,) if rank else spec.target_permutation == "trivial"
     sign_target = target_partition == (1,) * rank if rank else spec.target_permutation == "antisymmetric"
+    angular_inputs = tuple(int(value) for value in (
+        spec.metadata.get("input_Ls", ()) if input_Ls is None else input_Ls
+    ))
     compiler_dispatch_backends = frozenset(
         {
             "global_coupler",
@@ -4393,6 +4471,23 @@ def plan_ye3t_backend(spec):
                 "use 'global_coupler', 'symmetric_power_fast_path', or 'exterior_power_fast_path'."
             )
         return fast_path_error(backend)
+
+    if spec.carrier != "ACE_density" and any(angular_inputs):
+        if requested in {"symmetric_power_fast_path", "exterior_power_fast_path"} or (
+            policy.startswith("force:") and policy.split(":", 1)[1]
+            in {"symmetric_power_fast_path", "exterior_power_fast_path"}
+        ):
+            raise ValueError(
+                "External angular factors use the complete typed factorized compiler; "
+                "the ACE/exterior execution-plan backends are separate carrier paths."
+            )
+        return YE3TBackendPlan(
+            requested_backend=requested,
+            selected_backend="global_coupler",
+            fast_path_policy=policy,
+            reason="complete typed factorization for ordered angular factors",
+            runtime_status=spec.runtime_status,
+        )
 
     if policy == "disable":
         return YE3TBackendPlan(
@@ -4469,7 +4564,13 @@ def _compile_typed_joint_orbit(
     subduction_cache_dir,
     subduction_constraint_backend,
 ):
-    """Compile the full typed orbit isometry for a bounded reference case."""
+    """Build a bounded dense reference for tests and independent comparisons.
+
+    This allocates the complete raw-orbit by coupled-coordinate SymPy matrix
+    before extracting its nonzero entries. It must not be used as a practical
+    coefficient or descriptor backend. Use compact ACE, Cauchy, or the complete
+    typed factorized compiler for their supported physical carriers.
+    """
 
     from ye3t.fixed_content import FixedContentModule, FixedContentSpec
 
@@ -4557,11 +4658,14 @@ def _compile_typed_joint_orbit(
             couplings[kappas] = coupling
         coupling = couplings[kappas]
         if block_Ls not in angular_maps:
+            outer_parity, outer_group = _typed_outer_angular_convention(
+                spec, block_Ls, input_Ls
+            )
             angular_maps[block_Ls] = AngularCGMap.build(
                 block_Ls,
                 target_L,
-                parity=spec.target_rotation.parity,
-                group=spec.target_rotation.group,
+                parity=outer_parity,
+                group=outer_group,
                 bracketing=spec.tree_schedule,
                 cache_dir=False,
             )
@@ -5251,7 +5355,12 @@ def _compile_selected_typed_joint_route(
     ).encode("utf-8")).hexdigest()
     angular = AngularCGMap.build(
         route["block_Ls"], int(spec.target_rotation.L_R),
-        parity=spec.target_rotation.parity, group=spec.target_rotation.group,
+        parity=_typed_outer_angular_convention(
+            spec, route["block_Ls"], input_Ls
+        )[0],
+        group=_typed_outer_angular_convention(
+            spec, route["block_Ls"], input_Ls
+        )[1],
         bracketing=spec.tree_schedule, cache_dir=False,
     )
     label = GlobalYE3TLabel(
@@ -5317,7 +5426,13 @@ def _compile_selected_typed_joint_route(
 
 def evaluate_selected_typed_slots_torch(coupler, slot_values, *, slot_types=None,
                                         dtype=None, device=None):
-    """Analyze one ordered typed orbit fiber with a certified selected route."""
+    """Analyze one ordered factor orbit fiber on a selected factorized route.
+
+    In the paper's Eqs. (9-12), ``alpha=(lambda,L,a,t,M)`` and
+    ``q=(mu,m)``. This implements ``B[i,alpha] = sum_q C[q,alpha] Z[i,q]``
+    for one ``a`` and every ``(t,M)``. The stored local, angular, and Young
+    maps are synthesis maps; evaluation uses their adjoints.
+    """
 
     import torch
 
@@ -5376,8 +5491,13 @@ def CompileGlobalYE3TCouplers(
     subduction_constraint_backend="auto",
     compare_exact_projector=False,
     subduction_exact_reference_max_rank=None,
+    dense_reference=False,
 ):
-    """Compile a central Young-E3 coupler record for a supported request."""
+    """Compile a central Young-E3 coupler record for a supported request.
+
+    External angular factor requests use the full factorized route compiler.
+    The bounded dense orbit matrix is available explicitly for comparison.
+    """
 
     spec = spec if isinstance(spec, YE3TSpec) else YE3TSpec.from_dict(spec)
     content = tuple(spec.content)
@@ -5389,14 +5509,33 @@ def CompileGlobalYE3TCouplers(
     if len(input_Ls) != len(content):
         raise ValueError(f"input_Ls length {len(input_Ls)} must match content rank {len(content)}.")
     if spec.carrier != "ACE_density" and any(input_Ls):
-        if "selected_typed_alpha" in spec.metadata:
-            return _compile_selected_typed_joint_route(
+        if dense_reference:
+            return _compile_typed_joint_orbit(
                 spec, input_Ls,
                 subduction_materialization_backend=subduction_materialization_backend,
                 subduction_cache_dir=subduction_cache_dir,
                 subduction_constraint_backend=subduction_constraint_backend,
             )
-        return _compile_typed_joint_orbit(
+        if "selected_typed_alpha" in spec.metadata:
+            _blocks, routes = _typed_joint_routes(
+                spec, input_Ls,
+                _partition_from_target(spec.target_permutation, len(spec.content)),
+            )
+            selected_alpha = spec.metadata["selected_typed_alpha"]
+            if type(selected_alpha) is not int or not 0 <= selected_alpha < len(routes):
+                raise ValueError("selected_typed_alpha must index the exact typed route inventory.")
+            from ye3t.couplings.factorized_typed import compile_typed_factorized
+
+            return compile_typed_factorized(
+                spec, input_Ls,
+                subduction_materialization_backend=subduction_materialization_backend,
+                subduction_cache_dir=subduction_cache_dir,
+                subduction_constraint_backend=subduction_constraint_backend,
+                selected_alpha=selected_alpha,
+            )
+        from ye3t.couplings.factorized_typed import compile_typed_factorized
+
+        return compile_typed_factorized(
             spec,
             input_Ls,
             subduction_materialization_backend=subduction_materialization_backend,
@@ -5633,11 +5772,25 @@ def CompileYE3TCouplers(
     subduction_constraint_backend="auto",
     compare_exact_projector=False,
     subduction_exact_reference_max_rank=None,
+    dense_reference=False,
 ):
     """Compile a Young--E3 coupler through the configured backend plan."""
 
     spec = spec if isinstance(spec, YE3TSpec) else YE3TSpec.from_dict(spec)
-    plan = plan_ye3t_backend(spec)
+    resolved_input_Ls = tuple(int(value) for value in (
+        input_Ls if input_Ls is not None else spec.metadata.get("input_Ls", ())
+    ))
+    if resolved_input_Ls and any(resolved_input_Ls) and spec.carrier != "ACE_density":
+        return CompileGlobalYE3TCouplers(
+            spec, input_Ls=resolved_input_Ls,
+            subduction_materialization_backend=subduction_materialization_backend,
+            subduction_cache_dir=subduction_cache_dir,
+            subduction_constraint_backend=subduction_constraint_backend,
+            compare_exact_projector=compare_exact_projector,
+            subduction_exact_reference_max_rank=subduction_exact_reference_max_rank,
+            dense_reference=dense_reference,
+        )
+    plan = plan_ye3t_backend(spec, input_Ls=resolved_input_Ls)
     if plan.selected_backend == "symmetric_power_fast_path":
         return CompileIndependentACE(
             spec,
@@ -5657,6 +5810,7 @@ def CompileYE3TCouplers(
             subduction_constraint_backend=subduction_constraint_backend,
             compare_exact_projector=compare_exact_projector,
             subduction_exact_reference_max_rank=subduction_exact_reference_max_rank,
+            dense_reference=dense_reference,
         )
         return record_replace(
             compiled,
@@ -5674,6 +5828,7 @@ def compile_ye3t_couplers(
     subduction_constraint_backend="auto",
     compare_exact_projector=False,
     subduction_exact_reference_max_rank=None,
+    dense_reference=False,
 ):
     return CompileYE3TCouplers(
         spec,
@@ -5683,6 +5838,7 @@ def compile_ye3t_couplers(
         subduction_constraint_backend=subduction_constraint_backend,
         compare_exact_projector=compare_exact_projector,
         subduction_exact_reference_max_rank=subduction_exact_reference_max_rank,
+        dense_reference=dense_reference,
     )
 
 
@@ -6837,7 +6993,7 @@ def evaluate_joint_ye3t_factorized_slots_torch(
     dtype=None,
     device=None,
 ):
-    """Evaluate a certified global Young-E3 coupler on explicit slot tensors.
+    """Evaluate a validated global Young-E3 coupler on explicit slot tensors.
 
     This correctness-first runtime consumes the global coupler record directly:
     each induced coset representative is evaluated with the factorized angular
@@ -7118,12 +7274,42 @@ def compile_joint_ye3t_slot_permutation_actions(
         coupler,
         table_index=table_index,
     )
-    if not bool(report["passed"]):
+    if table_index < 0 or table_index >= len(coupler.sparse_coefficient_tables):
         raise ValueError(
-            "Slot permutation actions require a certified global coupler: "
+            "Slot permutation actions require a valid global coupler: "
             + str(report["reason"])
         )
-    input_Ls = tuple(int(value) for value in report["input_Ls"])
+    fixed_table = coupler.sparse_coefficient_tables[table_index]
+    typed_table_shape = tuple(int(value) for value in fixed_table.get("shape", ()))
+    typed_target_width = 2 * int(report.get("target_L_R", 0)) + 1
+    typed_expected_columns = (
+        len(tuple(fixed_table.get("alpha_bindings", ())))
+        * len(standard_tableaux(tuple(report.get("target_partition", ()))))
+        * typed_target_width
+        if str(fixed_table.get("kind", "")) == "typed_joint_orbit_isometry"
+        else 0
+    )
+    typed_fixed_reference = bool(
+        str(fixed_table.get("kind", "")) == "typed_joint_orbit_isometry"
+        and coupler.certificate.passed
+        and table_index < len(coupler.block_maps)
+        and coupler.block_maps[table_index]["validation"]["passed"]
+        and any(int(block["size"]) > 1 for block in fixed_table.get("typed_blocks", ()))
+        and len(typed_table_shape) == 2
+        and typed_table_shape[1] == typed_expected_columns
+        and typed_expected_columns > 0
+    )
+    if not bool(report["passed"]) and not typed_fixed_reference:
+        raise ValueError(
+            "Slot permutation actions require a valid global coupler: "
+            + str(report["reason"])
+        )
+    input_Ls = tuple(
+        int(value) for value in (
+            coupler.block_maps[table_index]["input_Ls"]
+            if typed_fixed_reference else report["input_Ls"]
+        )
+    )
     rank = int(len(input_Ls))
     normalized_permutations = tuple(
         dict.fromkeys(
@@ -7184,14 +7370,40 @@ def compile_joint_ye3t_slot_permutation_actions(
                 "Repeated fixed-content slots must carry the same angular momentum."
             )
     fixed_content_report = report
+    fixed_content_formal_multiplicity = (
+        typed_table_shape[1] // typed_target_width
+        if typed_fixed_reference
+        else int(report["angular_path_count"])
+        * int(report["young_subduction_matrix_shape"][1])
+    )
     universal_content = tuple(range(1, rank + 1))
     fixed_content_coupler = coupler
     if len(content_groups) < rank:
-        action_coupler = CompileYE3TCouplers(
-            record_replace(
-                coupler.spec,
-                content=universal_content,
-            )
+        reference_metadata = dict(coupler.spec.metadata)
+        reference_metadata.pop("subgroup_partitions", None)
+        reference_metadata.pop("selected_typed_alpha", None)
+        reference_spec = record_replace(
+            coupler.spec,
+            content=universal_content,
+            block_permutation=(),
+            metadata=reference_metadata,
+        )
+        subgroup_partitions = tuple((1,) for _ in range(rank))
+        reference_young = _build_young_subgroup_specht_coupling(
+            subgroup_partitions,
+            tuple(int(value) for value in report["target_partition"]),
+            bracketing=reference_spec.tree_schedule,
+        )
+        reference_angular = AngularCGMap.build(
+            input_Ls,
+            int(report["target_L_R"]),
+            parity=reference_spec.target_rotation.parity,
+            group=reference_spec.target_rotation.group,
+            bracketing=reference_spec.tree_schedule,
+        )
+        action_coupler = AssembleJointYoungE3Coupler(
+            reference_spec, reference_young, reference_angular,
+            input_Ls=input_Ls,
         )
         action_report = _global_coupler_slot_evaluator_report(
             action_coupler,
@@ -7657,10 +7869,7 @@ def compile_joint_ye3t_slot_permutation_actions(
         "input_Ls": input_Ls,
         "permutations": normalized_permutations,
         "formal_multiplicity": int(formal_multiplicity),
-        "fixed_content_formal_multiplicity": int(
-            fixed_content_report["angular_path_count"]
-            * int(fixed_content_report["young_subduction_matrix_shape"][1])
-        ),
+        "fixed_content_formal_multiplicity": int(fixed_content_formal_multiplicity),
         "source_image_multiplicity": int(image_rank),
         "magnetic_dimension": int(magnetic_dimension),
         "image_basis": image_basis,
@@ -7758,8 +7967,7 @@ def compile_joint_ye3t_slot_permutation_actions(
                 formal_multiplicity
             ),
             "fixed_content_formal_nonmagnetic_coordinate_dim": int(
-                fixed_content_report["angular_path_count"]
-                * int(fixed_content_report["young_subduction_matrix_shape"][1])
+                fixed_content_formal_multiplicity
             ),
             "joint_image_nonmagnetic_coordinate_dim": int(
                 formal_support_rank
@@ -7772,6 +7980,7 @@ def compile_joint_ye3t_slot_permutation_actions(
             "universal_distinct_slot_action_coupler_used": bool(
                 action_coupler is not fixed_content_coupler
             ),
+            "fixed_content_typed_reference_only": bool(typed_fixed_reference),
             "joint_reference_cache_hit": bool(joint_reference_cache_hit),
             "joint_reference_cache_scope": (
                 "content_independent_complete_slot_action"
@@ -7783,7 +7992,8 @@ def compile_joint_ye3t_slot_permutation_actions(
                 report["young_subduction_matrix_hash"]
             ),
             "fixed_content_coupler_coefficient_hash": str(
-                fixed_content_report["young_subduction_matrix_hash"]
+                fixed_table["hash"] if typed_fixed_reference
+                else fixed_content_report["young_subduction_matrix_hash"]
             ),
             "construction": (
                 "complete_joint_action_then_fixed_content_orbit_restriction"

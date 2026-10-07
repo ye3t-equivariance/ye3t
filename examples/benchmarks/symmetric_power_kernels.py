@@ -20,7 +20,7 @@ cfg_ye3t = {
     "metadata": {
         "status": "stable",  # Bounded correctness and timing benchmark of optional kernels.
         "name": "symmetric_power_kernels",
-        "config_schema": "ye3t_example_config_v1",
+        "schema": "ye3t_config_v1",
     },
     "basis": {
         "type": "angular_symmetric_power",  # Symmetric tensor powers of one angular input.
@@ -32,6 +32,7 @@ cfg_ye3t = {
     },
     "runtime": {
         "device": "cpu",  # Timing runs on one CPU thread for reproducibility.
+        "benchmark": {
         "threads": 1,
         "catalog_cases": ((2, (1, 2, 3)), (3, (1, 2)), (4, (1, 2)), (8, (1,))),  # Powers and input L values to list.
         "square_case": {  # Fast symmetric-square correctness/timing case.
@@ -71,6 +72,7 @@ cfg_ye3t = {
                 "runs": 3,  # Timed evaluations.
             },
         ),
+        },
     },
     "model": {"type": "none"},  # No fitted model; kernels are compared on random features.
     "targets": {"energy": "none"},
@@ -81,7 +83,7 @@ cfg_ye3t = {
 def run_symmetric_power_kernels(config=None):
     """Run bounded symmetric-power correctness and timing comparisons."""
     settings = merge_workflow_config(cfg_ye3t, config)
-    runtime = settings["runtime"]
+    runtime = settings["runtime"]["benchmark"]
     previous_threads = torch.get_num_threads()
     torch.set_num_threads(int(runtime["threads"]))
     try:

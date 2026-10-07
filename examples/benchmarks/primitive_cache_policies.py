@@ -13,7 +13,7 @@ cfg_ye3t = {
     "metadata": {
         "status": "stable",  # Diagnostic benchmark on a documented exact sector.
         "name": "primitive_cache_policies",
-        "config_schema": "ye3t_example_config_v1",
+        "schema": "ye3t_config_v1",
     },
     "basis": {
         "type": "ACE",
@@ -25,13 +25,15 @@ cfg_ye3t = {
         "coupling": {"source": "ye3t.couplings", "backend": "exact"},
     },
     "runtime": {
-        "case": {  # Exact sector used for the cache-policy comparison.
+        "benchmark": {
+          "case": {  # Exact sector used for the cache-policy comparison.
             "nin": (1, 1, 1, 1),  # Non-angular channel eta_i for each slot.
             "lin": (1, 1, 1, 1),  # Angular momentum l_i for each slot.
             "target_L": 0,  # Target output angular momentum L_R.
             "max_cache_rank": 4,  # Highest rank stored as primitive cache entries.
+          },
+          "policies": ("cached_only", "eager"),  # Lookup policies to compare.
         },
-        "policies": ("cached_only", "eager"),  # Lookup policies to compare.
     },
     "model": {"type": "none"},  # No fitted model; this is a cache diagnostic.
     "targets": {"energy": "none"},
@@ -42,12 +44,13 @@ cfg_ye3t = {
 def run_primitive_cache_policies(config=None):
     """Print primitive-cache behavior for conservative and eager policies."""
     settings = merge_workflow_config(cfg_ye3t, config)
-    case = settings["runtime"]["case"]
+    benchmark = settings["runtime"]["benchmark"]
+    case = benchmark["case"]
     nin = tuple(case["nin"])
     lin = tuple(case["lin"])
     target_L = int(case["target_L"])
     print(f"primitive cache sector: nin={nin} lin={lin} L_R={target_L}")
-    for policy in settings["runtime"]["policies"]:
+    for policy in benchmark["policies"]:
         row = primitive_cache_summary(case, policy)
         print(
             "policy={policy} sector_dim={sector_dim} primitives={primitive_count} "

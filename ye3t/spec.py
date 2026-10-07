@@ -410,6 +410,9 @@ class YE3TReadoutSpec:
         )
 
 
+# TODO(terminology): Migrate public "slot" names to the paper's "factor" names
+# across ye3t, ye3t-methods, and ye3t-lammps. Keep readers for saved keys such
+# as slot_roles until old model/config round trips have migration tests.
 @recordclass(('content', 'slot_roles', 'target_permutation', 'block_permutation', 'target_rotation', 'carrier', 'carrier_options', 'task', 'readout', 'radial_filters', 'tree_schedule', 'coefficient_backend', 'fast_path_policy', 'validation_scope', 'runtime_status', 'metadata'), frozen = True)
 class YE3TSpec:
     """Serializable mathematical request shared by ``ye3t`` and ``ye3t-ace``."""
@@ -714,6 +717,9 @@ class YE3TSpec:
         _write_config_mapping(path, self.to_dict())
 
 
+# TODO(terminology): Review "certificate" names in public APIs and serialized
+# artifacts across all three repositories. Prefer validation/valid wording,
+# while preserving old keys and hashes through a tested schema migration.
 @recordclass(('validation_scope', 'runtime_status', 'passed', 'checks', 'residuals', 'coefficient_hash', 'provenance', 'limitations'), frozen = True)
 class YE3TCouplerCertificate:
     """Validation summary for a coupler/backend.

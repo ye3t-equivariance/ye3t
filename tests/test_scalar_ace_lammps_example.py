@@ -53,7 +53,7 @@ def test_scalar_ace_lammps_plan_example_runs(tmp_path):
     )
     assert plan.schema_version == "ye3t_execution_plan_v3"
     assert coupled["deployment_status"] == (
-        "compiler_candidate_requires_ye3t_ace_model_binding"
+        "compiler_candidate_requires_ye3t_methods_model_binding"
     )
 
     with pytest.raises(FileExistsError):

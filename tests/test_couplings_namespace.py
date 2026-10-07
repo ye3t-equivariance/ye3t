@@ -5,15 +5,19 @@ import pytest
 
 
 def test_readme_count_plan_compile_quickstart():
-    from ye3t.couplings import compile as compile_coupling
-    from ye3t.couplings import count, plan
+    from ye3t.couplings import compile_ace_factorized_schedules_by_L, count, plan
 
     report = count(content=(1, 1, 2), input_Ls=(1, 1, 0), target_L=0)
     labels = report.labels_for_target(0)
     assert len(labels) == 1
     report.require_label(labels[0], target_L=0)
-    compiled = compile_coupling(plan(report))
-    assert compiled.certificate.passed
+    compiler_plan = plan(report)
+    compiled = compile_ace_factorized_schedules_by_L(
+        content=report.content, input_Ls=(1, 1, 0),
+    )
+    assert compiler_plan.validation_report["passed"]
+    assert compiled.validation_report["passed"]
+    assert compiled.schedules_by_L[0].basis_count == len(labels)
     assert compiled.convention_hash
 
 
@@ -185,9 +189,41 @@ def test_generic_compile_materializes_mixed_angular_typed_orbit(
         carrier="Phi",
     )
     assert report.counts_by_target[target_L] == multiplicity
-    compiled = compile_coupling(plan(report), subduction_materialization_backend="exact")
+    compiled = compile_coupling(plan(report), subduction_materialization_backend="exact",
+                                allow_dense_reference=True)
     assert compiled.certificate.passed
     assert len(compiled.coupler.alpha_labels()) == multiplicity
+    assert compiled.coupler.sparse_coefficient_tables[0]["kind"] == "typed_joint_orbit_isometry"
+
+
+@pytest.mark.parametrize(
+    "target,backend",
+    (("trivial", "global_coupler"),
+     ("antisymmetric", "global_coupler")),
+)
+def test_complete_angular_factorization_is_default_and_dense_is_explicit(target, backend):
+    from ye3t.couplings import compile as compile_coupling
+    from ye3t.couplings import count, plan
+
+    report = count(
+        content=(1, 2), input_Ls=(1, 1), target_L=1,
+        target_permutation=target, carrier="Phi",
+    )
+    compiler_plan = plan(report)
+    assert compiler_plan.backend == backend
+    factored = compile_coupling(
+        compiler_plan, subduction_materialization_backend="exact"
+    )
+    assert factored.certificate.passed
+    assert not factored.coupler.sparse_coefficient_tables
+    assert factored.coupler.factorized_coefficient_tables[0]["kind"] == (
+        "typed_joint_factorized_v1"
+    )
+    assert len(factored.coupler.alpha_labels()) == report.counts_by_target[1]
+    compiled = compile_coupling(
+        compiler_plan, subduction_materialization_backend="exact",
+        allow_dense_reference=True,
+    )
     assert compiled.coupler.sparse_coefficient_tables[0]["kind"] == "typed_joint_orbit_isometry"
 
 
@@ -209,7 +245,8 @@ def test_direct_global_compiler_uses_full_mixed_angular_stabilizer():
     assert tuple(block["type"] for block in compiled.block_maps[0]["blocks"]) == (
         (1, 0), (1, 1)
     )
-    assert compiled.sparse_coefficient_matrix().shape == (6, 3)
+    assert compiled.factorized_coefficient_tables[0]["shape"] == (6, 3)
+    assert not compiled.sparse_coefficient_tables
 
 
 def test_public_compile_materializes_all_angular_beta_labels():
@@ -222,7 +259,8 @@ def test_public_compile_materializes_all_angular_beta_labels():
     )
     assert report.counts_by_target[1] == 3
     coupler_plan = plan(report)
-    compiled = compile_coupling(coupler_plan, subduction_materialization_backend="exact")
+    compiled = compile_coupling(coupler_plan, subduction_materialization_backend="exact",
+                                allow_dense_reference=True)
     assert compiled.certificate.passed
     assert tuple(
         row["angular_copy"] for row in

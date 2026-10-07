@@ -21,15 +21,15 @@ cfg_ye3t = {
         "package": "ye3t",
         "status": "experimental",
         "example_role": "benchmark",
-        "config_schema": "homogeneous_with_runtime_compatible_flat_keys",
+        "schema": "ye3t_config_v1",
     },
     "basis": {
-        "source": "visible_flat_benchmark_keys_below",
-        "label_source": "ye3t.couplings_or_benchmark_runtime",
+        "carrier": "abstract_young_tensor",
     },
     "representation": {
-        "coupling_source": "ye3t.couplings_or_benchmark_runtime",
-        "provenance_required": True,
+        "group": "SN",
+        "sectors": "runtime.benchmark.cases",
+        "coupling_source": "ye3t",
     },
     "runtime": {
         "device": "cpu",
@@ -37,84 +37,32 @@ cfg_ye3t = {
         "timeout_seconds": 300.0,
         "benchmark": {
             "machine_metadata": False,
+            "include_slow": False,
+            "cache_dir": str(Path.home() / "ye3t-workflows" / "benchmarks" / "permutation_subduction_cache"),
+            "constraint_backend": "auto",
+            "cases": (
+                {"name": "S1xS1xS1_to_21", "subgroup_partitions": ((1,), (1,), (1,)),
+                 "target_partition": (2, 1), "compare_exact_projector": True,
+                 "slow": False},
+                {"name": "S2xS2_to_31", "subgroup_partitions": ((2,), (2,)),
+                 "target_partition": (3, 1), "compare_exact_projector": True,
+                 "slow": False},
+                {"name": "S2xS2xS2_to_42", "subgroup_partitions": ((2,), (2,), (2,)),
+                 "target_partition": (4, 2), "compare_exact_projector": False,
+                 "slow": True},
+                {"name": "S3xS3_to_42", "subgroup_partitions": ((3,), (3,)),
+                 "target_partition": (4, 2), "compare_exact_projector": False,
+                 "slow": True},
+            ),
         },
     },
-    "model": {
-        "source": "visible_flat_benchmark_keys_below",
-    },
-    "targets": {
-        "source": "visible_flat_benchmark_keys_below",
-    },
+    "model": {},
+    "targets": {},
     "validation": {
         "quick_variant_required_for_long_runtime": True,
         "full_workflow_timeout_seconds": 300.0,
     },
-    "include_slow": False,  # Include larger cases whose exact baseline can take tens of seconds.
-    "cache_dir": str(Path(".ye3t_cache") / "benchmarks"),  # File-backed numeric subduction cache.
-    "constraint_backend": "auto",  # Constraint assembly backend: "auto", "python", or "cpp".
-    "cases": (
-        {
-            "name": "S1xS1xS1_to_21",
-            "subgroup_partitions": ((1,), (1,), (1,)),
-            "target_partition": (2, 1),
-            "compare_exact_projector": True,
-            "slow": False,
-        },
-        {
-            "name": "S2xS2_to_31",
-            "subgroup_partitions": ((2,), (2,)),
-            "target_partition": (3, 1),
-            "compare_exact_projector": True,
-            "slow": False,
-        },
-        {
-            "name": "S2xS2xS2_to_42",
-            "subgroup_partitions": ((2,), (2,), (2,)),
-            "target_partition": (4, 2),
-            "compare_exact_projector": False,
-            "slow": True,
-        },
-        {
-            "name": "S3xS3_to_42",
-            "subgroup_partitions": ((3,), (3,)),
-            "target_partition": (4, 2),
-            "compare_exact_projector": False,
-            "slow": True,
-        },
-    ),
 }
-
-
-CASES = (
-    {
-        "name": "S1xS1xS1_to_21",
-        "subgroup_partitions": ((1,), (1,), (1,)),
-        "target_partition": (2, 1),
-        "compare_exact_projector": True,
-        "slow": False,
-    },
-    {
-        "name": "S2xS2_to_31",
-        "subgroup_partitions": ((2,), (2,)),
-        "target_partition": (3, 1),
-        "compare_exact_projector": True,
-        "slow": False,
-    },
-    {
-        "name": "S2xS2xS2_to_42",
-        "subgroup_partitions": ((2,), (2,), (2,)),
-        "target_partition": (4, 2),
-        "compare_exact_projector": False,
-        "slow": True,
-    },
-    {
-        "name": "S3xS3_to_42",
-        "subgroup_partitions": ((3,), (3,)),
-        "target_partition": (4, 2),
-        "compare_exact_projector": False,
-        "slow": True,
-    },
-)
 
 
 def _time_exact(subgroup_partitions, target_partition):
@@ -143,13 +91,14 @@ def _time_numeric(case, cache_dir, constraint_backend):
 def run_permutation_subduction_fastpath_benchmark(config=None):
     """Run bounded exact-vs-numeric permutation-subduction benchmark cases."""
     settings = merge_workflow_config(cfg_ye3t, config)
-    cache_dir = Path(settings["cache_dir"])
-    constraint_backend = str(settings["constraint_backend"])
+    benchmark = settings["runtime"]["benchmark"]
+    cache_dir = Path(benchmark["cache_dir"])
+    constraint_backend = str(benchmark["constraint_backend"])
     if constraint_backend not in {"auto", "python", "cpp"}:
         raise ValueError("constraint_backend must be one of {'auto', 'python', 'cpp'}.")
     print("case,exact_s,numeric_s,numeric_cached_s,multiplicity,backend,valid,cache_status")
-    for case in tuple(settings.get("cases", CASES)):
-        if bool(case.get("slow", False)) and not bool(settings["include_slow"]):
+    for case in benchmark["cases"]:
+        if bool(case.get("slow", False)) and not bool(benchmark["include_slow"]):
             continue
         exact_s, exact_mult, exact_passed = _time_exact(case["subgroup_partitions"], case["target_partition"])
         numeric_s, numeric = _time_numeric(case, cache_dir, constraint_backend)

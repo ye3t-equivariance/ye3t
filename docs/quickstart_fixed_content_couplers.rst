@@ -41,6 +41,10 @@ Common failure modes:
 - Ordinary ACE density products only realize the globally trivial Young sector.
 - ``A_s``, ``Phi``, and message-state carriers must declare their carrier
   constraints before planning.
+- This zero-angular example uses the direct scalar path. For nonzero angular
+  ACE inputs, use ``compile_ace_factorized_schedules_by_L``. Full generic
+  angular typed-orbit matrix assembly is a bounded reference and requires
+  ``allow_dense_reference=True`` for tests or comparisons.
 
 Validation link: ``tests/test_couplings_namespace.py`` checks count, plan,
 compile, and invalid-label rejection.

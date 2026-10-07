@@ -12,6 +12,7 @@ from ye3t import couplings
 
 cfg_ye3t = {
     "metadata": {  # Public example identity and maturity.
+        "schema": "ye3t_config_v1",
         "name": "symbolic_young_partition_catalogue",
         "status": "experimental",
     },

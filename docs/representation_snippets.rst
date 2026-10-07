@@ -164,8 +164,10 @@ Common failure modes
 - Omitted config keys can change a snippet from a bounded count/report into an
   unbounded enumeration. Keep ``include_rank16``, label limits, and output
   controls explicit.
-- Snippets that need coefficient tensors should use ``ye3t.couplings.plan`` or
-  ``ye3t.couplings.compile`` explicitly instead of relying on a count-only
-  printer.
+- Snippets that need coefficients should use ``ye3t.couplings.plan`` followed
+  by ``ye3t.couplings.compile`` or the applicable ACE/Cauchy compiler. Ordered
+  external factors use the complete factorized typed route by default. The
+  full angular typed-orbit matrix is a bounded reference requiring explicit
+  opt-in.
 - Diagram output is opt-in; do not write generated figures from copy/paste
   snippets unless the output path is explicit.

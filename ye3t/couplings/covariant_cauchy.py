@@ -39,9 +39,10 @@ COVARIANT_CAUCHY_CONVENTION = (
 
 
 def is_covariant_cauchy_request(request):
-    return (
-        isinstance(request, dict)
-        and request.get("family") == COVARIANT_CAUCHY_FAMILY
+    return isinstance(request, dict) and (
+        request.get("family") == COVARIANT_CAUCHY_FAMILY
+        or isinstance(request.get("request"), dict) and
+        request["request"].get("family") == COVARIANT_CAUCHY_FAMILY
     )
 
 
@@ -54,12 +55,16 @@ def covariant_cauchy_request(
     role_dimension=2,
     kappa_policy="all",
     angular_basis_backend="exact_weight_space_v1",
+    target_permutation="trivial",
+    carrier="A_s",
 ):
-    """Declare one fixed complete-channel content and an ``O(3)`` target.
+    """Describe one fixed complete-channel content and an ``O(3)`` target.
 
     Block ``b`` is the ``block_sizes[b]``-fold repeated product of complete
-    channel ``b``. Parity is fixed by the content, ``prod_b (-1)^{l_b k_b}``;
-    a supplied ``target_parity`` must agree with it.
+    channel ``b``. ``kappa_policy`` filters role Schur partitions; for ordered
+    factors it does not restrict local diagonal Young or angular partitions.
+    Parity is fixed by the content, ``prod_b (-1)^{l_b k_b}``; a supplied
+    ``target_parity`` must agree with it.
     """
 
     block_sizes = tuple(int(value) for value in block_sizes)
@@ -90,8 +95,10 @@ def covariant_cauchy_request(
     if role_dimension <= 0 or target_L < 0:
         raise ValueError("role_dimension must be positive and target_L nonnegative.")
     kappa_policy = str(kappa_policy).strip().lower()
+    if kappa_policy == "all_valid":
+        kappa_policy = "all"
     if kappa_policy not in {"trivial", "all"}:
-        raise ValueError("kappa_policy must be trivial or all.")
+        raise ValueError("kappa_policy must be trivial or all_valid.")
     angular_basis_backend = str(angular_basis_backend)
     if angular_basis_backend not in {"legacy_exact", "exact_weight_space_v1"}:
         raise ValueError("angular_basis_backend must be legacy_exact or exact_weight_space_v1.")
@@ -112,6 +119,34 @@ def covariant_cauchy_request(
             + str(content_parity)
             + "; a request selects contents and cannot project parity."
         )
+    if carrier not in {"A_s", "ordered_role"}:
+        raise ValueError("Cauchy carrier must be A_s or ordered_role.")
+    from ye3t.global_coupler import _partition_from_target
+
+    if str(target_permutation).strip().lower() == "(n)":
+        target_permutation = "trivial"
+    parent = _partition_from_target(target_permutation, sum(block_sizes))
+    if carrier == "A_s" and parent != (sum(block_sizes),):
+        raise ValueError("Commuting role density supports only the trivial global Young type.")
+    if carrier == "ordered_role":
+        return {
+            "family": COVARIANT_CAUCHY_FAMILY,
+            "schema": "ye3t_ordered_role_cauchy_v2",
+            "carrier": "ordered_role",
+            "role_dimension": role_dimension,
+            "channels": channels,
+            "block_sizes": block_sizes,
+            "kappa_policy": kappa_policy,
+            "angular_basis_backend": angular_basis_backend,
+            "target": {
+                "permutation": target_permutation,
+                "young_partition": parent,
+                "L": target_L,
+                "o3_parity": int(content_parity),
+            },
+            "factor_input": "one_ordered_role_angular_multiplet_per_factor",
+            "convention_id": "ordered_role_cauchy_joint_young_cg_v2",
+        }
     return {
         "family": COVARIANT_CAUCHY_FAMILY,
         "carrier": "A_s",
@@ -133,6 +168,7 @@ def covariant_cauchy_request(
 def _normalized(request):
     if not is_covariant_cauchy_request(request):
         raise ValueError("Not a covariant lifted-Cauchy request.")
+    request = request.get("request", request)
     normalized = covariant_cauchy_request(
         request["channels"],
         request["block_sizes"],
@@ -141,6 +177,8 @@ def _normalized(request):
         role_dimension=request["role_dimension"],
         kappa_policy=request["kappa_policy"],
         angular_basis_backend=request.get("angular_basis_backend", "legacy_exact"),
+        target_permutation=request["target"].get("permutation", "trivial"),
+        carrier=request.get("carrier", "A_s"),
     )
     if "angular_basis_backend" not in request:
         normalized.pop("angular_basis_backend")
@@ -151,6 +189,10 @@ def covariant_cauchy_count(request):
     """Enumerate the exact multiplicity labels of the requested target."""
 
     request = _normalized(request)
+    if request["carrier"] == "ordered_role":
+        from .ordered_role_cauchy import ordered_role_cauchy_count
+
+        return ordered_role_cauchy_count(request)
     role_dimension = request["role_dimension"]
     target_L = request["target"]["L"]
     block_choices = []
@@ -291,6 +333,10 @@ def _outer_multiplet_template(block_Ls, target_L):
 
 def compile_covariant_cauchy(request):
     """Compile exact factored coordinates for every label of the request."""
+    if request.get("request", request).get("carrier") == "ordered_role":
+        from .ordered_role_cauchy import compile_ordered_role_cauchy
+
+        return compile_ordered_role_cauchy(_normalized(request))
 
     report = covariant_cauchy_count(request)
     request = report["request"]
@@ -530,6 +576,10 @@ def _real_rows(canonical, request, phase_exponent):
 def validate_covariant_cauchy(compiled):
     """Re-derive the hash bindings and label identity of a compiled artifact."""
 
+    if compiled.get("schema") == "ye3t_ordered_role_cauchy_compiled_v2":
+        from .ordered_role_cauchy import validate_ordered_role_cauchy
+
+        return validate_ordered_role_cauchy(compiled)
     if compiled.get("schema") != COVARIANT_CAUCHY_SCHEMA:
         raise ValueError("Unknown covariant lifted-Cauchy schema.")
     body = {key: value for key, value in compiled.items() if key != "self_hash"}
@@ -702,6 +752,8 @@ def covariant_cauchy_flat_real_plan(compiled):
     }
 
 
+# TODO(factor terminology): keep this public function name as a compatibility
+# alias while migrating callers and saved references to a factor-resolved name.
 def compile_slot_resolved_cauchy_block(
     role_dimension,
     size,
@@ -710,8 +762,10 @@ def compile_slot_resolved_cauchy_block(
     angular_partition,
     angular_l,
     output_L,
+    *,
+    factorized_only=False,
 ):
-    r"""Exact ``S_alpha(W) (x) S_beta(V_l) -> S^mu (x) V_Lambda`` slot-resolved vectors.
+    r"""Exact ``S_alpha(W) (x) S_beta(V_l) -> S^mu (x) V_Lambda`` factor-resolved vectors.
 
     For a parent partition ``mu`` of ``size`` this pairs a role Schur module
     and an angular Schur module through the exact Kronecker intertwiners of
@@ -760,6 +814,9 @@ def compile_slot_resolved_cauchy_block(
             "multiplicity": 0,
             "joint_states": tuple(),
             "vectors": {},
+            "analysis_vectors": {},
+            "orthonormal_vectors": {},
+            "copy_gram": sp.zeros(0, 0),
             "parent_dimension": 0,
         }
     role_states, role_vectors, _ = _scalar._role_schur_vectors(
@@ -811,6 +868,142 @@ def compile_slot_resolved_cauchy_block(
                 )
                 * gauge
             ).applyfunc(sp.simplify)
+    if factorized_only:
+        # Algorithmic reference: block Schur-Weyl and Kronecker multiplicity
+        # decomposition in Goff and Thompson, arXiv:2609.31895, Eqs. (7)-(12).
+        # Independent implementation: keep role and angular vectors separate
+        # and contract the ordered factors between them at evaluation time.
+        parent_dimension = int(intertwiners["intertwiners"][0].cols)
+        families = tuple(product(
+            range(role_count), range(angular_count),
+            range(int(intertwiners["multiplicity"])),
+        ))
+        role_dim = int(role_tableaux)
+        angular_dim = int(angular_tableaux)
+        role_columns = role_count * role_dim
+        angular_columns = angular_count * angular_dim
+        reference_M = magnetic[-1]
+        role_overlap = {
+            (left, right): (role_basis[left].H * role_basis[right]).applyfunc(sp.simplify)
+            for left, right in product(range(role_count), repeat=2)
+        }
+        angular_overlap = {
+            (left, right, M): (
+                angular_basis[(left, M)].H * angular_basis[(right, M)]
+            ).applyfunc(sp.simplify)
+            for left, right, M in product(
+                range(angular_count), range(angular_count), magnetic
+            )
+        }
+
+        def overlap(left, right, M):
+            role_left, angular_left, kronecker_left = left
+            role_right, angular_right, kronecker_right = right
+            return (
+                intertwiners["intertwiners"][kronecker_left].H
+                * sp.kronecker_product(
+                    role_overlap[(role_left, role_right)],
+                    angular_overlap[(angular_left, angular_right, M)],
+                )
+                * intertwiners["intertwiners"][kronecker_right]
+            ).applyfunc(sp.simplify)
+
+        norms = tuple(sp.sqrt(sp.simplify(overlap(family, family, reference_M)[0, 0]))
+                      for family in families)
+        if any(sp.simplify(norm) == 0 for norm in norms):
+            raise RuntimeError("A factorized Cauchy copy has zero norm.")
+        copy_gram = sp.Matrix(len(families), len(families),
+                              lambda left, right: sp.simplify(
+                                  overlap(families[left], families[right],
+                                          reference_M)[0, 0]
+                                  / (norms[left] * norms[right])
+                              ))
+        for M in magnetic:
+            for left, right in product(range(len(families)), repeat=2):
+                actual = overlap(families[left], families[right], M)
+                expected = (copy_gram[left, right] * norms[left] * norms[right]
+                            * sp.eye(parent_dimension))
+                if (actual - expected).applyfunc(sp.simplify) != sp.zeros(
+                        parent_dimension, parent_dimension):
+                    raise RuntimeError("Factorized Cauchy copy Gram varies over t or M.")
+        if copy_gram.det().simplify() == 0:
+            raise RuntimeError("Factorized Cauchy copy families are dependent.")
+        whitening = copy_gram.cholesky().H.inv()
+        if (whitening.H * copy_gram * whitening - sp.eye(len(families))).applyfunc(
+                sp.simplify) != sp.zeros(len(families), len(families)):
+            raise RuntimeError("Factorized Cauchy copy whitening failed.")
+        seed_kernels = []
+        for family, norm in zip(families, norms, strict=True):
+            role_copy, angular_copy, kronecker_copy = family
+            kernel = sp.zeros(role_columns * angular_columns, parent_dimension)
+            intertwiner = intertwiners["intertwiners"][kronecker_copy]
+            for role_tableau in range(role_dim):
+                for angular_tableau in range(angular_dim):
+                    row = ((role_copy * role_dim + role_tableau) * angular_columns
+                           + angular_copy * angular_dim + angular_tableau)
+                    source = role_tableau * angular_dim + angular_tableau
+                    for target_tableau in range(parent_dimension):
+                        kernel[row, target_tableau] = sp.simplify(
+                            intertwiner[source, target_tableau] / norm
+                        )
+            seed_kernels.append(kernel)
+        orthogonal_kernels = tuple(
+            (sum((seed_kernels[seed] * whitening[seed, copy]
+                  for seed in range(len(families))),
+                 sp.zeros(role_columns * angular_columns, parent_dimension))
+             ).applyfunc(sp.simplify)
+            for copy in range(len(families))
+        )
+        role_order = tuple(product(range(int(role_dimension)), repeat=size))
+        magnetic_order = tuple(product(range(-int(angular_l), int(angular_l) + 1),
+                                       repeat=size))
+        if set(role_order) != set(role_states) or set(magnetic_order) != set(magnetic_states):
+            raise RuntimeError("Factorized Cauchy component state inventory is incomplete.")
+        role_rows = {state: row for row, state in enumerate(role_states)}
+        magnetic_rows = {state: row for row, state in enumerate(magnetic_states)}
+        role_matrix = sp.Matrix.hstack(*(role_basis[copy] for copy in range(role_count)))
+        angular_matrices = {
+            M: sp.Matrix.hstack(*(angular_basis[(copy, M)]
+                                  for copy in range(angular_count)))
+            for M in magnetic
+        }
+        return {
+            "multiplicity": int(intertwiners["multiplicity"]),
+            "parent_dimension": parent_dimension,
+            "family_order": families,
+            "copy_gram": copy_gram,
+            "role_values": tuple(
+                tuple(float(role_matrix[role_rows[state], column])
+                      for state in role_order)
+                for column in range(role_columns)
+            ),
+            "angular_values": tuple(
+                tuple(tuple(float(angular_matrices[M][magnetic_rows[state], column])
+                            for M in magnetic)
+                      for state in magnetic_order)
+                for column in range(angular_columns)
+            ),
+            "orthogonal_kernel": tuple(
+                tuple(tuple(tuple(float(kernel[role * angular_columns + angular,
+                                               tableau])
+                                  for tableau in range(parent_dimension))
+                            for angular in range(angular_columns))
+                      for role in range(role_columns))
+                for kernel in orthogonal_kernels
+            ),
+            "role_dimension": int(role_dimension),
+            "angular_width": 2 * int(angular_l) + 1,
+            "factor_count": size,
+            "magnetic_width": len(magnetic),
+            "validation_report": {
+                "passed": True,
+                "role_vectors_young_orthogonal_exact": True,
+                "angular_vectors_regauged_exact": True,
+                "full_copy_gram_independent_of_tableau_and_M_exact": True,
+                "full_copy_orthonormal_exact": True,
+                "joint_role_angular_tensor_not_materialized": True,
+            },
+        }
     joint_states = tuple(
         tuple(zip(role_state, magnetic_state, strict=True))
         for role_state in role_states
@@ -862,6 +1055,42 @@ def compile_slot_resolved_cauchy_block(
                     vectors[(role_copy, angular_copy, kronecker_copy, tableau, M)] = (
                         family[M][:, tableau]
                     )
+    families = tuple(dict.fromkeys(key[:3] for key in vectors))
+    copy_gram = None
+    copy_gram_inverse = None
+    copy_cholesky_inverse_transpose = None
+    analysis_vectors = {}
+    orthonormal_vectors = {}
+    for tableau in range(parent_dimension):
+        for M in magnetic:
+            synthesis = sp.Matrix.hstack(*[
+                vectors[(*family, tableau, M)] for family in families
+            ])
+            gram = (synthesis.H * synthesis).applyfunc(sp.simplify)
+            if copy_gram is None:
+                copy_gram = gram
+                if copy_gram.det().simplify() == 0:
+                    raise RuntimeError("Local Cauchy copy families are dependent.")
+                copy_gram_inverse = copy_gram.inv()
+                # If G = L L^H, columns of S L^{-H} form an exact
+                # orthonormal copy basis.  The earlier S G^{-1} columns
+                # remain available as the dual of the original family gauge.
+                copy_cholesky_inverse_transpose = copy_gram.cholesky().H.inv()
+            elif (gram - copy_gram).applyfunc(sp.simplify) != sp.zeros(*gram.shape):
+                raise RuntimeError("Local Cauchy copy Gram depends on t or M.")
+            dual = (synthesis * copy_gram_inverse).applyfunc(sp.simplify)
+            if (dual.H * synthesis - sp.eye(len(families))).applyfunc(sp.simplify) != (
+                    sp.zeros(len(families), len(families))):
+                raise RuntimeError("Local Cauchy metric dual failed exact validation.")
+            orthonormal = (
+                synthesis * copy_cholesky_inverse_transpose
+            ).applyfunc(sp.simplify)
+            if (orthonormal.H * orthonormal - sp.eye(len(families))).applyfunc(
+                    sp.simplify) != sp.zeros(len(families), len(families)):
+                raise RuntimeError("Local Cauchy copy orthonormalization failed.")
+            for index, family in enumerate(families):
+                analysis_vectors[(*family, tableau, M)] = dual[:, index]
+                orthonormal_vectors[(*family, tableau, M)] = orthonormal[:, index]
     return {
         "multiplicity": int(intertwiners["multiplicity"]),
         "kronecker_gauge": str(intertwiners["gauge"]),
@@ -869,12 +1098,18 @@ def compile_slot_resolved_cauchy_block(
         "joint_states": joint_states,
         "parent_dimension": parent_dimension,
         "vectors": vectors,
+        "analysis_vectors": analysis_vectors,
+        "orthonormal_vectors": orthonormal_vectors,
+        "copy_gram": copy_gram,
         "validation_report": {
             "passed": True,
             "role_vectors_young_orthogonal_exact": True,
             "angular_vectors_regauged_exact": True,
             "slot_transpositions_act_by_parent_irrep_exact": True,
-            "families_orthonormal_exact": True,
+            "each_family_tableau_multiplet_orthonormal_exact": True,
+            "full_copy_gram_independent_of_tableau_and_M_exact": True,
+            "full_copy_metric_dual_exact": True,
+            "full_copy_orthonormal_exact": True,
         },
     }
 
@@ -897,6 +1132,7 @@ def evaluate_covariant_cauchy(
     *,
     upstream=None,
     basis="real_tesseral",
+    factor_types=None,
 ):
     """Evaluate complete multiplets and the algebraic VJP.
 
@@ -907,6 +1143,16 @@ def evaluate_covariant_cauchy(
     With ``basis="real_tesseral"`` inputs, outputs, upstream, and gradients are
     real; with ``"complex_condon_shortley"`` no real form or phase is applied.
     """
+
+    if compiled.get("request", {}).get("carrier") == "ordered_role":
+        from .ordered_role_cauchy import evaluate_ordered_role_cauchy
+
+        return evaluate_ordered_role_cauchy(
+            compiled, values, upstream=upstream, basis=basis,
+            factor_types=factor_types,
+        )
+    if factor_types is not None:
+        raise ValueError("factor_types applies only to ordered_role Cauchy inputs.")
 
     import numpy as np
 

@@ -88,3 +88,27 @@ def test_nontrivial_parents_vanish_on_commuting_densities():
             for position, state in enumerate(block["joint_states"])
         )
         assert sp.expand(polynomial) == 0
+
+
+def test_cross_family_cauchy_copy_metric_is_used_for_analysis():
+    block = compile_slot_resolved_cauchy_block(
+        3, 3, (3,), (2, 1), (2, 1), 1, 1
+    )
+    families = tuple(dict.fromkeys(key[:3] for key in block["vectors"]))
+    synthesis = sp.Matrix.hstack(*[
+        block["vectors"][(*family, 0, 1)] for family in families
+    ])
+    analysis = sp.Matrix.hstack(*[
+        block["analysis_vectors"][(*family, 0, 1)] for family in families
+    ])
+    orthonormal = sp.Matrix.hstack(*[
+        block["orthonormal_vectors"][(*family, 0, 1)] for family in families
+    ])
+    gram = (synthesis.H * synthesis).applyfunc(sp.simplify)
+    assert gram == block["copy_gram"]
+    assert gram != sp.eye(len(families))
+    assert any(abs(value) == sp.Rational(1, 2) for value in gram)
+    assert (analysis.H * synthesis).applyfunc(sp.simplify) == sp.eye(len(families))
+    assert (orthonormal.H * orthonormal).applyfunc(sp.simplify) == sp.eye(len(families))
+    assert block["validation_report"]["full_copy_metric_dual_exact"]
+    assert block["validation_report"]["full_copy_orthonormal_exact"]

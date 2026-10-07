@@ -1,4 +1,82 @@
-# Covariant Cauchy bases for arbitrary `(L, parity)` and Young-symmetric outputs
+# Covariant Cauchy bases for arbitrary `(L, parity)` and Young outputs
+
+## Ordered role-resolved factors and general Young outputs
+
+The `ordered_role` carrier is the factor-resolved extension of the commuting
+`A_s` construction. For complete channel blocks `b` with multiplicities `k_b`,
+each input factor has a role coordinate in `W_b = C^d` and a full angular
+multiplet in `V_{l_b}`. The fixed-content carrier is
+
+\[
+\widehat{\mathcal H}_{\boldsymbol\nu}
+=\bigoplus_{\sigma\in S_N/(\prod_b S_{k_b})}
+\bigotimes_b (W_b\otimes V_{l_b})^{\otimes k_b}.
+\]
+
+Within block `b`, a local Young type `mu_b` splits into role type `kappa_b`,
+angular type `rho_b`, their Kronecker copy, a role Schur copy, and an angular
+copy at `Lambda_b`. Global Young subduction contributes a Littlewood-Richardson
+copy, while binary angular coupling contributes an angular path. The number
+of independent output multiplets is
+
+\[
+m_{\lambda L}=
+\sum_{\boldsymbol\mu,\boldsymbol\Lambda}
+c_{\boldsymbol\mu}^{\lambda}\,\mathcal N_{\boldsymbol\Lambda}^{L}
+\prod_b\left(
+  \sum_{\kappa_b,\rho_b}
+  g_{\mu_b\kappa_b\rho_b}
+  \dim\mathbb S_{\kappa_b}(W_b)
+  d_b^{\rho_b\Lambda_b}
+\right).
+\]
+
+Each copy `a` yields every tableau coordinate `t` and magnetic coordinate `M`
+of the paper's `B_{i,alpha}`, with `alpha=(lambda,L,a,t,M)`. This follows the
+block Schur-Weyl, multiplicity, and coupling construction in
+[Goff and Thompson, Eqs. (7)–(12)](https://arxiv.org/abs/2609.31895).
+
+The local compiler checks exact factor-permutation action and all role,
+angular, and Kronecker copies. Distinct local copy families can overlap even
+when each family is normalized. If `S` contains their synthesis vectors, the
+compiler forms `G=S^H S=H H^H` and uses `Q=S H^{-H}`. Thus `Q^H Q=I` for the
+complete local copy space. The original family dual `S G^{-1}` remains in the
+low-level report for comparison; the ordered-role evaluator uses `Q`. Young
+and binary angular maps then act on these orthonormal local coordinates. The
+full orbit-by-coupled-coordinate matrix `C_{q alpha}` is never assembled.
+For larger repeated blocks, the compiler also keeps role and angular vectors
+separate. The local evaluation contracts the ordered factors first against
+role vectors, then against angular vectors and the orthonormal copy kernel.
+If `r` and `s` are the numbers of retained role and angular columns, this
+stores `r d^k + s(2l+1)^k` component entries plus the copy kernel, instead of
+the joint `d^k(2l+1)^k` product table for every output column. Small blocks retain a sparse local
+table that serves as an independent reference for the tensor network.
+
+The copy indices in each route name the lexicographically ordered seed
+families before this transform. The saved local table records their
+`family_order`, `copy_gram`, and
+`copy_gauge="full_family_cholesky_orthonormal_v1"`. An orthonormal output copy
+can combine several seed families; its label is an index in that fixed copy
+gauge, not a claim that its vector has only one pure role/angular/Kronecker
+factorization.
+
+The public path is `covariant_cauchy_request(..., carrier="ordered_role",
+target_permutation=..., target_L=...)` followed by `ye3t.couplings.count`,
+`plan`, and `compile`. Call `ye3t.couplings.validate_covariant_cauchy` when
+loading a saved artifact. For repeated Torch evaluation, bind its constant
+tensors once with `ye3t.couplings.bind_ordered_role_cauchy_torch`; see
+`examples/ordered_role_cauchy_factors.py`. Inputs are ordered
+`(..., N, d, 2l+1)` for a common `l`, or one `(d, 2l_b+1)` multiplet per factor
+when angular degrees differ. The output shape is `(..., a, t, M)`.
+
+For commuting `A_s` inputs, the product itself is globally symmetric and only
+`lambda=(N)` is a physical output. The ordered-role API keeps distinct factor
+information and supports symmetric, antisymmetric, and general Young outputs.
+This core evaluator couples supplied factors; physical source construction,
+motif sums, and packed native message-passing lowering are separate application
+operations. The current Torch evaluator reuses bound constants but still loops
+over coupled routes in Python, so this path is experimental for high-throughput
+message-passing workloads.
 
 Status: **derivation with exact checks; referenced as the mathematical
 standard by `ye3t/couplings/covariant_cauchy.py`.** It generalizes

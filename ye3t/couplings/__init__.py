@@ -91,7 +91,9 @@ from ye3t.couplings.covariant_cauchy import (
     covariant_cauchy_request,
     evaluate_covariant_cauchy,
     is_covariant_cauchy_request,
+    validate_covariant_cauchy,
 )
+from ye3t.couplings.ordered_role_cauchy import bind_ordered_role_cauchy_torch
 from ye3t.couplings.tagged_cauchy_carriers import (
     _compile_tagged_role_factor_execution,
     compile_tagged_cauchy_carriers,
@@ -2126,6 +2128,26 @@ class CouplerPlan:
     """Backend plan plus count provenance for a coupling request."""
     provenance = field(default_factory=dict)
 
+    def select_multiplicity(self, a):
+        """Select one valid fixed-content multiplicity coordinate.
+
+        Mathematical contract: ``a`` indexes the exact joint multiplicity
+        space, while the full Young-tableau and magnetic axes remain intact.
+        The returned plan keeps the complete count and changes only which
+        coordinate is materialized by the factorized compiler.
+        """
+        bindings = tuple(self.validation_report.get("alpha_bindings", ()))
+        if type(a) is not int or not 0 <= a < len(bindings):
+            raise ValueError("a must index a valid fixed-content multiplicity coordinate.")
+        payload = self.spec.to_dict()
+        payload["metadata"] = {
+            **dict(payload["metadata"]), "selected_typed_alpha": int(a),
+        }
+        selected = plan(payload)
+        if tuple(selected.validation_report.get("alpha_bindings", ())) != bindings:
+            raise ArithmeticError("Selecting a multiplicity changed the exact route inventory.")
+        return selected
+
     def to_dict(self):
         return {
             "content": list(self.content),
@@ -2493,6 +2515,25 @@ class ACEFactorizedScheduleReport:
     def schedules_by_L(self):
         return self.schedules_by_target
 
+    def evaluate(self, block_values, *, target_L, backend="auto"):
+        """Evaluate a complete ACE factorized schedule on adapted blocks.
+
+        Purpose: apply the compiled inter-block coefficients to supplied
+        block multiplets. Mathematical contract: ``block_values`` has axes
+        [batch, independent_basis, block, magnetic_component], with each
+        repeated block already symmetry-adapted as specified by its schedule.
+        Returns all magnetic components of every selected basis label. Does
+        not construct the input density or the repeated-block values.
+        """
+        target_L = int(target_L)
+        if target_L not in self.schedules_by_target:
+            raise ValueError("target_L is not present in this ACE schedule report.")
+        from ye3t.core.couplings import evaluate_factorized_schedule_torch
+
+        return evaluate_factorized_schedule_torch(
+            block_values, self.schedules_by_target[target_L], backend=backend,
+        )
+
     def to_dict(self):
         schedule_summary = {}
         for target_L, schedule in sorted(self.schedules_by_target.items()):
@@ -2777,7 +2818,7 @@ def count(
         labels_by_target = {target_L: primitive_labels}
         counts_by_target = {target_L: len(primitive_labels)}
 
-    backend_plan = plan_ye3t_backend(spec)
+    backend_plan = plan_ye3t_backend(spec, input_Ls=resolved_input_Ls)
     target = {
         "permutation": spec.target_permutation,
         "rotation": spec.target_rotation.to_dict(),
@@ -2888,7 +2929,7 @@ def plan(
     else:
         report = count(request, input_Ls=input_Ls, **kwargs)
         spec = report.spec
-    backend_plan = plan_ye3t_backend(spec)
+    backend_plan = plan_ye3t_backend(spec, input_Ls=_input_Ls_from_spec(spec, input_Ls=input_Ls))
     validation_report = {
         **dict(report.validation_report),
         "backend_plan_selected": backend_plan.selected_backend,
@@ -4856,9 +4897,15 @@ def compile(
     subduction_constraint_backend = "auto",
     compare_exact_projector = False,
     subduction_exact_reference_max_rank=None,
+    allow_dense_reference = False,
     **kwargs,
 ):
-    """Materialize coupling coefficients through the planned ye3t backend."""
+    """Materialize coupling coefficients through the planned ye3t backend.
+
+    External angular factors use complete local/CG/Young factorization.
+    ``allow_dense_reference=True`` explicitly selects the bounded full orbit
+    matrix for tests and independent comparisons.
+    """
 
     if isinstance(request, dict) and request.get("kind") == "tagged_cauchy_carrier_execution":
         if request.get("execution") != "role_factorized":
@@ -4894,6 +4941,18 @@ def compile(
             f"target_permutation={coupler_plan.spec.target_permutation!r}, L_R={target_L}."
         )
     resolved_input_Ls = _input_Ls_from_spec(coupler_plan.spec, input_Ls=input_Ls)
+    if (any(resolved_input_Ls)
+            and coupler_plan.spec.carrier == "ACE_density"
+            and not allow_dense_reference):
+        raise ValueError(
+            "This full angular typed-orbit compile uses a bounded dense "
+            "reference matrix. Use compile_ace_coordinate or "
+            "compile_ace_factorized_schedules_by_L for ordinary ACE, a "
+            "Cauchy compiler for physical role/tagged densities. For ordered "
+            "external factors, request the Phi carrier and compile every "
+            "valid multiplicity route. Set "
+            "allow_dense_reference=True only for tests or comparisons."
+        )
     coupler = compile_ye3t_couplers(
         coupler_plan.spec,
         input_Ls=resolved_input_Ls,
@@ -4902,6 +4961,7 @@ def compile(
         subduction_constraint_backend=subduction_constraint_backend,
         compare_exact_projector=compare_exact_projector,
         subduction_exact_reference_max_rank=subduction_exact_reference_max_rank,
+        dense_reference=bool(allow_dense_reference),
     )
     certificate = coupler.certificate
     if not certificate.passed:
@@ -4916,11 +4976,23 @@ def compile(
         if selected_alpha is not None:
             bindings = tuple(coupler_plan.validation_report.get("alpha_bindings", ()))
             tables = tuple(coupler.factorized_coefficient_tables)
-            if (type(selected_alpha) is not int or not 0 <= selected_alpha < expected
-                    or len(bindings) != expected or materialized != 1 or len(tables) != 1
-                    or tables[0].get("kind") != "selected_typed_joint_factorization_v1"
+            if type(selected_alpha) is not int or not 0 <= selected_alpha < expected:
+                raise ValueError("Selected typed multiplicity index is invalid.")
+            old_selected = bool(
+                len(tables) == 1
+                and tables[0].get("kind") == "selected_typed_joint_factorization_v1"
+                and tables[0].get("alpha_binding") == bindings[selected_alpha]
+            )
+            complete_selected = bool(
+                len(tables) == 1
+                and tables[0].get("kind") == "typed_joint_factorized_v1"
+                and tuple(tables[0].get("alpha_bindings", ()))
+                == (bindings[selected_alpha],)
+                and len(tables[0].get("routes", ())) == 1
+            )
+            if (len(bindings) != expected or materialized != 1 or len(tables) != 1
+                    or not (old_selected or complete_selected)
                     or tables[0].get("selected_full_alpha") != selected_alpha
-                    or tables[0].get("alpha_binding") != bindings[selected_alpha]
                     or tables[0].get("full_target_count") != expected):
                 raise ValueError(
                     "Selected typed factorization does not match the exact public route inventory."
@@ -8160,6 +8232,7 @@ __all__ = [
     "execution_plan_from_repeated_angular_blocks",
     "execution_plan_from_same_rank_kronecker",
     "evaluate_covariant_cauchy",
+    "bind_ordered_role_cauchy_torch",
     "evaluate_lifted_cauchy_scalar",
     "evaluate_partition_expression",
     "expand_partition_family_requests",
@@ -8167,6 +8240,7 @@ __all__ = [
     "first_lifted_cauchy_scalar_request",
     "integer_partitions",
     "is_covariant_cauchy_request",
+    "validate_covariant_cauchy",
     "is_lifted_cauchy_scalar_request",
     "is_tagged_cauchy_image_request",
     "racah_harmonic_product_plan",

@@ -8,7 +8,10 @@ from ye3t.api import YE3TFixedContentBasis
 
 
 cfg_ye3t = {
-    "metadata": {"name": "exact_full_primitive_catalog", "status": "experimental"},
+    "metadata": {
+        "schema": "ye3t_config_v1", "name": "exact_full_primitive_catalog",
+        "status": "experimental",
+    },
     "basis": {
         "type": "abstract_fixed_content",
         "rank": {

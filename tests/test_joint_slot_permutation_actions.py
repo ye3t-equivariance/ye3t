@@ -6,6 +6,11 @@ import pytest
 
 def _rank4_coupler(partition, input_Ls, target_L, content=(1, 2, 3, 4)):
     from ye3t import couplings
+    from ye3t.global_coupler import AngularCGMap, AssembleJointYoungE3Coupler
+    from ye3t.representations.young_subgroup_specht_coupling import (
+        build_young_subgroup_specht_coupling,
+    )
+    from ye3t.spec import YE3TSpec
 
     request = {
         "content": tuple(content),
@@ -22,7 +27,23 @@ def _rank4_coupler(partition, input_Ls, target_L, content=(1, 2, 3, 4)):
             "source_scope": "test_complete_rank4_tensor_product",
         },
     }
-    return couplings.compile(request).coupler
+    if len(set(content)) == len(content):
+        # Singleton blocks make the exact Young × angular reference complete.
+        spec = YE3TSpec.from_dict(request)
+        young = build_young_subgroup_specht_coupling(
+            tuple((1,) for _ in content), tuple(partition),
+            bracketing=spec.tree_schedule,
+        )
+        angular = AngularCGMap.build(
+            tuple(input_Ls), target_L,
+            parity=spec.target_rotation.parity,
+            group=spec.target_rotation.group,
+            bracketing=spec.tree_schedule,
+        )
+        return AssembleJointYoungE3Coupler(
+            spec, young, angular, input_Ls=tuple(input_Ls),
+        )
+    return couplings.compile(request, allow_dense_reference=True).coupler
 
 
 @pytest.mark.fast
@@ -42,7 +63,7 @@ def test_slot_action_compiler_reduces_dead_scalar_nontrivial_image():
 
 
 @pytest.mark.fast
-def test_slot_action_compiler_certifies_nonzero_complete_vector_image():
+def test_slot_action_compiler_validates_nonzero_complete_vector_image():
     from ye3t import couplings
 
     coupler = _rank4_coupler((2, 2), (1, 1, 1, 1), 0)
@@ -77,7 +98,7 @@ def test_slot_action_compiler_certifies_nonzero_complete_vector_image():
 
 
 @pytest.mark.fast
-def test_slot_actions_use_the_declared_permutation_representation_orientation():
+def test_slot_actions_use_the_configured_permutation_representation_orientation():
     from ye3t import couplings
 
     permutations = tuple(
@@ -98,6 +119,7 @@ def test_slot_actions_use_the_declared_permutation_representation_orientation():
     ) == 6
     assert plan["validation_report"]["complete_target_tableau_copies"]
     assert int(plan["source_image_multiplicity"]) == 3
+    assert plan["fixed_content_formal_multiplicity"] == 54
     action = {
         permutation: plan["actions"][index]
         for index, permutation in enumerate(permutations)
@@ -144,6 +166,9 @@ def test_slot_actions_close_the_full_repeated_content_orbit():
         )
     )
     assert validation["content_orbit_closed"]
+    assert plan["fixed_content_formal_multiplicity"] == (
+        3 * len(coupler.sparse_coefficient_tables[0]["alpha_bindings"])
+    )
     assert int(plan["resource_report"]["content_orbit_size"]) == 6
     assert int(plan["source_image_multiplicity"]) > 0
     action = {

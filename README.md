@@ -12,22 +12,25 @@ linear Atomic Cluster Expansion (ACE); the nontrivial Young sectors extend it.
 ## Quick start
 
 ```python
-from ye3t.couplings import count, plan, compile
+from ye3t.couplings import count, plan, compile_ace_factorized_schedules_by_L
 
 report = count(content=(1, 1, 2), input_Ls=(1, 1, 0), target_L=0)
 labels = report.labels_for_target(0)
 report.require_label(labels[0], target_L=0)
 
 coupler_plan = plan(report)
-compiled = compile(coupler_plan)
+compiled = compile_ace_factorized_schedules_by_L(
+    content=report.content, input_Ls=(1, 1, 0),
+)
+assert compiled.schedules_by_L[0].basis_count == len(labels)
 print(len(labels), coupler_plan.backend, compiled.convention_hash)
 ```
 
 `count` returns the exact multiplicity report, `plan` records the backend and
-count provenance, and `compile` materializes the coefficients and attaches the
-validation report. Every result carries its convention hash and provenance.
-For ordinary density with angular factors, compilation verifies every counted
-path against the compact descriptor coefficients used for evaluation.
+count provenance, and the ACE compiler builds a factorized coefficient
+schedule with a validation report. Every result carries its convention hash
+and provenance. Generic full angular typed-orbit matrix assembly is a bounded
+dense reference that requires explicit opt-in for tests and comparisons.
 The pages under `docs/` walk through fixed-content couplers, pure rotation and
 pure permutation cases, validation reports, execution plans, and the native
 runtime.
@@ -170,14 +173,32 @@ Each script in `examples/` shows its editable `cfg_ye3t` dictionary; run it
 with `python examples/<name>.py`. The fixed-content count and coefficient
 examples read top-to-bottom through `YE3TRepresentation.from_config(...)`,
 `representation.count_fixed_content(...)`, and, for coefficients,
-`ye3t.couplings.plan(report)` and `compile(plan)`. Older examples retain a
-`run_*` function while they migrate. `examples/README.md` describes them in
+`ye3t.couplings.plan(report)` and the applicable factorized compiler. The specialized catalogues
+and benchmarks retain `run_*` functions for their multi-case workflows.
+`examples/README.md` describes them in
 full.
 
 - `coupling_multiplicity_counts.py`: use the public representation object to
   count valid fixed-content coupling labels through `ye3t.couplings.count`.
 - `coupling_coefficient_materialization.py`: plan and compile coupling
-  coefficients through `ye3t.couplings.plan` and `ye3t.couplings.compile`.
+  coefficients through `ye3t.couplings.plan` and
+  `ye3t.couplings.compile_ace_factorized_schedules_by_L`.
+- `symmetric_count_formula.py`: compare the symmetric GE-PI count formula
+  with all-output-`L` YE3T compiler counts for one fixed content.
+- `symmetric_density_factors.py`: apply a symmetric scalar coupler to supplied
+  density multiplets, independent of their radial basis.
+- `user_supplied_factors.py`: couple supplied ordered tensor factors in a
+  nontrivial Young sector using every factorized multiplicity route,
+  with full tableau and `L=1` magnetic output.
+- `symmetric_external_factors.py` and `antisymmetric_external_factors.py`:
+  evaluate arbitrary-`L` one-dimensional Young sectors using repeated-block
+  occupation and exterior contractions.
+- `cauchy_supplied_density.py`: compile and apply a nontrivial local Cauchy
+  path to role-resolved densities.
+- `ordered_role_cauchy_factors.py`: compile and evaluate every role-resolved
+  Cauchy coordinate with a nontrivial global Young parent.
+- `tagged_cauchy_linear_coordinates.py`: compile the scalar tagged-Cauchy
+  physical coordinates matched to the `ye3t-methods` rank-four linear fit.
 - `compile_scalar_ace_lammps_plans.py`: compile scalar ACE coordinates and
   execution plans for `ye3t-lammps`.
 - `exact_full_primitive_catalog.py`: compare exact Young/rotation primitive

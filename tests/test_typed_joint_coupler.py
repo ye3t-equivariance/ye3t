@@ -2,6 +2,347 @@ import numpy as np
 import pytest
 
 
+@pytest.mark.parametrize(
+    "content,input_Ls,target,output_L",
+    (
+        ((1, 1, 2), (1, 1, 1), "young:2,1", 1),
+        ((1, 1, 2), (1, 1, 1), "trivial", 1),
+        ((1, 1, 2), (1, 1, 1), "antisymmetric", 1),
+        ((1, 1, 1), (2, 2, 2), "young:2,1", 2),
+        ((1, 2, 3), (1, 1, 1), "trivial", 1),
+        ((1, 2, 3), (1, 1, 1), "antisymmetric", 1),
+        ((1, 2, 3), (1, 1, 1), "young:2,1", 1),
+        ((1, 1, 2, 2), (1, 1, 1, 1), "young:2,2", 0),
+        ((1, 1, 2), (0, 1, 1), "young:2,1", 0),
+    ),
+)
+def test_complete_factorized_typed_values_match_dense_reference(
+    content, input_Ls, target, output_L
+):
+    import torch
+    from ye3t.couplings import compile as compile_coupling
+    from ye3t.couplings import plan
+
+    request = {
+        "content": content, "input_Ls": input_Ls, "target_L": output_L,
+        "target_permutation": target, "carrier": "Phi",
+    }
+    coupling_plan = plan(**request)
+    factorized = compile_coupling(
+        coupling_plan, subduction_materialization_backend="exact"
+    )
+    dense = compile_coupling(
+        coupling_plan, subduction_materialization_backend="exact",
+        allow_dense_reference=True,
+    )
+    table = factorized.coupler.factorized_coefficient_tables[0]
+    assert table["kind"] == "typed_joint_factorized_v1"
+    if content == (1, 2, 3) and target == "young:2,1":
+        assert {row["young_copy"] for row in table["alpha_bindings"]} >= {0, 1}
+    if content == (1, 1, 2, 2):
+        assert any(row["block_partitions"] == ((1, 1), (1, 1))
+                   for row in table["alpha_bindings"])
+    assert not factorized.coupler.sparse_coefficient_tables
+    assert len(factorized.coupler.alpha_labels()) == len(
+        coupling_plan.validation_report["alpha_bindings"]
+    )
+    matrix = torch.as_tensor(
+        np.asarray(dense.coupler.sparse_coefficient_matrix(), dtype=float),
+        dtype=torch.complex128,
+    )
+    canonical = tuple(torch.tensor(
+        [complex((factor + 1) * (m + 2) / 7, (factor - m) / 9)
+         for m in range(-ell, ell + 1)], dtype=torch.complex128
+    ) for factor, ell in enumerate(input_Ls))
+    cosets = (table["coset_representatives"]
+              if table["coset_representatives"] is not None
+              else dense.coupler.sparse_coefficient_tables[0]["coset_representatives"])
+    for rep in cosets[:min(3, len(cosets))]:
+        moved = tuple(canonical[index] for index in rep)
+        moved_types = tuple((content[index], input_Ls[index]) for index in rep)
+        coset = next(index for index, candidate in enumerate(cosets)
+                     if all(moved_types[candidate[position]] ==
+                            (content[position], input_Ls[position])
+                            for position in range(len(content))))
+        ordered = tuple(moved[index] for index in cosets[coset])
+        raw = ordered[0]
+        for value in ordered[1:]:
+            raw = torch.kron(raw, value)
+        orbit = torch.zeros(matrix.shape[0], dtype=torch.complex128)
+        orbit[coset * raw.numel():(coset + 1) * raw.numel()] = raw
+        expected = orbit @ matrix
+        actual = factorized.coupler.evaluate_factorized_factors_torch(
+            moved, factor_types=moved_types
+        )
+        assert tuple(actual.shape) == (
+            len(coupling_plan.validation_report["alpha_bindings"]),
+            len(dense.coupler.subduction_maps[0].source.tensor.target_tableaux),
+            2 * output_L + 1,
+        )
+        torch.testing.assert_close(actual.reshape(-1), expected,
+                                   rtol=1e-11, atol=1e-11)
+
+
+@pytest.mark.parametrize("target", ("trivial", "antisymmetric", "young:2,1"))
+def test_bound_factorized_runtime_reuses_constants_and_preserves_gradients(target):
+    import torch
+    from ye3t.couplings import compile as compile_coupling
+    from ye3t.couplings import plan
+
+    coupler = compile_coupling(plan(
+        content=(1, 1, 2), input_Ls=(1, 1, 1), target_L=1,
+        target_permutation=target, carrier="Phi",
+    )).coupler
+    factors = torch.tensor([
+        [0.2 + 0.1j, -0.4 + 0.3j, 0.5 - 0.2j],
+        [-0.3 + 0.6j, 0.7 - 0.1j, 0.1 + 0.4j],
+        [0.8 - 0.5j, 0.2 + 0.3j, -0.6 + 0.1j],
+    ], dtype=torch.complex128, requires_grad=True)
+    bound = coupler.bind_factorized_factors_torch(
+        dtype=factors.dtype, device=factors.device,
+    )
+    unbound = coupler.evaluate_factorized_factors_torch(factors)
+    actual = bound.evaluate(factors)
+    torch.testing.assert_close(actual, unbound, atol=1e-12, rtol=1e-12)
+    seed = torch.ones_like(actual)
+    grad_bound = torch.autograd.grad(actual, factors, seed, retain_graph=True)[0]
+    grad_unbound = torch.autograd.grad(unbound, factors, seed)[0]
+    torch.testing.assert_close(grad_bound, grad_unbound,
+                               atol=1e-12, rtol=1e-12)
+    with pytest.raises(ValueError, match="Bound factorized tensors"):
+        bound.evaluate(factors.to(torch.complex64))
+
+
+def test_complete_typed_factorization_respects_o3_parity():
+    import torch
+    from ye3t.couplings import compile as compile_coupling
+    from ye3t.couplings import plan
+
+    request = {
+        "content": (1, 1, 2), "metadata": {"input_Ls": (0, 1, 0)},
+        "target_rotation": {"L_R": 1, "group": "O3", "parity": "odd"},
+        "target_permutation": "young:2,1", "carrier": "Phi",
+    }
+    coupler = compile_coupling(plan(request)).coupler
+    factors = (
+        torch.tensor([0.2], dtype=torch.complex128),
+        torch.tensor([-0.3, 0.7, 0.1], dtype=torch.complex128),
+        torch.tensor([0.8], dtype=torch.complex128),
+    )
+    original = coupler.evaluate_factorized_factors_torch(factors)
+    inverted = coupler.evaluate_factorized_factors_torch(
+        (factors[0], -factors[1], factors[2])
+    )
+    torch.testing.assert_close(inverted, -original, atol=1e-12, rtol=1e-12)
+    request["target_rotation"] = {"L_R": 1, "group": "O3", "parity": "even"}
+    with pytest.raises(ValueError, match="parity"):
+        plan(request)
+
+
+def test_factorized_typed_stably_groups_noncanonical_repeated_factor_word():
+    import torch
+    from ye3t.couplings import compile as compile_coupling
+    from ye3t.couplings import plan
+
+    request = plan(
+        content=(1, 2, 1), input_Ls=(1, 1, 1), target_L=1,
+        target_permutation="young:2,1", carrier="Phi",
+    )
+    reordered = compile_coupling(request, subduction_materialization_backend="exact")
+    grouped_plan = plan(
+        content=(1, 1, 2), input_Ls=(1, 1, 1), target_L=1,
+        target_permutation="young:2,1", carrier="Phi",
+    )
+    grouped = compile_coupling(grouped_plan, subduction_materialization_backend="exact")
+    dense = compile_coupling(
+        grouped_plan, subduction_materialization_backend="exact",
+        allow_dense_reference=True,
+    )
+    factors = torch.tensor(
+        [[0.3, 0.1, -0.4], [-0.2, 0.8, 0.5], [0.7, -0.1, 0.2]],
+        dtype=torch.complex128,
+    )
+    torch.testing.assert_close(
+        reordered.coupler.evaluate_factorized_factors_torch(factors),
+        grouped.coupler.evaluate_factorized_factors_torch(
+            factors, factor_types=((1, 1), (2, 1), (1, 1))),
+        atol=1e-12, rtol=1e-12,
+    )
+    table = reordered.coupler.factorized_coefficient_tables[0]
+    word = ((1, 1), (2, 1), (1, 1))
+    canonical = ((1, 1), (1, 1), (2, 1))
+    coset = next(index for index, rep in enumerate(table["coset_representatives"])
+                 if all(word[rep[position]] == canonical[position]
+                        for position in range(3)))
+    ordered = factors[list(table["coset_representatives"][coset])]
+    raw = torch.kron(torch.kron(ordered[0], ordered[1]), ordered[2])
+    matrix = torch.as_tensor(
+        np.asarray(dense.coupler.sparse_coefficient_matrix(), dtype=float),
+        dtype=torch.complex128,
+    )
+    orbit = torch.zeros(matrix.shape[0], dtype=torch.complex128)
+    orbit[coset * raw.numel():(coset + 1) * raw.numel()] = raw
+    torch.testing.assert_close(
+        reordered.coupler.evaluate_factorized_factors_torch(factors).reshape(-1),
+        orbit @ matrix, atol=1e-12, rtol=1e-12,
+    )
+
+
+@pytest.mark.parametrize(
+    "target,expected_strategy",
+    (("trivial", "symmetric_occupation"),
+     ("antisymmetric", "antisymmetric_wedge")),
+)
+def test_repeated_block_factorized_batch_and_second_derivatives(
+    target, expected_strategy
+):
+    import torch
+    from ye3t.couplings import compile as compile_coupling
+    from ye3t.couplings import plan
+
+    compiled = compile_coupling(
+        plan(content=(1, 1, 2), input_Ls=(1, 1, 1), target_L=1,
+             target_permutation=target, carrier="Phi"),
+        subduction_materialization_backend="exact",
+    )
+    coupler = compiled.coupler
+    table = coupler.factorized_coefficient_tables[0]
+    assert expected_strategy in {
+        row["strategy"] for row in table["local_tables"]
+    }
+    factors = torch.tensor(
+        [[[0.4, -0.7, 0.9], [0.2, 0.5, -0.1], [0.8, -0.3, 0.6]],
+         [[-0.5, 0.1, 0.3], [0.6, 0.7, -0.4], [0.2, 0.4, 0.8]]],
+        dtype=torch.float64, requires_grad=True,
+    )
+    batched = coupler.evaluate_factorized_factors_torch(factors)
+    stacked = torch.stack([
+        coupler.evaluate_factorized_factors_torch(row) for row in factors
+    ])
+    torch.testing.assert_close(batched, stacked, atol=1e-12, rtol=1e-12)
+    assert batched.shape == (2, len(table["alpha_bindings"]), 1, 3)
+    assert torch.autograd.gradcheck(
+        coupler.evaluate_factorized_factors_torch, (factors,),
+        atol=1e-6, rtol=1e-5,
+    )
+    assert torch.autograd.gradgradcheck(
+        coupler.evaluate_factorized_factors_torch, (factors,),
+        atol=1e-6, rtol=1e-5,
+    )
+
+
+def test_general_schur_block_factorized_batch_and_second_derivatives():
+    import torch
+    from ye3t.couplings import compile as compile_coupling
+    from ye3t.couplings import plan
+
+    coupler = compile_coupling(
+        plan(content=(1, 1, 1), input_Ls=(2, 2, 2), target_L=2,
+             target_permutation="young:2,1", carrier="Phi"),
+        subduction_materialization_backend="exact",
+    ).coupler
+    table = coupler.factorized_coefficient_tables[0]
+    assert any(row["strategy"] == "general_sparse" for row in table["local_tables"])
+    factors = torch.tensor(
+        [[[0.1, 0.4, -0.3, 0.7, -0.5],
+          [0.2, -0.1, 0.6, 0.3, 0.8],
+          [-0.4, 0.9, 0.2, -0.3, 0.5]]],
+        dtype=torch.float64, requires_grad=True,
+    )
+    batched = coupler.evaluate_factorized_factors_torch(factors)
+    single = coupler.evaluate_factorized_factors_torch(factors[0])
+    torch.testing.assert_close(batched[0], single, atol=1e-12, rtol=1e-12)
+    assert batched.shape == (1, len(table["alpha_bindings"]), 2, 5)
+    assert torch.autograd.gradcheck(
+        coupler.evaluate_factorized_factors_torch, (factors,),
+        atol=1e-6, rtol=1e-5,
+    )
+    assert torch.autograd.gradgradcheck(
+        coupler.evaluate_factorized_factors_torch, (factors,),
+        atol=1e-6, rtol=1e-5,
+    )
+
+
+def test_factorized_sign_vanishes_for_identical_ordered_factors():
+    import torch
+    from ye3t.couplings import compile as compile_coupling
+    from ye3t.couplings import plan
+
+    coupler = compile_coupling(
+        plan(content=(1, 1, 2), input_Ls=(1, 1, 1), target_L=1,
+             target_permutation="antisymmetric", carrier="Phi"),
+        subduction_materialization_backend="exact",
+    ).coupler
+    factors = torch.tensor(
+        [[0.4, 0.2, -0.5], [0.4, 0.2, -0.5], [0.1, 0.8, -0.3]],
+        dtype=torch.float64,
+    )
+    result = coupler.evaluate_factorized_factors_torch(factors)
+    torch.testing.assert_close(result, torch.zeros_like(result),
+                               atol=1e-12, rtol=0)
+
+
+@pytest.mark.parametrize("target", ("trivial", "antisymmetric", "young:2,1"))
+def test_factorized_complex_analysis_has_correct_wirtinger_gradients(target):
+    import torch
+    from ye3t.couplings import compile as compile_coupling
+    from ye3t.couplings import plan
+
+    coupler = compile_coupling(
+        plan(content=(1, 1, 2), input_Ls=(1, 1, 1), target_L=1,
+             target_permutation=target, carrier="Phi"),
+        subduction_materialization_backend="exact",
+    ).coupler
+    real = torch.tensor([[0.4, -0.2, 0.9], [0.2, 0.5, -0.1],
+                         [-0.7, 0.3, 0.6]], dtype=torch.float64)
+    factors = torch.complex(real, 0.17 * real.flip(-1)).requires_grad_()
+
+    def squared_norm(values):
+        output = coupler.evaluate_factorized_factors_torch(values)
+        return output.abs().square().sum()
+
+    assert torch.autograd.gradcheck(squared_norm, (factors,),
+                                    atol=1e-6, rtol=1e-5)
+
+
+@pytest.mark.parametrize(
+    "content,input_Ls,target,output_L,selector",
+    (
+        ((1, 2, 3), (1, 1, 1), "young:2,1", 1,
+         lambda row: row["young_copy"] == 1),
+        ((1, 1, 1), (2, 2, 2), "young:2,1", 2,
+         lambda row: row["block_partitions"] == ((2, 1),)),
+    ),
+)
+def test_selected_multiplicity_supports_every_local_and_young_copy(
+    content, input_Ls, target, output_L, selector
+):
+    import torch
+    from ye3t.couplings import compile as compile_coupling
+    from ye3t.couplings import plan
+
+    full_plan = plan(content=content, input_Ls=input_Ls, target_L=output_L,
+                     target_permutation=target, carrier="Phi")
+    binding = next(row for row in full_plan.validation_report["alpha_bindings"]
+                   if selector(row))
+    selected = compile_coupling(full_plan.select_multiplicity(binding["alpha_index"]),
+                                subduction_materialization_backend="exact")
+    full = compile_coupling(full_plan, subduction_materialization_backend="exact")
+    factors = torch.tensor(
+        [[complex((factor + 1) * (m + 2) / 7, (factor - m) / 11)
+          for m in range(-ell, ell + 1)]
+         for factor, ell in enumerate(input_Ls)],
+        dtype=torch.complex128,
+    )
+    actual = selected.coupler.evaluate_factorized_factors_torch(factors)
+    expected = full.coupler.evaluate_factorized_factors_torch(factors)[
+        binding["alpha_index"]:binding["alpha_index"] + 1]
+    torch.testing.assert_close(actual, expected, atol=1e-12, rtol=1e-12)
+    assert selected.coupler.factorized_coefficient_tables[0]["selected_full_alpha"] == (
+        binding["alpha_index"]
+    )
+
+
 def test_selected_typed_route_matches_full_dense_reference_on_two_cosets():
     import torch
     from ye3t.couplings import compile as compile_coupling
@@ -16,22 +357,29 @@ def test_selected_typed_route_matches_full_dense_reference_on_two_cosets():
     selected = next(row["alpha_index"] for row in bindings
                     if row["block_partitions"] == ((2,), (1,))
                     and row["block_Ls"] == (0, 1))
-    selected_plan = plan(**request, metadata={"selected_typed_alpha": selected})
+    selected_plan = full_plan.select_multiplicity(selected)
+    assert selected_plan.spec.metadata["selected_typed_alpha"] == selected
+    with pytest.raises(ValueError, match="valid fixed-content multiplicity"):
+        full_plan.select_multiplicity(len(bindings))
     selected_compiled = compile_coupling(
         selected_plan, subduction_materialization_backend="exact"
     )
     full_compiled = compile_coupling(
-        full_plan, subduction_materialization_backend="exact"
+        full_plan, subduction_materialization_backend="exact",
+        allow_dense_reference=True,
     )
     assert selected_compiled.certificate.passed
     assert selected_compiled.validation_report["selected_subspace_of_full_typed_inventory"]
     table = selected_compiled.coupler.factorized_coefficient_tables[0]
+    assert table["kind"] == "typed_joint_factorized_v1"
     assert selected_compiled.coupler.cache_key() == table["hash"]
     assert selected_compiled.coupler.component_inventory()["all_component_families_present"]
     assert selected_compiled.coupler.certificate.checks["exact_projector_compared"]
     assert table["selected_full_alpha"] == selected
     assert table["full_target_count"] == len(bindings)
     assert len(selected_compiled.coupler.alpha_labels()) == 1
+    assert selected_compiled.coupler.alpha_labels()[0]["alpha_index"] == 0
+    assert selected_compiled.coupler.alpha_labels()[0]["full_alpha_index"] == selected
     matrix = torch.as_tensor(
         np.asarray(full_compiled.coupler.sparse_coefficient_matrix(), dtype=float),
         dtype=torch.complex128,
@@ -56,8 +404,8 @@ def test_selected_typed_route_matches_full_dense_reference_on_two_cosets():
         magnetic_dim = 3
         start = selected * tableau_dim * magnetic_dim
         expected = (orbit @ matrix)[start:start + tableau_dim * magnetic_dim]
-        actual = selected_compiled.coupler.evaluate_selected_typed_slots_torch(
-            moved, slot_types=types
+        actual = selected_compiled.coupler.evaluate_factorized_factors_torch(
+            moved, factor_types=types
         ).reshape(-1)
         torch.testing.assert_close(actual, expected, rtol=1e-12, atol=1e-12)
     incompatible = plan(**request, metadata={
@@ -72,6 +420,7 @@ def test_rank_eight_selected_phi_route_has_full_axes_and_s8_o3_covariance(tmp_pa
     import torch
     from ye3t.couplings import compile as compile_coupling
     from ye3t.couplings import plan
+    from ye3t.global_coupler import _compile_selected_typed_joint_route
     from ye3t.representations.projectors import (
         adjacent_transposition_representation_matrix_numeric,
     )
@@ -104,19 +453,14 @@ def test_rank_eight_selected_phi_route_has_full_axes_and_s8_o3_covariance(tmp_pa
     assert compiled.coupler.cache_key() == table["hash"]
     assert compiled.coupler.component_inventory()["all_component_families_present"]
     assert not compiled.coupler.certificate.checks["exact_projector_compared"]
-    assert any("no exact rank-eight projector" in item
-               for item in compiled.coupler.certificate.limitations)
+    assert table["kind"] == "typed_joint_factorized_v1"
     assert table["selected_full_alpha"] == 12
     assert table["shape"] == (70 * 3**8, 14 * 5)
     assert not compiled.coupler.sparse_coefficient_tables
-    for values in (*table["local_matrices"], table["young_matrix"],
-                   table["angular_matrix"]):
-        matrix = np.asarray(values)
-        np.testing.assert_allclose(matrix.T @ matrix,
-                                   np.eye(matrix.shape[1]), atol=1e-9)
-        projector = matrix @ matrix.T
-        np.testing.assert_allclose(projector @ projector, projector, atol=1e-9)
-        np.testing.assert_allclose(np.trace(projector), matrix.shape[1], atol=1e-9)
+    young = np.asarray(table["young_tables"][0]["values"])
+    np.testing.assert_allclose(young.T @ young, np.eye(young.shape[1]), atol=1e-9)
+    projector = young @ young.T
+    np.testing.assert_allclose(projector @ projector, projector, atol=1e-9)
     restrictions = np.vstack([
         adjacent_transposition_representation_matrix_numeric((4, 4), index)
         - np.eye(14)
@@ -126,7 +470,7 @@ def test_rank_eight_selected_phi_route_has_full_axes_and_s8_o3_covariance(tmp_pa
     assert singular[-1] < 1e-10 and singular[-2] > 1e-5
     invariant = right[-1]
     coset_identity = table["coset_representatives"].index(tuple(range(8)))
-    compiled_invariant = np.asarray(table["young_matrix"])[coset_identity]
+    compiled_invariant = young[coset_identity]
     compiled_invariant /= np.linalg.norm(compiled_invariant)
     np.testing.assert_allclose(
         np.outer(compiled_invariant, compiled_invariant),
@@ -138,14 +482,24 @@ def test_rank_eight_selected_phi_route_has_full_axes_and_s8_o3_covariance(tmp_pa
           0.2 * row + 0.1j] for row in range(8)], dtype=torch.complex128
     )
     types = tuple((content, 1) for content in request["content"])
-    base = compiled.coupler.evaluate_selected_typed_slots_torch(slots)
+    base = compiled.coupler.evaluate_factorized_factors_torch(slots)
     assert tuple(base.shape) == (1, 14, 5)
+    legacy_reference = _compile_selected_typed_joint_route(
+        compiled.coupler.spec, (1,) * 8,
+        subduction_materialization_backend="numeric_cached",
+        subduction_cache_dir=tmp_path,
+        subduction_constraint_backend="auto",
+    )
+    torch.testing.assert_close(
+        base, legacy_reference.evaluate_selected_typed_slots_torch(slots),
+        atol=1e-9, rtol=1e-9,
+    )
     base = base[0]
     for index in range(7):
         order = list(range(8))
         order[index], order[index + 1] = order[index + 1], order[index]
-        moved = compiled.coupler.evaluate_selected_typed_slots_torch(
-            slots[order], slot_types=tuple(types[position] for position in order)
+        moved = compiled.coupler.evaluate_factorized_factors_torch(
+            slots[order], factor_types=tuple(types[position] for position in order)
         )[0]
         action = torch.as_tensor(
             adjacent_transposition_representation_matrix_numeric((4, 4), index),
@@ -155,8 +509,8 @@ def test_rank_eight_selected_phi_route_has_full_axes_and_s8_o3_covariance(tmp_pa
     first = list(range(8))
     first[0], first[1] = first[1], first[0]
     first[1], first[2] = first[2], first[1]
-    cycled = compiled.coupler.evaluate_selected_typed_slots_torch(
-        slots[first], slot_types=tuple(types[position] for position in first)
+    cycled = compiled.coupler.evaluate_factorized_factors_torch(
+        slots[first], factor_types=tuple(types[position] for position in first)
     )[0]
     d0 = torch.as_tensor(
         adjacent_transposition_representation_matrix_numeric((4, 4), 0),
@@ -177,11 +531,11 @@ def test_rank_eight_selected_phi_route_has_full_axes_and_s8_o3_covariance(tmp_pa
          np.exp(-1j * angle), np.exp(-2j * angle)],
         dtype=torch.complex128,
     ))
-    rotated = compiled.coupler.evaluate_selected_typed_slots_torch(
+    rotated = compiled.coupler.evaluate_factorized_factors_torch(
         slots @ spin_one.T
     )[0]
     torch.testing.assert_close(rotated, base @ spin_two.T, rtol=1e-8, atol=1e-8)
-    inverted = compiled.coupler.evaluate_selected_typed_slots_torch(-slots)[0]
+    inverted = compiled.coupler.evaluate_factorized_factors_torch(-slots)[0]
     torch.testing.assert_close(inverted, base, rtol=1e-12, atol=1e-12)
 
 
@@ -229,6 +583,303 @@ def test_count_plan_binds_crossed_local_young_and_angular_copies():
     )
 
 
+def test_large_symmetric_block_compiles_in_occupation_space():
+    from itertools import product
+
+    from ye3t.couplings.factorized_typed import (
+        _sparse_local_map, _symmetric_occupation_local_map,
+    )
+
+    size, ell, block_L = 5, 1, 3
+    compact, copies = _symmetric_occupation_local_map(size, ell, block_L)
+    assert copies == 1
+    assert len(compact) < 3 ** size
+    compact_lookup = {(state, column): coefficient
+                      for state, column, coefficient in compact}
+    reference, reference_copies, tableau_dim = _sparse_local_map(
+        size, ell, (size,), block_L
+    )
+    assert (reference_copies, tableau_dim) == (1, 1)
+    reference_lookup = {(state, column): float(coefficient)
+                        for state, column, coefficient in reference}
+    rows = tuple(product(range(-ell, ell + 1), repeat=size))
+    direct_matrix = np.asarray([
+        [compact_lookup.get((tuple(sorted(row)), column), 0.0)
+         for column in range(2 * block_L + 1)]
+        for row in rows
+    ])
+    reference_matrix = np.asarray([
+        [reference_lookup.get((row, column), 0.0)
+         for column in range(2 * block_L + 1)]
+        for row in rows
+    ])
+    np.testing.assert_allclose(direct_matrix.T @ direct_matrix,
+                               np.eye(2 * block_L + 1), atol=1e-12)
+    np.testing.assert_allclose(direct_matrix @ direct_matrix.T,
+                               reference_matrix @ reference_matrix.T, atol=1e-12)
+
+
+def test_compact_symmetric_copy_gauge_matches_established_coefficients():
+    from itertools import product
+
+    from ye3t.couplings.factorized_typed import (
+        _sparse_local_map, _symmetric_occupation_local_map,
+    )
+
+    size, ell, block_L = 3, 3, 3
+    compact, copies = _symmetric_occupation_local_map(size, ell, block_L)
+    reference, reference_copies, tableau_dim = _sparse_local_map(
+        size, ell, (size,), block_L
+    )
+    assert (copies, reference_copies, tableau_dim) == (2, 2, 1)
+    compact_lookup = {(state, column): value for state, column, value in compact}
+    reference_lookup = {(state, column): float(value)
+                        for state, column, value in reference}
+    rows = tuple(product(range(-ell, ell + 1), repeat=size))
+    width = copies * (2 * block_L + 1)
+    direct = np.asarray([
+        [compact_lookup.get((tuple(sorted(row)), column), 0.0)
+         for column in range(width)] for row in rows
+    ])
+    old = np.asarray([
+        [reference_lookup.get((row, column), 0.0)
+         for column in range(width)] for row in rows
+    ])
+    np.testing.assert_allclose(direct.T @ direct, np.eye(width), atol=1e-11)
+    np.testing.assert_allclose(direct @ direct.T, old @ old.T, atol=1e-11)
+    transforms = []
+    for M in range(-block_L, block_L + 1):
+        indices = [copy * (2 * block_L + 1) + M + block_L
+                   for copy in range(copies)]
+        transforms.append(direct[:, indices].T @ old[:, indices])
+    for transform in transforms[1:]:
+        np.testing.assert_allclose(transform, transforms[0], atol=1e-11)
+    np.testing.assert_allclose(transforms[0] @ transforms[0].T,
+                               np.eye(copies), atol=1e-11)
+    np.testing.assert_allclose(transforms[0], np.eye(copies), atol=1e-11)
+    np.testing.assert_allclose(direct, old, atol=1e-11)
+
+
+def test_large_antisymmetric_block_compiles_in_exterior_space():
+    from itertools import product
+
+    from ye3t.couplings.factorized_typed import (
+        _antisymmetric_wedge_local_map, _sparse_local_map,
+    )
+
+    size, ell, block_L = 3, 2, 3
+    compact, copies = _antisymmetric_wedge_local_map(size, ell, block_L)
+    assert copies == 1
+    assert len(compact) < (2 * ell + 1) ** size
+    compact_lookup = {(state, column): coefficient
+                      for state, column, coefficient in compact}
+    reference, reference_copies, tableau_dim = _sparse_local_map(
+        size, ell, (1,) * size, block_L
+    )
+    assert (reference_copies, tableau_dim) == (1, 1)
+    reference_lookup = {(state, column): float(coefficient)
+                        for state, column, coefficient in reference}
+    rows = tuple(product(range(-ell, ell + 1), repeat=size))
+    direct_matrix = np.asarray([
+        [((-1) ** sum(row[left] > row[right]
+                     for left in range(size) for right in range(left + 1, size)))
+         * compact_lookup.get((tuple(sorted(row)), column), 0.0)
+         for column in range(2 * block_L + 1)]
+        for row in rows
+    ])
+    reference_matrix = np.asarray([
+        [reference_lookup.get((row, column), 0.0)
+         for column in range(2 * block_L + 1)]
+        for row in rows
+    ])
+    np.testing.assert_allclose(direct_matrix.T @ direct_matrix,
+                               np.eye(2 * block_L + 1), atol=1e-12)
+    np.testing.assert_allclose(direct_matrix @ direct_matrix.T,
+                               reference_matrix @ reference_matrix.T, atol=1e-12)
+
+
+def test_compact_exterior_two_copy_gauge_matches_established_coefficients():
+    from itertools import product
+
+    from ye3t.couplings.factorized_typed import (
+        _antisymmetric_wedge_local_map, _sparse_local_map,
+    )
+
+    size, ell, block_L = 3, 4, 3
+    compact, copies = _antisymmetric_wedge_local_map(size, ell, block_L)
+    reference, reference_copies, tableau_dim = _sparse_local_map(
+        size, ell, (1,) * size, block_L
+    )
+    assert (copies, reference_copies, tableau_dim) == (2, 2, 1)
+    compact_lookup = {(state, column): coefficient
+                      for state, column, coefficient in compact}
+    reference_lookup = {(state, column): float(coefficient)
+                        for state, column, coefficient in reference}
+    rows = tuple(product(range(-ell, ell + 1), repeat=size))
+    width = copies * (2 * block_L + 1)
+    direct = np.asarray([
+        [((-1) ** sum(row[left] > row[right]
+                     for left in range(size) for right in range(left + 1, size)))
+         * compact_lookup.get((tuple(sorted(row)), column), 0.0)
+         for column in range(width)] for row in rows
+    ])
+    old = np.asarray([
+        [reference_lookup.get((row, column), 0.0)
+         for column in range(width)] for row in rows
+    ])
+    np.testing.assert_allclose(direct, old, atol=1e-11)
+
+
+@pytest.mark.parametrize("target,L,strategy", (
+    ("trivial", 3, "symmetric_occupation"),
+    ("antisymmetric", 3, "antisymmetric_wedge"),
+))
+def test_compact_character_compiler_matches_exact_dense_reference(target, L, strategy):
+    import torch
+    from ye3t.couplings import compile as compile_coupling
+    from ye3t.couplings import plan
+
+    request = plan(content=(1, 1, 1), input_Ls=(2, 2, 2), target_L=L,
+                   target_permutation=target, carrier="Phi")
+    fast = compile_coupling(request, subduction_materialization_backend="exact")
+    dense = compile_coupling(request, subduction_materialization_backend="exact",
+                             allow_dense_reference=True)
+    table = fast.coupler.factorized_coefficient_tables[0]
+    assert table["local_tables"][0]["strategy"] == strategy
+    factors = torch.tensor(
+        [[0.2, -0.1, 0.4, 0.8, -0.5],
+         [0.3, 0.7, -0.2, 0.1, 0.9],
+         [-0.8, 0.6, 0.1, 0.5, -0.3]],
+        dtype=torch.complex128, requires_grad=True,
+    )
+    raw = torch.kron(torch.kron(factors[0], factors[1]), factors[2])
+    matrix = torch.as_tensor(
+        np.asarray(dense.coupler.sparse_coefficient_matrix(), dtype=float),
+        dtype=torch.complex128,
+    )
+    actual = fast.coupler.evaluate_factorized_factors_torch(factors).reshape(-1)
+    expected = raw @ matrix
+    torch.testing.assert_close(actual, expected, atol=1e-12, rtol=1e-12)
+    bound = fast.coupler.bind_factorized_factors_torch(
+        dtype=factors.dtype, device=factors.device,
+    )
+    batched = factors.unsqueeze(0).expand(5, -1, -1)
+    torch.testing.assert_close(
+        bound.evaluate(batched),
+        fast.coupler.evaluate_factorized_factors_torch(batched),
+        atol=1e-12, rtol=1e-12,
+    )
+    seed = torch.arange(1, actual.numel() + 1, dtype=torch.float64).to(actual.dtype)
+    fast_gradient = torch.autograd.grad(actual, factors, seed, retain_graph=True)[0]
+    dense_gradient = torch.autograd.grad(expected, factors, seed)[0]
+    torch.testing.assert_close(fast_gradient, dense_gradient,
+                               atol=1e-12, rtol=1e-12)
+
+
+def test_rank_eight_extreme_young_fast_paths_avoid_joint_matrix():
+    import torch
+    from ye3t.couplings import compile as compile_coupling
+    from ye3t.couplings import count, plan
+
+    for parent, ell, L, strategy, sign in (
+        ("trivial", 1, 0, "symmetric_occupation", 1),
+        ("antisymmetric", 4, 4, "antisymmetric_wedge", -1),
+    ):
+        report = count(
+            content=(1,) * 8, input_Ls=(ell,) * 8, target_L=L,
+            target_permutation=parent, carrier="Phi",
+        )
+        compiled = compile_coupling(plan(report))
+        coupler = compiled.coupler
+        assert report.counts_by_target[L] == 1
+        assert not coupler.sparse_coefficient_tables
+        assert coupler.factorized_coefficient_tables[0]["local_tables"][0][
+            "strategy"] == strategy
+        factors = torch.randn(2, 8, 2 * ell + 1, dtype=torch.float64)
+        runtime = coupler.bind_factorized_factors_torch(
+            dtype=factors.dtype, device=factors.device,
+        )
+        base = runtime.evaluate(factors)
+        moved = runtime.evaluate(factors[:, [1, 0, 2, 3, 4, 5, 6, 7]])
+        assert base.shape == (2, 1, 1, 2 * L + 1)
+        torch.testing.assert_close(moved, sign * base, atol=1e-11, rtol=1e-11)
+
+
+def test_rank_five_general_young_returns_full_multiplicity_axis():
+    import torch
+    from ye3t.couplings import compile as compile_coupling
+    from ye3t.couplings import count, plan
+    from ye3t.representations.projectors import (
+        adjacent_transposition_representation_matrix_numeric,
+    )
+
+    report = count(
+        content=(1, 1, 2, 2, 3), input_Ls=(1, 1, 1, 1, 1),
+        target_L=1, target_permutation="young:3,2", carrier="Phi",
+    )
+    compiled = compile_coupling(plan(report))
+    coupler = compiled.coupler
+    assert not coupler.sparse_coefficient_tables
+    assert len(coupler.factorized_coefficient_tables[0]["routes"]) == (
+        report.counts_by_target[1]
+    )
+    factors = torch.randn(3, 5, 3, dtype=torch.float64)
+    runtime = coupler.bind_factorized_factors_torch(
+        dtype=factors.dtype, device=factors.device,
+    )
+    values = runtime.evaluate(factors)
+    assert values.shape == (3, report.counts_by_target[1], 5, 3)
+    torch.testing.assert_close(
+        values, coupler.evaluate_factorized_factors_torch(factors),
+        atol=1e-12, rtol=1e-12,
+    )
+    moved = runtime.evaluate(factors[:, [1, 0, 2, 3, 4]])
+    action = torch.as_tensor(
+        adjacent_transposition_representation_matrix_numeric((3, 2), 0),
+        dtype=factors.dtype,
+    )
+    torch.testing.assert_close(
+        moved, torch.einsum("tu,...aum->...atm", action, values),
+        atol=1e-11, rtol=1e-11,
+    )
+
+
+def test_bound_factorized_cuda_matches_cpu_values_and_factor_gradients():
+    import torch
+    from ye3t.couplings import compile as compile_coupling
+    from ye3t.couplings import plan
+
+    if not torch.cuda.is_available():
+        pytest.skip("requires GPU")
+    for content, input_Ls, target, L in (
+        ((1, 1, 1), (2, 2, 2), "trivial", 3),
+        ((1, 1, 1), (2, 2, 2), "antisymmetric", 3),
+        ((1, 1, 2), (1, 1, 1), "young:2,1", 1),
+    ):
+        coupler = compile_coupling(plan(
+            content=content, input_Ls=input_Ls, target_L=L,
+            target_permutation=target, carrier="Phi",
+        )).coupler
+        values = torch.randn(4, 3, 2 * input_Ls[0] + 1,
+                             dtype=torch.float64)
+        cpu = values.clone().requires_grad_(True)
+        gpu = values.cuda().requires_grad_(True)
+        cpu_runtime = coupler.bind_factorized_factors_torch(
+            dtype=cpu.dtype, device=cpu.device,
+        )
+        gpu_runtime = coupler.bind_factorized_factors_torch(
+            dtype=gpu.dtype, device=gpu.device,
+        )
+        cpu_output = cpu_runtime.evaluate(cpu)
+        gpu_output = gpu_runtime.evaluate(gpu)
+        torch.testing.assert_close(gpu_output.cpu(), cpu_output,
+                                   atol=1e-11, rtol=1e-11)
+        cpu_gradient = torch.autograd.grad(cpu_output.square().sum(), cpu)[0]
+        gpu_gradient = torch.autograd.grad(gpu_output.square().sum(), gpu)[0]
+        torch.testing.assert_close(gpu_gradient.cpu(), cpu_gradient,
+                                   atol=1e-10, rtol=1e-10)
+
+
 def test_local_repeated_type_two_copy_isometry_and_permutation_projector():
     from ye3t.global_coupler import _typed_local_isometry
 
@@ -270,7 +921,8 @@ def test_typed_joint_exact_compile_has_every_public_copy(
         content=content, input_Ls=input_Ls, target_L=output_L,
         target_permutation=target, carrier="Phi",
     )
-    compiled = compile_coupling(plan(report), subduction_materialization_backend="exact")
+    compiled = compile_coupling(plan(report), subduction_materialization_backend="exact",
+                                allow_dense_reference=True)
     assert compiled.certificate.passed
     assert len(compiled.coupler.alpha_labels()) == expected
     table = compiled.coupler.sparse_coefficient_tables[0]
@@ -297,6 +949,7 @@ def test_mixed_rank_two_global_young_projectors_are_complementary():
                 target_permutation=target, carrier="Phi",
             ),
             subduction_materialization_backend="exact",
+            allow_dense_reference=True,
         )
         matrix = np.asarray(compiled.coupler.sparse_coefficient_matrix(), dtype=float)
         projector = matrix @ matrix.T
@@ -320,6 +973,7 @@ def test_mixed_rank_three_projector_matches_independent_standard_singlet():
             target_permutation="young:(2,1)", carrier="Phi",
         ),
         subduction_materialization_backend="exact",
+        allow_dense_reference=True,
     )
     table = compiled.coupler.sparse_coefficient_tables[0]
     matrix = np.asarray(compiled.coupler.sparse_coefficient_matrix(), dtype=float)
@@ -366,6 +1020,7 @@ def test_mixed_rank_three_compiled_analysis_intertwines_noninvolutive_cycle_and_
             target_permutation="young:(2,1)", carrier="Phi",
         ),
         subduction_materialization_backend="exact",
+        allow_dense_reference=True,
     )
     coupler = compiled.coupler
     table = coupler.sparse_coefficient_tables[0]
@@ -440,6 +1095,7 @@ def test_three_angular_paths_exhaust_independent_spin_one_projector():
             target_permutation="trivial", carrier="Phi",
         ),
         subduction_materialization_backend="exact",
+        allow_dense_reference=True,
     )
     matrix = np.asarray(compiled.coupler.sparse_coefficient_matrix(), dtype=float)
     assert matrix.shape == (162, 9)
@@ -523,6 +1179,7 @@ def test_mixed_joint_sector_projector_is_independent_of_tree_bracketing():
                 tree_schedule=tree,
             ),
             subduction_materialization_backend="exact",
+            allow_dense_reference=True,
         )
         matrix = np.asarray(compiled.coupler.sparse_coefficient_matrix(), dtype=float)
         projectors.append(matrix @ matrix.T)
@@ -539,7 +1196,8 @@ def test_cached_numeric_mixed_joint_projector_matches_exact_reference(tmp_path):
         target_permutation="young:(2,1)", carrier="Phi",
     )
     exact = compile_coupling(
-        report, subduction_materialization_backend="exact"
+        report, subduction_materialization_backend="exact",
+        allow_dense_reference=True,
     )
     numeric = compile_coupling(
         report,
@@ -547,6 +1205,7 @@ def test_cached_numeric_mixed_joint_projector_matches_exact_reference(tmp_path):
         subduction_cache_dir=tmp_path,
         compare_exact_projector=True,
         subduction_exact_reference_max_rank=3,
+        allow_dense_reference=True,
     )
     assert numeric.certificate.passed
     assert numeric.coupler.subduction_maps[0].source.validation.passed
@@ -572,7 +1231,7 @@ def test_cached_numeric_mixed_joint_projector_matches_exact_reference(tmp_path):
     )
 
 
-def test_repeated_typed_block_does_not_advertise_unimplemented_slot_evaluator():
+def test_repeated_typed_block_rejects_legacy_singleton_reference_evaluator():
     import torch
     from ye3t.couplings import compile as compile_coupling
     from ye3t.couplings import count
@@ -587,6 +1246,7 @@ def test_repeated_typed_block_does_not_advertise_unimplemented_slot_evaluator():
             target_permutation="trivial", carrier="Phi",
         ),
         subduction_materialization_backend="exact",
+        allow_dense_reference=True,
     )
     assert compiled.certificate.passed
     report = joint_ye3t_factorized_slot_evaluator_report(compiled.coupler)
@@ -625,6 +1285,7 @@ def test_repeated_typed_block_with_cosets_has_independent_standard_projector():
             target_permutation="young:(2,1)", carrier="Phi",
         ),
         subduction_materialization_backend="exact",
+        allow_dense_reference=True,
     )
     matrix = np.asarray(compiled.coupler.sparse_coefficient_matrix(), dtype=float)
     assert matrix.shape == (27, 2)
@@ -679,6 +1340,7 @@ def test_antisymmetric_local_block_transports_through_nontrivial_cosets():
             target_permutation="young:(2,1)", carrier="Phi",
         ),
         subduction_materialization_backend="exact",
+        allow_dense_reference=True,
     )
     matrix = np.asarray(compiled.coupler.sparse_coefficient_matrix(), dtype=float)
     assert matrix.shape == (27, 6)

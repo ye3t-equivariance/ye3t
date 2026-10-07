@@ -1,4 +1,9 @@
-"""Write coefficient-materialization benchmark artifacts."""
+"""Write bounded coefficient-materialization benchmark artifacts.
+
+The joint Young/O(3) generic case times the dense reference constructor for
+validation and backend comparison. It is not a production descriptor-runtime
+benchmark; use the ACE or Cauchy factorized paths for practical workloads.
+"""
 
 # coefficient_materialization_benchmarks.py
 # Time exact, numeric-cached, and native coefficient materialization for the
@@ -16,7 +21,7 @@ cfg_ye3t = {
     "metadata": {
         "status": "stable",  # Bounded benchmark of the documented materialization backends.
         "name": "coefficient_materialization_benchmarks",
-        "config_schema": "ye3t_example_config_v1",
+        "schema": "ye3t_config_v1",
     },
     "basis": {
         "type": "ACE",
@@ -29,22 +34,25 @@ cfg_ye3t = {
     "runtime": {
         "device": "cpu",
         "timeout_seconds": 300.0,  # Upper bound for the full benchmark set.
+        "benchmark": {
+            "output_dir": str(Path.home() / "ye3t-workflows" / "benchmarks" / "coefficient_materialization"),
+            "repeat": 1,
+            "make_plots": True,
+            "include_optional_external": True,
+        },
     },
     "model": {"type": "none"},  # Coefficient tables only; no fitted model.
     "targets": {"energy": "none"},
     "validation": {"checks": ["coefficient_certificates", "backend_agreement"]},
-    "output_dir": str(Path("examples") / "generated" / "coefficient_materialization_benchmarks"),  # Artifact folder.
-    "repeat": 1,  # Timed repetitions per cold/cache row.
-    "make_plots": True,  # Write transparent-background matplotlib plots when matplotlib is installed.
-    "include_optional_external": True,  # Include external-library comparison placeholders.
 }
 
 
 def run_coefficient_materialization_benchmarks(config=None):
     """Run representative coefficient-materialization benchmarks and write artifacts."""
     settings = merge_workflow_config(cfg_ye3t, config)
-    output_dir = Path(settings.pop("output_dir"))
-    artifact = coefficient_materialization_benchmark_artifacts(output_dir, settings)
+    benchmark = settings["runtime"]["benchmark"]
+    output_dir = Path(benchmark["output_dir"])
+    artifact = coefficient_materialization_benchmark_artifacts(output_dir, benchmark)
     print("coefficient materialization benchmark artifact")
     print("rows:", len(artifact["rows"]))
     print("json:", artifact["files"]["json"])

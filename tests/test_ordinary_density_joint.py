@@ -28,7 +28,8 @@ def test_ordinary_compact_labels_span_the_typed_physical_projector(
     )
     assert len(report.labels_for_target(target_L)) == expected_count
     compiled = compile_coupling(
-        plan(report), subduction_materialization_backend="exact"
+        plan(report), subduction_materialization_backend="exact",
+        allow_dense_reference=True,
     )
     coupler = compiled.coupler
     assert compiled.certificate.passed
@@ -82,7 +83,8 @@ def test_rank_four_compact_copies_require_a_nonunitary_transport():
         target_permutation="trivial", carrier="ACE_density",
     )
     coupler = compile_coupling(
-        report, subduction_materialization_backend="exact"
+        report, subduction_materialization_backend="exact",
+        allow_dense_reference=True,
     ).coupler
     binding = coupler.factorized_coefficient_tables[1]
     transform = np.asarray(binding["copy_transport_real"]) + 1j * np.asarray(
@@ -101,7 +103,8 @@ def test_mixed_rank_two_projector_has_the_normalized_coset_factor():
         target_permutation="trivial", carrier="ACE_density",
     )
     compiled = compile_coupling(
-        report, subduction_materialization_backend="exact"
+        report, subduction_materialization_backend="exact",
+        allow_dense_reference=True,
     )
     typed = np.asarray(
         compiled.coupler.sparse_coefficient_matrix(0), dtype=float
@@ -121,7 +124,8 @@ def test_mixed_rank_three_projector_is_uniform_cosets_times_l1_singlet():
         target_permutation="trivial", carrier="ACE_density",
     )
     compiled = compile_coupling(
-        report, subduction_materialization_backend="exact"
+        report, subduction_materialization_backend="exact",
+        allow_dense_reference=True,
     )
     typed = np.asarray(
         compiled.coupler.sparse_coefficient_matrix(0), dtype=float
@@ -152,7 +156,8 @@ def test_three_angular_paths_match_independent_total_spin_one_projector():
         target_permutation="trivial", carrier="ACE_density",
     )
     compiled = compile_coupling(
-        report, subduction_materialization_backend="exact"
+        report, subduction_materialization_backend="exact",
+        allow_dense_reference=True,
     )
     typed = np.asarray(
         compiled.coupler.sparse_coefficient_matrix(0), dtype=float
@@ -201,12 +206,14 @@ def test_cached_numeric_and_exact_bind_the_same_compact_coefficients(tmp_path):
         target_permutation="trivial", carrier="ACE_density",
     )
     exact = compile_coupling(
-        report, subduction_materialization_backend="exact"
+        report, subduction_materialization_backend="exact",
+        allow_dense_reference=True,
     )
     numeric = compile_coupling(
         report,
         subduction_materialization_backend="numeric_cached",
         subduction_cache_dir=tmp_path,
+        allow_dense_reference=True,
     )
     direct = CompileGlobalYE3TCouplers(
         plan(report).spec, input_Ls=(0, 1, 1, 1),

@@ -1,8 +1,8 @@
-"""Count, plan, and compile one fixed-content YE3T coupling sector.
+"""Count a symmetric ACE sector and compile its factorized coefficients.
 
 Edit the representation and fixed-content inputs below for another sector.
-Coefficient materialization is explicit because it can cost much more than a
-count or backend plan at larger ranks.
+The schedule couples already adapted repeated blocks and is the practical
+ACE coefficient route. The bounded full typed-orbit matrix is a test reference.
 """
 
 from ye3t import YE3TRepresentation, couplings
@@ -27,7 +27,7 @@ cfg_ye3t = {
         "input_Ls": [1, 1, 2, 2],
         "carrier": "ACE_density",
     },
-    "runtime": {"subduction_materialization_backend": "numeric_cached"},
+    "runtime": {"constructor_backend": "auto"},
     "model": {}, "targets": {}, "validation": {},
 }
 
@@ -37,23 +37,23 @@ report = representation.count_fixed_content(
     carrier=cfg_ye3t["basis"]["carrier"],
 )
 compiler_plan = couplings.plan(report)
-compiled = couplings.compile(
-    compiler_plan,
-    subduction_materialization_backend=cfg_ye3t["runtime"]["subduction_materialization_backend"],
+compiled = couplings.compile_ace_factorized_schedules_by_L(
+    content=report.content,
+    input_Ls=cfg_ye3t["basis"]["input_Ls"],
+    constructor_backend=cfg_ye3t["runtime"]["constructor_backend"],
 )
-certificate = compiled.certificate
+schedule = compiled.schedules_by_L[representation.L]
+assert schedule.basis_count == report.counts_by_target[representation.L]
 print("coupling count source: ye3t.couplings.count")
 print("coupling plan source: ye3t.couplings.plan")
-print("coefficient source: ye3t.couplings.compile")
+print("coefficient source: ye3t.couplings.compile_ace_factorized_schedules_by_L")
 print("representation:", representation)
 print("content:", tuple(compiled.content))
-print("carrier:", compiled.carrier)
 print("target:", compiled.target)
 print("exact count:", report.counts_by_target[representation.L])
 print("planned backend:", compiler_plan.backend)
 print("compiled backend:", compiled.backend)
-print("backend plan selected:", compiled.validation_report.get("backend_plan_selected"))
+print("factorized basis count:", schedule.basis_count)
+print("factorized term count:", schedule.term_count)
 print("convention hash:", compiled.convention_hash)
 print("validation passed:", bool(compiled.validation_report.get("passed", False)))
-print("certificate passed:", bool(certificate.passed))
-print("coefficient hash:", certificate.coefficient_hash)
