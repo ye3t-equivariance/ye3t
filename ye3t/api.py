@@ -122,6 +122,7 @@ from .spec import (
     validate_runtime_status,
     validate_tree_schedule,
 )
+from .representation_config import YE3TRepresentation
 from .global_coupler import (
     AngularCGMap,
     AssembleJointYoungE3Coupler,
@@ -319,6 +320,7 @@ def __getattr__(name):
 
 
 __all__ = [
+    "YE3TRepresentation",
     "YE3TAPI",
     "DEFAULT_LOCAL_COEFFICIENT_BENCHMARK_TARGET_SECONDS",
     "infer_repeated_channel_blocks",

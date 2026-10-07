@@ -4,6 +4,19 @@ import numpy as np
 import pytest
 
 
+def test_readme_count_plan_compile_quickstart():
+    from ye3t.couplings import compile as compile_coupling
+    from ye3t.couplings import count, plan
+
+    report = count(content=(1, 1, 2), input_Ls=(1, 1, 0), target_L=0)
+    labels = report.labels_for_target(0)
+    assert len(labels) == 1
+    report.require_label(labels[0], target_L=0)
+    compiled = compile_coupling(plan(report))
+    assert compiled.certificate.passed
+    assert compiled.convention_hash
+
+
 def test_couplings_count_plan_compile_provenance_and_reject_invalid_label():
     from ye3t.core.labels import CompactLabel
     from ye3t.couplings import CompiledCoupler, CouplerPlan, MultiplicityReport

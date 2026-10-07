@@ -36,6 +36,7 @@ def __getattr__(name):
 
 
 __all__ = [
+    "YE3TRepresentation",
     "AngularIrrep",
     "FermionWedgeSectorSpec",
     "CoupledIrrepLabel",

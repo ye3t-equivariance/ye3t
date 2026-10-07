@@ -7,15 +7,17 @@ from math import factorial
 
 import pytest
 
-from ye3t.couplings import compile, count, plan, tagged_cauchy_carriers_request
+from ye3t.couplings import compile, count, plan, tagged_cauchy_carriers_request, tagged_cauchy_image_request
 from ye3t.couplings.tagged_cauchy_carriers import (
-    _edge_marginal_rows, _edge_physical_row, _project_tag_rows, _tag_irrep_matrix,
-    tagged_cauchy_carrier_schedule,
+    _edge_marginal_rows, _edge_physical_row, _pooled_physical_row, _project_tag_rows, _tag_irrep_matrix,
+    tagged_cauchy_carrier_schedule, tagged_cauchy_carrier_physical_image_plan,
+    tagged_cauchy_carrier_physical_image_plan,
     validate_tagged_cauchy_carriers,
 )
 from ye3t.couplings import lifted_cauchy_scalar as scalar
 from ye3t._optional_sympy import sp
 from ye3t.couplings.lifted_cauchy_scalar import _exact_scalar_from_payload
+from ye3t.couplings.tagged_cauchy_general import _exact_pivot_image
 from ye3t.representations.projectors import compose_permutations
 
 
@@ -41,6 +43,64 @@ def test_rank_two_tag_odd_is_formal_trivial_with_internal_sign(rank2):
         assert tuple(label["block_kappas"][0]) == ((1, 1) if label["target_L"] == 1 else (2,))
     assert rank2["certificate"]["orthogonalization"] == "none"
     assert rank2["certificate"]["source_image_reconstruction"] == "exact_all_M"
+
+
+def test_exact_pooled_image_removes_tag_odd_and_reconstructs_all_m(rank2):
+    image = tagged_cauchy_carrier_physical_image_plan((rank2,))
+    labels = {record["label"]["coordinate_id"]: record["label"]
+              for record in rank2["descriptors"]}
+    assert image["complete_multiplet_reconstruction"]
+    assert image["source_hashes"] == (rank2["self_hash"],)
+    assert len(image["candidate_coordinate_ids"]) == 3
+    assert len(image["selected_coordinate_ids"]) == 2
+    assert {labels[key]["target_L"] for key in image["selected_coordinate_ids"]} == {0, 2}
+    odd = next(index for index, key in enumerate(image["candidate_coordinate_ids"])
+               if labels[key]["tag_character"] == -1)
+    assert image["reconstruction"][odd] == ()
+    with pytest.raises(ValueError, match="coordinate IDs must be unique"):
+        tagged_cauchy_carrier_physical_image_plan((rank2, rank2))
+    odd_only = compile(tagged_cauchy_carriers_request(
+        [_channel(1)], [2], tag_count=2, target_Ls=[1]))
+    empty = tagged_cauchy_carrier_physical_image_plan((odd_only,))
+    assert empty["selected_coordinate_ids"] == ()
+    assert empty["reconstruction"] == ((),)
+
+
+def test_exact_pooled_image_selects_across_tag_counts():
+    sources = tuple(compile(tagged_cauchy_carriers_request(
+        [_channel(1)], [2], tag_count=tag_count, target_Ls=[0, 1, 2]))
+        for tag_count in (0, 1, 2))
+    image = tagged_cauchy_carrier_physical_image_plan(sources)
+    assert len(image["candidate_coordinate_ids"]) == sum(
+        source["multiplet_count"] for source in sources)
+    assert image["selected_coordinate_ids"]
+    assert len(image["selected_coordinate_ids"]) < len(image["candidate_coordinate_ids"])
+    assert image["complete_multiplet_reconstruction"]
+
+
+def test_rank_two_scalar_image_has_the_existing_exact_L0_span():
+    sources = tuple(compile(tagged_cauchy_carriers_request(
+        [_channel(0)], [2], tag_count=tags, target_Ls=[0])) for tags in (0, 1, 2))
+    carrier_rows = [_pooled_physical_row(record["real_terms_by_component"][0],
+                    source["request"]["channels"], source["request"]["tag_count"])
+                    for source in sources for record in source["descriptors"]]
+    carrier_pivots, _ = _exact_pivot_image(carrier_rows)
+    scalar = compile(plan(count(tagged_cauchy_image_request(species=["Ni"], catalogue={
+        "nmax_per_rank": {2: 1}, "lmax_per_rank": {2: 0},
+        "source_block_partitions_by_rank": {2: [[2]]},
+        "tag_counts_by_rank": {2: [0, 1, 2]},
+        "max_features_per_rank": {2: 4}, "max_records_per_rank": 8,
+    }))))
+    scalar_rows = []
+    for row in scalar.payload["image_rows"]:
+        scalar_rows.append({tuple((generator["neighbor_species"], generator["source_family_id"],
+                                   generator["support_id"], generator["q"], generator["l"],
+                                   generator["m"]) for generator in term["generators"]):
+                            _exact_scalar_from_payload(term["coefficient"])
+                            for term in row})
+    assert len(carrier_pivots) == len(scalar_rows) == 2
+    joint_pivots, _ = _exact_pivot_image(scalar_rows + carrier_rows)
+    assert len(joint_pivots) == 2
 
 
 def test_complete_tag_swap_and_bound_content_are_exact(rank2):
@@ -157,6 +217,8 @@ def test_three_tags_resolve_complete_right_s3_irreps():
     assert schedule["output_dimension"] == 6
     assert schedule["tag_action_certificate"]["passed"]
     assert tuple(schedule["tag_action_certificate"]["partitions"]) == ((1, 1, 1), (2, 1), (3,))
+    with pytest.raises(ValueError, match="0, 1, or 2 tags"):
+        tagged_cauchy_carrier_physical_image_plan((compiled,))
     for descriptor in compiled["descriptors"]:
         label = descriptor["label"]
         assert len(descriptor["real_terms_by_component"]) == label["tag_tableau_count"]
@@ -277,6 +339,57 @@ def test_catalogue_shared_caps_and_partition_limit_match_expanded_request(tmp_pa
         "ranks": [1], "nmax": 1, "lmax": 0}, species=["Ni"])
     cached = compile(one_rank, cache_dir=tmp_path)
     assert cached["self_hash"] == compile(one_rank, cache_dir=tmp_path)["self_hash"]
+
+
+def test_catalogue_uses_distinct_tag_count_sets_at_each_rank():
+    cfg = {"ranks": [1, 2], "nmax_per_rank": {1: 1, 2: 1},
+           "lmax_per_rank": {1: 1, 2: 1},
+           "source_block_partitions_by_rank": {1: [[1]], 2: [[2]]},
+           "tag_counts_by_rank": {1: [0, 1], 2: [2]},
+           "input_Lmax": 1}
+    request = tagged_cauchy_carriers_request(catalogue=cfg, species=["Ni"])
+    assert request["catalogue"]["tag_counts_by_rank"] == {
+        "1": (0, 1), "2": (2,)}
+    report = count(request)
+    assert {(row["rank"], row["request"]["tag_count"])
+            for row in report["candidate_records"]} == {(1, 0), (1, 1), (2, 2)}
+    with pytest.raises(ValueError, match="alternative inputs"):
+        tagged_cauchy_carriers_request(catalogue={
+            **cfg, "tag_counts": [0, 1]}, species=["Ni"])
+    with pytest.raises(ValueError, match="cover each rank"):
+        tagged_cauchy_carriers_request(catalogue={
+            **cfg, "tag_counts_by_rank": {1: [0]}}, species=["Ni"])
+    with pytest.raises(ValueError, match="unique counts"):
+        tagged_cauchy_carriers_request(catalogue={
+            **cfg, "tag_counts_by_rank": {1: [0, 0], 2: [2]}}, species=["Ni"])
+    with pytest.raises(ValueError, match="duplicate normalized rank keys"):
+        tagged_cauchy_carriers_request(catalogue={
+            **cfg, "tag_counts_by_rank": {1: [0], "1": [1], 2: [2]}}, species=["Ni"])
+
+
+def test_joint_physical_image_can_reconstruct_across_tensor_ranks():
+    request = tagged_cauchy_carriers_request(catalogue={
+        "ranks": [1, 2], "nmax_per_rank": {1: 3, 2: 1},
+        "lmax_per_rank": {1: 1, 2: 1},
+        "source_block_partitions_by_rank": {1: [[1]], 2: [[1, 1]]},
+        "tag_counts_by_rank": {1: [0], 2: [0, 2]}, "input_Lmax": 1,
+    }, species=["Ni"])
+    compiled = compile(plan(count(request)))
+    image = tagged_cauchy_carrier_physical_image_plan(compiled["sources"])
+    assert image["complete_multiplet_reconstruction"]
+    assert image["rank_policy"] == "joint_physical_image_after_rankwise_compilation"
+    assert image["permutation_policy"] == "rank_specific_formal_parents_not_a_common_S_N_action"
+    assert set(image["candidate_tensor_orders"]) == {1, 2}
+    assert set(image["selected_tensor_orders"]) == {1, 2}
+    lookup = dict(zip(image["candidate_coordinate_ids"],
+                      image["candidate_tensor_orders"], strict=True))
+    cross_rank = [
+        (old, lookup[term["coordinate_id"]])
+        for old, row in zip(image["candidate_tensor_orders"],
+                            image["reconstruction"], strict=True)
+        for term in row if old != lookup[term["coordinate_id"]]
+    ]
+    assert (2, 1) in cross_rank
 
 
 def test_requested_scalar_template_uses_exact_cosets_without_full_projector(monkeypatch):

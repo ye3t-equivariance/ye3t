@@ -9,7 +9,7 @@ Package boundary
 ``ye3t`` owns representation theory, coupling labels, coupling plans,
 coefficient materialization, validation reports, and compiler-side fast-path
 plans. It must not absorb atomistic datasets, ASE calculators, fitting loops,
-or model-training workflows from ``ye3t-ace``.
+or model-training workflows from ``ye3t-methods``.
 
 Migration records
 -----------------
@@ -71,7 +71,7 @@ Feature: Rank-graded message-passing compiler core
   Keep / move / deprecate / delete: keep
   Replacement: none
   Backward compatibility: stable compiler-side representation logic
-  Notes: ``ye3t-ace`` message paths take labels and coupling plans from this
+  Notes: ``ye3t-methods`` message paths take labels and coupling plans from this
   compiler rather than enumerating them locally.
 
 Feature: Visualization helpers

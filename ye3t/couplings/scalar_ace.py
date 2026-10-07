@@ -16,7 +16,7 @@ _EXACT_MEMBERSHIP_RANK_LIMIT = 8
 _DEFAULT_MAXIMUM_COORDINATE_BYTES = 128 * 1024 * 1024
 
 
-def _structured_block_certificate(label, *, constructive_only=False):
+def _structured_block_certificate(label, *, constructive_only=False, target_L=0):
     from ye3t.core import couplings as core_couplings
 
     structured = core_couplings._structured_label_from_collapsed_basis_key(label)
@@ -82,8 +82,8 @@ def _structured_block_certificate(label, *, constructive_only=False):
         raise TypeError("Unsupported structured compact-label node.")
 
     root_L, blocks = visit(structured)
-    if root_L != 0 or int(label.L_R) != 0:
-        raise ValueError("Scalar ACE coordinate compilation requires L_R=0.")
+    if root_L != int(target_L) or int(label.L_R) != int(target_L):
+        raise ValueError("Structured ACE coordinate target L does not match the label.")
 
     expected = []
     start = 0
@@ -792,4 +792,309 @@ def compile_scalar_ace_coordinate(
     }
 
 
-__all__ = ["compile_scalar_ace_coordinate"]
+def compile_ace_coordinate(
+    label,
+    *,
+    maximum_unique_monomials=250000,
+    maximum_term_contributions=2000000,
+    maximum_exact_symbolic_bytes=_DEFAULT_MAXIMUM_COORDINATE_BYTES,
+    maximum_coordinate_bytes=_DEFAULT_MAXIMUM_COORDINATE_BYTES,
+):
+    """Compile every magnetic component of a compact ordinary ACE label.
+
+    The returned coefficients use the unphased complex-magnetic convention.
+    Real-tesseral conversion is the responsibility of the materializer.
+    """
+    from ye3t.core import couplings as core_couplings
+    from ye3t.core.couplings import CoefficientTable
+    from ye3t.couplings import blockwise_symmetric_power_product_plan, count
+
+    label = normalize_compact_label(label)
+    rank = int(label.rank)
+    target_L = int(label.L_R)
+    if target_L == 0:
+        return compile_scalar_ace_coordinate(
+            label,
+            maximum_unique_monomials=maximum_unique_monomials,
+            maximum_term_contributions=maximum_term_contributions,
+            maximum_exact_symbolic_bytes=maximum_exact_symbolic_bytes,
+            maximum_coordinate_bytes=maximum_coordinate_bytes,
+        )
+    if rank > _EXACT_MEMBERSHIP_RANK_LIMIT:
+        raise ValueError("Covariant ACE coordinates require exact rank-through-eight membership.")
+    limits = (
+        int(maximum_unique_monomials),
+        int(maximum_term_contributions),
+        int(maximum_exact_symbolic_bytes),
+        int(maximum_coordinate_bytes),
+    )
+    if min(limits) <= 0:
+        raise ValueError("ACE coordinate resource limits must be positive.")
+    maximum_unique_monomials, maximum_term_contributions = limits[:2]
+    maximum_exact_symbolic_bytes, maximum_coordinate_bytes = limits[2:]
+    structured, structural_blocks = _structured_block_certificate(
+        label, target_L=target_L,
+    )
+    report = count(
+        content=tuple(label.n_tuple),
+        input_Ls=tuple(label.l_tuple),
+        target_L=target_L,
+        target_permutation="trivial",
+        carrier="ACE_density",
+        tree_schedule=str(label.tree_type),
+    )
+    report.require_label(label, target_L=target_L)
+    if (
+        str(report.carrier) != "ACE_density"
+        or str(report.target.get("permutation")) != "trivial"
+        or tuple(report.validation_report.get("input_Ls", ())) != tuple(label.l_tuple)
+    ):
+        raise ValueError("ACE coordinate membership report does not match the label.")
+    magnetic_components = tuple(range(-target_L, target_L + 1))
+    schedule = core_couplings.generate_factorized_coefficient_schedule_for_labels(
+        (label,), M_R_values=magnetic_components,
+        coeff_tol=1.0e-14, coeff_dtype=np.complex128,
+        magnetic_dtype=np.int16, constructor_backend="python",
+    )
+    if (
+        int(schedule.rank) != rank
+        or int(schedule.L_R) != target_L
+        or int(schedule.basis_count) != 1
+        or int(schedule.component_count) != len(magnetic_components)
+        or tuple(int(value) for value in schedule.component_M_R) != magnetic_components
+        or any(int(value) != 0 for value in schedule.component_label_index)
+        or tuple(schedule.n_tuple) != tuple(label.n_tuple)
+        or tuple(schedule.l_tuple) != tuple(label.l_tuple)
+        or str(schedule.tree_type) != str(label.tree_type)
+        or tuple(schedule.angular_keys) != (str(label.angular_key()),)
+        or tuple(schedule.basis_keys) != (tuple(label.basis_key),)
+    ):
+        raise ValueError("ACE factorized schedule does not preserve the label and full M axis.")
+    specs = tuple(dict(spec) for spec in schedule.block_specs[0])
+    if tuple(_block_signature(spec) for spec in specs) != tuple(
+        _block_signature(spec) for spec in structural_blocks
+    ):
+        raise ValueError("ACE schedule does not bind the requested block multiplicities.")
+    block_plans = tuple(
+        _compile_block_plan(
+            spec,
+            coefficient_materialization="exact",
+            maximum_exact_symbolic_bytes=maximum_exact_symbolic_bytes,
+        )
+        for spec in specs
+    )
+    offsets = []
+    channel_count = 0
+    whole_blocks = []
+    for spec in specs:
+        width = 2 * int(spec["l"]) + 1
+        offsets.append(channel_count)
+        whole_blocks.append({
+            **spec,
+            "channel_indices": tuple(range(channel_count, channel_count + width)),
+        })
+        channel_count += width
+    parity = -1 if sum(int(value) for value in label.l_tuple) % 2 else 1
+    blockwise_plan = blockwise_symmetric_power_product_plan(
+        tuple({
+            "descriptor_index": component,
+            "rank": rank,
+            "component_index": component,
+            "blocks": tuple(whole_blocks),
+            "schedule_term_count": int(schedule.term_count),
+            "schedule_component_count": int(schedule.component_count),
+            "schedule_block_count": int(schedule.block_count),
+        } for component in range(len(magnetic_components))),
+        descriptor_count=len(magnetic_components),
+        channel_count=channel_count,
+        carrier="ACE_density",
+        target={
+            "permutation": "trivial",
+            "rotation": {
+                "L_R": target_L,
+                "M_R_values": magnetic_components,
+                "parity": parity,
+            },
+        },
+        factor_basis="A",
+        normalization_convention="none",
+        validation_report={"scope": "ordinary_ace_coordinate"},
+        provenance={"api": "ye3t.couplings.compile_ace_coordinate"},
+    )
+    rows = []
+    coefficients = []
+    component_offsets = [0]
+    contribution_count = 0
+    for component, M in enumerate(magnetic_components):
+        accumulated = {}
+        outer_m, outer_coefficients = schedule.component_terms(component)
+        if len(outer_m) == 0:
+            raise ValueError("ACE factorized schedule has an empty magnetic component.")
+        for magnetic_values, outer_coefficient in zip(
+            outer_m.tolist(), outer_coefficients.tolist()
+        ):
+            options_by_block = []
+            for spec, block_plan, magnetic in zip(specs, block_plans, magnetic_values):
+                width_L = int(spec["Lambda"] if spec["kind"] == "sym" else spec["l"])
+                options_by_block.append(
+                    _block_component_terms(spec, block_plan, int(magnetic) + width_L)
+                )
+            contribution_count += math.prod(len(options) for options in options_by_block)
+            if contribution_count > maximum_term_contributions:
+                raise MemoryError("ACE coordinate exceeds maximum_term_contributions.")
+            for selected in itertools.product(*options_by_block):
+                exponents = [0] * channel_count
+                coefficient = complex(outer_coefficient)
+                for block_index, (local_exponents, local_coefficient) in enumerate(selected):
+                    coefficient *= complex(local_coefficient)
+                    start = offsets[block_index]
+                    for local_index, exponent in enumerate(local_exponents):
+                        exponents[start + local_index] += int(exponent)
+                key = tuple(exponents)
+                if key not in accumulated:
+                    next_count = len(rows) + len(accumulated) + 1
+                    if next_count > maximum_unique_monomials:
+                        raise MemoryError("ACE coordinate exceeds maximum_unique_monomials.")
+                    minimum_array_bytes = next_count * (
+                        rank * np.dtype(np.int16).itemsize
+                        + np.dtype(np.complex128).itemsize
+                    )
+                    if minimum_array_bytes > maximum_coordinate_bytes:
+                        raise MemoryError(
+                            "ACE coordinate exceeds maximum_coordinate_bytes during collection."
+                        )
+                    accumulated[key] = coefficient
+                else:
+                    accumulated[key] += coefficient
+        terms = tuple(
+            (exponents, coefficient)
+            for exponents, coefficient in sorted(accumulated.items())
+            if abs(coefficient) > 1.0e-13
+        )
+        if not terms:
+            raise ValueError("ACE coordinate collection has an empty magnetic component.")
+        for exponents, coefficient in terms:
+            magnetic = []
+            for block_index, spec in enumerate(specs):
+                start = offsets[block_index]
+                width = 2 * int(spec["l"]) + 1
+                for local_index, exponent in enumerate(exponents[start : start + width]):
+                    magnetic.extend([local_index - int(spec["l"])] * int(exponent))
+            if (
+                len(magnetic) != rank
+                or sum(magnetic) != M
+                or any(abs(value) > int(l) for value, l in zip(magnetic, label.l_tuple))
+                or not math.isfinite(coefficient.real)
+                or not math.isfinite(coefficient.imag)
+            ):
+                raise ValueError("Collected ACE monomial violates its magnetic component.")
+            rows.append(tuple(magnetic))
+            coefficients.append(coefficient)
+        component_offsets.append(len(rows))
+    magnetic_array = np.asarray(rows, dtype=np.int16).reshape(-1, rank)
+    coefficient_array = np.asarray(coefficients, dtype=np.complex128)
+    coordinate_bytes = int(magnetic_array.nbytes + coefficient_array.nbytes)
+    if coordinate_bytes > maximum_coordinate_bytes:
+        raise MemoryError("ACE coordinate exceeds maximum_coordinate_bytes.")
+    table = CoefficientTable(
+        rank=rank, L_R=target_L,
+        n_tuple=tuple(label.n_tuple), l_tuple=tuple(label.l_tuple),
+        tree_type=str(label.tree_type),
+        angular_keys=(str(label.angular_key()),),
+        basis_keys=(tuple(label.basis_key),),
+        M_R_values=np.asarray(magnetic_components, dtype=np.int64),
+        component_label_index=np.zeros(len(magnetic_components), dtype=np.int64),
+        component_M_R=np.asarray(magnetic_components, dtype=np.int64),
+        component_offsets=np.asarray(component_offsets, dtype=np.int64),
+        magnetic_tuples=magnetic_array, coeffs=coefficient_array,
+    )
+    by_M = {}
+    for component, M in enumerate(magnetic_components):
+        component_rows, component_coefficients = table.component_terms(component)
+        by_M[M] = {
+            tuple(int(value) for value in row): complex(coefficient)
+            for row, coefficient in zip(component_rows, component_coefficients)
+        }
+    def canonical_monomial(row):
+        result = []
+        start = 0
+        for spec in specs:
+            stop = start + int(spec.get("k_b", 1))
+            result.extend(sorted(int(value) for value in row[start:stop]))
+            start = stop
+        return tuple(result)
+
+    sign = -1 if (sum(int(value) for value in label.l_tuple) - target_L) % 2 else 1
+    sign_residual = max(
+        abs(by_M[-M].get(canonical_monomial(-np.asarray(row)), 0.0)
+            - sign * coefficient.conjugate())
+        for M, component in by_M.items()
+        for row, coefficient in component.items()
+    )
+    if sign_residual > 1.0e-10:
+        raise ValueError(f"ACE coordinate magnetic sign reversal failed: {sign_residual:.3g}.")
+    ladder_residual = 0.0
+    for M in magnetic_components[:-1]:
+        raised = {}
+        for row, coefficient in by_M[M].items():
+            for slot, (m, l) in enumerate(zip(row, label.l_tuple)):
+                if int(m) >= int(l):
+                    continue
+                shifted = list(row)
+                shifted[slot] += 1
+                shifted = canonical_monomial(shifted)
+                factor = math.sqrt((int(l) - int(m)) * (int(l) + int(m) + 1))
+                raised[shifted] = raised.get(shifted, 0.0) + factor * coefficient
+        target_factor = math.sqrt((target_L - M) * (target_L + M + 1))
+        expected = {row: target_factor * coefficient
+                    for row, coefficient in by_M[M + 1].items()}
+        ladder_residual = max(ladder_residual, max(
+            (abs(raised.get(row, 0.0) - expected.get(row, 0.0))
+             for row in raised.keys() | expected.keys()), default=0.0,
+        ))
+    coefficient_scale = max(abs(value) for component in by_M.values()
+                            for value in component.values())
+    ladder_relative_residual = ladder_residual / coefficient_scale
+    if ladder_relative_residual > 1.0e-10:
+        raise ValueError(
+            f"ACE coordinate violates SO(3) ladder covariance: {ladder_relative_residual:.3g}."
+        )
+    certificate = {
+        "schema": "ye3t_ace_coordinate_certificate_v1",
+        "passed": True,
+        "carrier": "ACE_density",
+        "label": label.to_dict(),
+        "target_L": target_L,
+        "M_R_values": magnetic_components,
+        "natural_parity": parity,
+        "membership_count": int(report.counts_by_target[target_L]),
+        "membership_convention_hash": str(report.convention_hash),
+        "blockwise_plan_convention_hash": str(blockwise_plan.convention_hash),
+        "basis_convention": "complex_magnetic_unphased",
+        "coefficient_materialization": "exact_symbolic_blocks_binary64_collected",
+        "component_offsets": tuple(component_offsets),
+        "term_count": len(rows),
+        "coordinate_bytes": coordinate_bytes,
+        "magnetic_sign_reversal_residual": float(sign_residual),
+        "so3_ladder_relative_residual": float(ladder_relative_residual),
+        "classification": "APPROXIMATE_NUMERICALLY_CERTIFIED",
+        "coefficient_sha256": _stable_hash({
+            "label": label.to_dict(),
+            "M_R_values": magnetic_components,
+            "component_offsets": tuple(component_offsets),
+            "rows": tuple(rows),
+            "coefficients": tuple(coefficients),
+        }),
+    }
+    certificate["certificate_sha256"] = _stable_hash(certificate)
+    return {
+        "label": label,
+        "coefficient_table": table,
+        "factorized_schedule": schedule,
+        "block_plans": block_plans,
+        "blockwise_plan": blockwise_plan,
+        "certificate": certificate,
+    }
+
+
+__all__ = ["compile_scalar_ace_coordinate", "compile_ace_coordinate"]

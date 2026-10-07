@@ -4,7 +4,7 @@
 equivariant bases. Given the content of a product of atomic (or other)
 factors, it enumerates the valid permutation- and rotation-symmetry-adapted
 labels, counts their multiplicities exactly, materializes the coupling
-coefficients with a validation certificate, and lowers the result to
+coefficients with a validation report, and lowers the result to
 execution plans that run on its native CPU/CUDA runtime or through optional
 accelerator kernels. The ordinary symmetric sector of that basis is the
 linear Atomic Cluster Expansion (ACE); the nontrivial Young sectors extend it.
@@ -14,7 +14,7 @@ linear Atomic Cluster Expansion (ACE); the nontrivial Young sectors extend it.
 ```python
 from ye3t.couplings import count, plan, compile
 
-report = count(content=(1, 1, 1), input_Ls=(0, 1, 1), target_L=0)
+report = count(content=(1, 1, 2), input_Ls=(1, 1, 0), target_L=0)
 labels = report.labels_for_target(0)
 report.require_label(labels[0], target_L=0)
 
@@ -26,6 +26,8 @@ print(len(labels), coupler_plan.backend, compiled.convention_hash)
 `count` returns the exact multiplicity report, `plan` records the backend and
 count provenance, and `compile` materializes the coefficients and attaches the
 validation report. Every result carries its convention hash and provenance.
+For ordinary density with angular factors, compilation verifies every counted
+path against the compact descriptor coefficients used for evaluation.
 The pages under `docs/` walk through fixed-content couplers, pure rotation and
 pure permutation cases, validation reports, execution plans, and the native
 runtime.
@@ -35,10 +37,12 @@ runtime.
 - [ye3t-lammps](https://github.com/ye3t-equivariance/ye3t-lammps) provides
   LAMMPS inference (`pair_style ye3t` and `ye3t/kk`) for models compiled with
   this package.
-- `ye3t-ace` is the separate application package for descriptor
-  construction, model fitting, and ASE calculators. It is not yet publicly
-  released; the documentation here mentions it where it consumes the `ye3t`
-  API.
+- [ye3t-methods](https://github.com/ye3t-equivariance/ye3t-methods) is the
+  application package for descriptor construction, model fitting, and ASE
+  calculators. Its configured flow starts with this package's
+  `YE3TRepresentation`, then constructs `ye3t_methods.Basis` and optionally
+  `ye3t_methods.LinearModel`. The retained `ye3t_ace` module path is a
+  compatibility implementation inside `ye3t-methods`.
 
 ## Requirements
 
@@ -122,12 +126,19 @@ describes the options and the install layout.
 | `YE3T_BUILD_CUDA_EXTENSION` | `auto` (default), `1` to require the CUDA build, `0` for CPU only |
 | `YE3T_SKIP_CPP_EXTENSION=1` | install without compiling the native extensions |
 | `YE3T_CACHE_DIR` | root directory of the on-disk artifact cache |
-| `YE3T_CACHE_MODE` | `auto` (default), `read_only`, `rebuild`, or `off` |
+| `YE3T_CACHE_MODE` | `auto` (default), `read_only`, `refresh` (`rebuild` alias), or `off` |
 | `YE3T_CACHE_VERIFY` | `hash` (default) or `full` verification of cached artifacts |
 | `YE3T_DISABLE_TRITON=1` | disable the Triton coupling kernels in `ye3t.backends`; the native/PyTorch paths are used instead |
 | `YE3T_DISABLE_OPENEQUIVARIANCE=1` | skip the OpenEquivariance bridge in automatic packed-CG dispatch (an explicit `backend="openequivariance"` still uses it) |
 | `YE3T_REQUIRE_NATIVE=1` | raise instead of falling back to reference implementations |
 | `YE3T_DEBUG_TRITON=1` | verbose Triton diagnostics |
+
+Inspect local cache envelopes with `python -m ye3t.cache inspect`. Prune a
+selected invalid entry with
+`python -m ye3t.cache prune --entry artifacts/TYPE/HASH.json --apply`;
+omit `--apply` for a preview. Valid entries require `--include-valid`. These commands check
+JSON envelope integrity only; they do not reprove coupling mathematics or
+prune application-owned NPZ sidecars.
 
 ## Package layout
 
@@ -155,12 +166,16 @@ describes the options and the install layout.
 
 ## Examples
 
-Each script in `examples/` shows its editable `cfg_ye3t` dictionary and one
-`run_*` function; run it with `python examples/<name>.py`. `examples/README.md`
-describes them in full.
+Each script in `examples/` shows its editable `cfg_ye3t` dictionary; run it
+with `python examples/<name>.py`. The fixed-content count and coefficient
+examples read top-to-bottom through `YE3TRepresentation.from_config(...)`,
+`representation.count_fixed_content(...)`, and, for coefficients,
+`ye3t.couplings.plan(report)` and `compile(plan)`. Older examples retain a
+`run_*` function while they migrate. `examples/README.md` describes them in
+full.
 
-- `coupling_multiplicity_counts.py`: count valid fixed-content coupling
-  labels through `ye3t.couplings.count`.
+- `coupling_multiplicity_counts.py`: use the public representation object to
+  count valid fixed-content coupling labels through `ye3t.couplings.count`.
 - `coupling_coefficient_materialization.py`: plan and compile coupling
   coefficients through `ye3t.couplings.plan` and `ye3t.couplings.compile`.
 - `compile_scalar_ace_lammps_plans.py`: compile scalar ACE coordinates and

@@ -33,6 +33,6 @@ Produces: a support matrix for compiler and runtime choices
 Package boundary:
 
 - ``ye3t`` owns this table for representation and coupling backends.
-- ``ye3t-ace`` owns atomistic descriptor, calculator, fitting, and ASE-facing
+- ``ye3t-methods`` owns atomistic descriptor, calculator, fitting, and ASE-facing
   runtime capability.
 

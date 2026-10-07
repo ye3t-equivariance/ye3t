@@ -35,9 +35,9 @@ explicitly absent; formatters must not invent Young, LR, tableau, parity, or
 convention data from a compact legacy tuple alone.
 
 ACE descriptors add chemistry, radial channels, target angular momentum, and
-optionally charge axes. Those workflows live in ``ye3t-ace`` (separate
-package, not yet public); the core package only enumerates the exact
-representation-side labels.
+optionally charge axes. Physical materialization and models live in the
+separate ``ye3t-methods`` package; ``ye3t`` supplies their exact
+representation-side labels and coupling coefficients.
 
 Coupling Namespace
 ------------------
@@ -49,7 +49,7 @@ coefficients should be requested through ``ye3t.couplings``:
 
    from ye3t.couplings import count, plan, compile
 
-   report = count(content=(1, 1, 1), input_Ls=(0, 1, 1), target_L=0)
+   report = count(content=(1, 1, 2), input_Ls=(1, 1, 0), target_L=0)
    labels = report.labels_for_target(0)
    report.require_label(labels[0], target_L=0)
 
@@ -60,5 +60,35 @@ coefficients should be requested through ``ye3t.couplings``:
 the backend choice and count provenance before coefficient construction.
 ``compile`` materializes coefficients through the selected lower-level YE3T
 compiler and attaches the validation certificate.  Downstream packages such as
-``ye3t-ace`` may materialize descriptors from these reports and plans, but
+``ye3t-methods`` may materialize descriptors from these reports and plans, but
 they should not decide locally which symmetry labels are valid.
+
+For nonzero angular factors in ordinary density, ``compile`` checks the full
+``(content, l)`` block decomposition and every angular path. It projects the
+globally trivial Young output onto commutative density and verifies that the
+compact ACE labels span the same physical space with one common change of
+basis across all magnetic components. The compact coefficients remain the
+evaluation and serialization convention. This joint reference compilation
+has a declared dense-table size cap; ``count`` and ``plan`` do not materialize
+the table.
+
+For an ordinary commutative ACE-density label, ``compile_ace_coordinate``
+materializes all ``2L+1`` complex-magnetic components. It composes the
+compiler's symmetric-power block coordinates with its angular schedule,
+then collects equivalent density monomials. The returned certificate checks
+fixed-content membership, magnetic sign reversal, and the SO(3) raising
+generator. The algebraic map is exact for compiler-issued labels with maximal
+fixed-content blocks through rank eight; stored binary64 coefficients use
+tolerance pruning and are numerically certified. ``L=0`` delegates to the
+existing scalar compiler so its coefficient convention stays compatible.
+
+.. code-block:: python
+
+   from ye3t.couplings import count, compile_ace_coordinate
+
+   report = count(content=(1, 1, 1), input_Ls=(1, 1, 1),
+                  target_L=1, target_permutation="trivial",
+                  carrier="ACE_density")
+   coordinate = compile_ace_coordinate(report.labels_for_target(1)[0])
+   table = coordinate["coefficient_table"]
+   print(table.M_R_values.tolist())  # [-1, 0, 1]

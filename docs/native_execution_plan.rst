@@ -22,10 +22,10 @@ axis.
 
 .. note::
 
-   Passages on this page that mention ``ye3t-ace``, ``YE3T-ACE``,
+   Passages on this page that mention ``ye3t-methods``,
    ``SiteBasisV2``, ``ExteriorPowerEvaluator``, ``YE3TMessagePassing``, or
    named force-training workloads are downstream integration notes. They
-   record how the separate application package (not yet publicly released)
+   record how the separate application package
    consumes the runtime operators described here and which measured
    workloads motivated each operator. None of those objects is part of the
    ``ye3t`` API, and the quoted timings are local engineering measurements on
@@ -419,7 +419,7 @@ Forward, adjoint, and double-backward operators pass mixed-``L`` lifted
 For a controlled batch-31 four-parent rank-3 ``lambda=(2,1)`` lifted-role
 source/HVP workload, one heterogeneous call replaced three compatible
 factorized calls and reduced the interleaved median CUDA time from 3.871 ms
-to 3.757 ms on the validation SM 8.9 GPU. ``ye3t-ace`` uses this path only
+to 3.757 ms on the validation SM 8.9 GPU. ``ye3t-methods`` uses this path only
 inside its existing measured direct-physical-bank batch policy.
 
 Within that one call, compiler-owned exact subtree identities permit
@@ -438,7 +438,7 @@ same validation GPU.
 ABI 21 adds ``edge_outer_accumulate`` for role-resolved physical source
 materialization. It evaluates
 ``Y[a,s,c] = sum_(e:center(e)=a) q[e,s] A[e,c]`` without collapsing the role
-axis and provides exact adjoint and double-backward operators. ``ye3t-ace``
+axis and provides exact adjoint and double-backward operators. ``ye3t-methods``
 uses the same boundary for the lifted numerator and role-resolved soft-count
 normalizer. CPU/CUDA values, position VJPs/HVPs, edge-order invariance, and
 empty-neighbor behavior match the Torch reference. Automatic dispatch uses
@@ -518,7 +518,7 @@ masks. One CPU/CUDA operation produces ``[edge,channel]`` values and their
 Cartesian derivatives without per-channel table slicing, transposes, stacks,
 or mask tensors. The contract is a generic numeric table schedule; atom types,
 neighbor lists, role filters, and physical source semantics remain owned by
-``ye3t-ace``.
+``ye3t-methods``.
 
 CPU/CUDA values and analytic derivatives match the independent Torch table
 selection and product reference. VJP, HVP, gradcheck, gradgradcheck,

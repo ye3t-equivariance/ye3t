@@ -138,6 +138,33 @@ def test_label_printer_uses_general_basis_label_for_exact_entries():
     assert "compact=((1, 1), (0, 0), (0,))" in text
 
 
+def test_ace_parent_young_rank_counts_slots_not_channel_ids():
+    from types import SimpleNamespace
+
+    from ye3t.core.basis.metadata import ExactLabelMetadata, ReconstructionRecipe
+    from ye3t.notation import basis_label_from_entry
+
+    metadata = ExactLabelMetadata(
+        compact_label=((2, 5), (0, 0), (0,)),
+        eta_tuple=(2, 5),
+        l_tuple=(0, 0),
+        root_L=0,
+        tree_type="balanced",
+        canonical_tree_signature=("leaf", "leaf", "pair"),
+        young_block_multiplicities=tuple(),
+        internal_nodes=tuple(),
+        reconstruction=ReconstructionRecipe(
+            tree_type="balanced",
+            tree_signature=("leaf", "leaf", "pair"),
+            internal_Ls_postorder=(0,),
+        ),
+    )
+    entry = SimpleNamespace(metadata=metadata, handle=None)
+    label = basis_label_from_entry(entry, carrier="ACE_density")
+    assert label.content == (2, 5)
+    assert label.global_young == (2,)
+
+
 def test_bounded_leaf_multiplicity_iterator_matches_full_small_inventory():
     from ye3t.core.basis import (
         count_canonical_leaf_labelings,

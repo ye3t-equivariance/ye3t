@@ -2,7 +2,7 @@
 """Exhaustive orbit-pattern and label enumeration helpers.
 
 This module provides reusable enumeration logic for both ``ye3t`` and
-``ye3t_ace`` without pulling benchmark or plotting code into the runtime
+``ye3t_methods`` without pulling benchmark or plotting code into the runtime
 packages.
 """
 

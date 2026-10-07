@@ -14,6 +14,7 @@ the existing exact weight-space and role-Schur compiler conventions.
 """
 
 from collections import Counter, defaultdict
+from collections.abc import Mapping
 from functools import lru_cache
 from itertools import combinations, permutations, product
 from math import factorial
@@ -687,6 +688,112 @@ def _edge_physical_row(row, channels):
     return lowered
 
 
+def _pooled_physical_row(component, channels, tag_count):
+    """Lower a complete tagged source component to independent moments."""
+    if tag_count not in (0, 1, 2):
+        raise ValueError("exact pooled physical image currently supports 0, 1, or 2 tags")
+    lowered = {}
+    for term in component["terms"]:
+        factors = [[] for _ in range(tag_count + 1)]
+        for channel_index, role, magnetic in term["coordinates"]:
+            channel = channels[channel_index]
+            factors[role].append((channel["neighbor_species"],
+                int(channel["radial_channel"]), int(channel["l"]),
+                channel["source_family_id"], int(magnetic)))
+        if any(len(factors[tag]) != 1 for tag in range(tag_count)):
+            raise ValueError("each explicit tag must bind exactly one primitive factor")
+        coefficient = _scalar._exact_scalar_from_payload(term["coefficient"])
+        # The inclusive density factors are separate first moments. For two
+        # ordered distinct tags, subtract the same-neighbor product moment.
+        for collision in (False, True) if tag_count == 2 else (False,):
+            moments = [(tuple(group),) for group in factors[tag_count]]
+            if tag_count == 1:
+                moments.append(tuple(factors[0]))
+            elif tag_count == 2:
+                moments.extend((tuple(factors[0] + factors[1]),) if collision else
+                               (tuple(factors[0]), tuple(factors[1])))
+            expanded = {(): -coefficient if collision else coefficient}
+            for moment in moments:
+                replacement = _physical_real_edge_product(moment)
+                updated = {}
+                for monomial, left in expanded.items():
+                    for source, right in replacement.items():
+                        _add_exact(updated, tuple(sorted((*monomial, source))), left * right)
+                expanded = updated
+            for monomial, value in expanded.items():
+                _add_exact(lowered, monomial, value)
+    return lowered
+
+
+def tagged_cauchy_carrier_physical_image_plan(payloads):
+    """Select exact nonzero pooled coordinates across 0/1/2-tag sources.
+
+    The retained rows are original compiler coordinates, with one pivot
+    decision shared by every magnetic component. No sampled rank is used.
+    """
+    payloads = tuple(payloads)
+    if not payloads:
+        raise ValueError("physical image needs at least one tagged source")
+    candidates, groups = [], defaultdict(list)
+    candidate_tensor_orders = []
+    for payload in payloads:
+        validate_tagged_cauchy_carriers(payload)
+        tag_count = int(payload["request"]["tag_count"])
+        if tag_count not in (0, 1, 2):
+            raise ValueError("exact pooled physical image currently supports 0, 1, or 2 tags")
+        for descriptor in payload["descriptors"]:
+            label = descriptor["label"]
+            rows = tuple(_pooled_physical_row(component, payload["request"]["channels"],
+                                              tag_count)
+                         for component in descriptor["real_terms_by_component"])
+            if len(rows) != 2 * int(label["target_L"]) + 1:
+                raise ValueError("physical-image selection requires one complete O(3) multiplet")
+            groups[(int(label["target_L"]), int(label["target_parity"]))].append(len(candidates))
+            candidates.append((label["coordinate_id"], rows))
+            candidate_tensor_orders.append(sum(int(value) for value in label["formal_parent"]))
+    identifiers = tuple(record[0] for record in candidates)
+    if len(set(identifiers)) != len(identifiers):
+        raise ValueError("pooled physical-image source coordinate IDs must be unique")
+    selected, reconstruction = [], [{} for _ in candidates]
+    for indices in groups.values():
+        pivots, coordinates = _exact_pivot_image([candidates[index][1][0] for index in indices])
+        retained = tuple(indices[pivot] for pivot in pivots)
+        selected.extend(retained)
+        for index, local in zip(indices, coordinates, strict=True):
+            actual = {retained[pivot]: value for pivot, value in local.items()}
+            reconstruction[index] = actual
+            for component, expected in enumerate(candidates[index][1]):
+                rebuilt = {}
+                for source_index, factor in actual.items():
+                    for monomial, value in candidates[source_index][1][component].items():
+                        _add_exact(rebuilt, monomial, factor * value)
+                if rebuilt != expected:
+                    raise RuntimeError("pooled physical reconstruction differs across magnetic components")
+    selected.sort()
+    plan = {
+        "schema": "ye3t_tagged_carrier_physical_image_plan_v1",
+        "source_hashes": tuple(payload["self_hash"] for payload in payloads),
+        "candidate_coordinate_ids": tuple(record[0] for record in candidates),
+        "candidate_tensor_orders": tuple(candidate_tensor_orders),
+        "selected_coordinate_ids": tuple(candidates[index][0] for index in selected),
+        "selected_tensor_orders": tuple(candidate_tensor_orders[index] for index in selected),
+        "reconstruction": tuple(tuple({"coordinate_id": candidates[index][0],
+            "coefficient": _scalar._exact_scalar_payload(value)}
+            for index, value in sorted(row.items())) for row in reconstruction),
+        "sector_policy": "exact_pivots_within_L_and_parity",
+        "rank_policy": "joint_physical_image_after_rankwise_compilation",
+        "permutation_policy": "rank_specific_formal_parents_not_a_common_S_N_action",
+        "support_policy": "ordered_distinct_neighbor_occurrences",
+        "density_context": "inclusive",
+        "collision_lowering": "exact_species_jacobi_racah_real_tesseral",
+        "complete_multiplet_reconstruction": True,
+        "provenance": {"plan_api": "ye3t.couplings.tagged_cauchy_carrier_physical_image_plan",
+                       "source_compiler": "ye3t.couplings.compile"},
+    }
+    plan["self_hash"] = _scalar._stable_hash(_scalar._freeze_json(plan))
+    return plan
+
+
 def tagged_cauchy_carrier_schedule(payloads, *, coordinate_ids=None, support_realization="ordered_tags"):
     """Pack certified source multiplets into a shared sparse polynomial DAG.
 
@@ -1139,9 +1246,28 @@ def _catalogue_request(catalogue, species):
     for rank, patterns in partitions.items():
         if len(set(patterns)) != len(patterns) or any(sum(pattern) != rank or min(pattern) < 1 for pattern in patterns):
             raise ValueError("source block partitions must be distinct positive partitions of their rank")
-    tag_counts = tuple(sorted(set(int(value) for value in cfg.get("tag_counts", (0, 1, 2)))))
-    if not tag_counts or min(tag_counts) < 0:
-        raise ValueError("configured tag counts must be nonnegative")
+    if "tag_counts" in cfg and "tag_counts_by_rank" in cfg:
+        raise ValueError("tag_counts and tag_counts_by_rank are alternative inputs")
+    if "tag_counts_by_rank" in cfg:
+        raw_tag_counts = cfg["tag_counts_by_rank"]
+        if not isinstance(raw_tag_counts, Mapping):
+            raise TypeError("tag_counts_by_rank must be a rank-keyed mapping")
+        supplied = {int(rank): tuple(int(value) for value in counts)
+                    for rank, counts in raw_tag_counts.items()}
+        if len(supplied) != len(raw_tag_counts):
+            raise ValueError("tag_counts_by_rank contains duplicate normalized rank keys")
+        if set(supplied) != set(ranks) or any(
+                not counts or len(set(counts)) != len(counts) or
+                min(counts) < 0 or max(counts) > rank
+                for rank, counts in supplied.items()):
+            raise ValueError("tag_counts_by_rank must cover each rank with unique counts in 0..rank")
+        tag_counts_by_rank = {str(rank): tuple(sorted(supplied[rank])) for rank in ranks}
+    else:
+        tag_counts = tuple(sorted(set(int(value) for value in cfg.get("tag_counts", (0, 1, 2)))))
+        if not tag_counts or min(tag_counts) < 0:
+            raise ValueError("configured tag counts must be nonnegative")
+        tag_counts_by_rank = {str(rank): tuple(value for value in tag_counts
+                                              if value <= rank) for rank in ranks}
     kappa_policy = cfg.get("kappa_policy", "all")
     tag_sectors = cfg.get("tag_sectors", "all")
     if kappa_policy not in {"trivial", "all"} or tag_sectors not in {"trivial", "all"}:
@@ -1157,13 +1283,17 @@ def _catalogue_request(catalogue, species):
         "ranks": ranks, "nmax_per_rank": rank_map("nmax_per_rank", "nmax", True),
         "lmax_per_rank": rank_map("lmax_per_rank", "lmax", False),
         "source_block_partitions_by_rank": {str(rank): partitions[rank] for rank in ranks},
-        "tag_counts": tag_counts, "input_Lmax": int(cfg.get("input_Lmax", 3)),
+        "input_Lmax": int(cfg.get("input_Lmax", 3)),
         "max_records_per_rank": (None if cfg.get("max_records_per_rank") is None else
                                  int(cfg["max_records_per_rank"])),
         "max_features_per_rank": {key: None if value is None else int(value) for key, value in caps.items()},
         "source_family_id": cfg.get("source_family_id", "orthogonal_shifted_jacobi_origin_regular_v1"),
         "selection_policy": "balanced_content_tag_angular_sector_original_coordinates_v1",
     }
+    if "tag_counts_by_rank" in cfg:
+        normalized["tag_counts_by_rank"] = tag_counts_by_rank
+    else:
+        normalized["tag_counts"] = tag_counts
     if kappa_policy != "all":
         normalized["kappa_policy"] = kappa_policy
     if tag_sectors != "all":
@@ -1211,7 +1341,8 @@ def _catalogue_count(request):
                 if any(pattern[a] == pattern[b] and indices[a] > indices[b]
                        for a in range(len(pattern)) for b in range(a + 1, len(pattern))):
                     continue
-                for tags in cfg["tag_counts"]:
+                for tags in cfg.get("tag_counts_by_rank", {}).get(
+                        str(rank), cfg.get("tag_counts", ())):
                     if tags > rank:
                         continue
                     selected_channels = [channels[index] for index in indices]

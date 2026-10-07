@@ -1913,6 +1913,11 @@ def AssembleJointYoungE3Coupler(
         input_Ls = tuple(0 for _ in content)
     if len(input_Ls) != len(content):
         raise ValueError(f"input_Ls length {len(input_Ls)} must match content rank {len(content)}.")
+    if spec.carrier == "ACE_density" and any(input_Ls):
+        raise ValueError(
+            "Direct assembly of non-scalar ACE factors omits compact angular "
+            "paths; use CompileGlobalYE3TCouplers to bind every compact label."
+        )
     _require_content_angular_stabilizer(content, input_Ls)
 
     subgroup_partitions = _block_partitions_from_spec(spec)
@@ -2643,8 +2648,9 @@ class JointYoungE3Coupler:
     """Certified composition record for one global Young-E3 coupling request."""
 
     def component_cache_keys(self):
-        if self.sparse_coefficient_tables and (
-            self.sparse_coefficient_tables[0].get("kind") == "typed_joint_orbit_isometry"
+        if self.factorized_coefficient_tables and (
+            self.factorized_coefficient_tables[0].get("kind")
+            == "selected_typed_joint_factorization_v1"
         ):
             return {
                 "young_component_key": ",".join(
@@ -2653,7 +2659,31 @@ class JointYoungE3Coupler:
                 "angular_component_key": ",".join(
                     item.cache_key() for item in self.angular_maps
                 ),
-                "joint_key": str(self.sparse_coefficient_tables[0]["hash"]),
+                "joint_key": str(self.factorized_coefficient_tables[0]["hash"]),
+            }
+        if self.sparse_coefficient_tables and (
+            self.sparse_coefficient_tables[0].get("kind") == "typed_joint_orbit_isometry"
+        ):
+            joint_key = str(self.sparse_coefficient_tables[0]["hash"])
+            if len(self.sparse_coefficient_tables) > 1 and (
+                self.sparse_coefficient_tables[1].get("kind")
+                == "ace_density_compact_physical_coordinates"
+            ):
+                joint_key = "sha256:" + hashlib.sha256(json.dumps(
+                    {
+                        "typed_orbit": joint_key,
+                        "compact_physical": self.sparse_coefficient_tables[1]["hash"],
+                    },
+                    sort_keys=True, separators=(",", ":"),
+                ).encode("utf-8")).hexdigest()
+            return {
+                "young_component_key": ",".join(
+                    item.coefficient_hash for item in self.subduction_maps
+                ),
+                "angular_component_key": ",".join(
+                    item.cache_key() for item in self.angular_maps
+                ),
+                "joint_key": joint_key,
             }
         if not self.subduction_maps or not self.angular_maps:
             return {
@@ -2783,6 +2813,12 @@ class JointYoungE3Coupler:
             table_index=table_index,
             dtype=dtype,
             device=device,
+        )
+
+    def evaluate_selected_typed_slots_torch(self, slot_values, *, slot_types=None,
+                                            dtype=None, device=None):
+        return evaluate_selected_typed_slots_torch(
+            self, slot_values, slot_types=slot_types, dtype=dtype, device=device
         )
 
     def validate_sparse_coefficient_tables(self, exact = False):
@@ -2936,8 +2972,15 @@ class JointYoungE3Coupler:
                 and self.subduction_maps
                 and self.induction_couplers
                 and self.angular_maps
-                and self.sparse_coefficient_tables
-                and self.factorized_coefficient_tables
+                and (
+                    (self.sparse_coefficient_tables and self.factorized_coefficient_tables)
+                    or (
+                        self.factorized_coefficient_tables
+                        and self.factorized_coefficient_tables[0].get("kind")
+                        == "selected_typed_joint_factorization_v1"
+                        and self.certificate.passed
+                    )
+                )
             ),
         }
 
@@ -4780,6 +4823,550 @@ def _compile_typed_joint_orbit(
     )
 
 
+def _compile_ordinary_density_typed_orbit(
+    spec,
+    input_Ls,
+    *,
+    subduction_materialization_backend,
+    subduction_cache_dir,
+    subduction_constraint_backend,
+):
+    """Bind the existing compact ACE coordinates to the full typed orbit.
+
+    The orbit synthesis follows Goff and Thompson (2026), Eqs. (5)-(12).
+    This independent implementation projects its trivial Young output through
+    the normalized commutative-density embedding. The existing compact ACE
+    compiler remains the coefficient authority for physical evaluation.
+    """
+
+    import numpy as np
+
+    from ye3t.couplings import compile_ace_coordinate, count
+
+    if _partition_from_target(spec.target_permutation, len(spec.content)) != (
+        len(spec.content),
+    ):
+        raise ValueError("Ordinary density requires the globally trivial Young sector.")
+    typed = _compile_typed_joint_orbit(
+        spec,
+        input_Ls,
+        subduction_materialization_backend=subduction_materialization_backend,
+        subduction_cache_dir=subduction_cache_dir,
+        subduction_constraint_backend=subduction_constraint_backend,
+    )
+    report = count(spec, input_Ls=input_Ls)
+    target_L = int(spec.target_rotation.L_R)
+    labels = tuple(report.labels_for_target(target_L))
+    typed_table = typed.sparse_coefficient_tables[0]
+    blocks = tuple(typed_table["typed_blocks"])
+    routes = tuple(typed_table["alpha_bindings"])
+    if (
+        not labels
+        or len(labels) != len(routes)
+        or any(
+            tuple(route["block_partitions"])
+            != tuple((int(block["size"]),) for block in blocks)
+            for route in routes
+        )
+    ):
+        raise ArithmeticError(
+            "Typed ordinary-density routes disagree with the exact compact labels."
+        )
+    orbit_count = len(typed_table["coset_representatives"])
+    typed_matrix = np.asarray(typed.sparse_coefficient_matrix(), dtype=np.complex128)
+    if orbit_count < 1 or typed_matrix.shape[0] % orbit_count:
+        raise ArithmeticError("Typed orbit rows do not form complete coset fibers.")
+    raw_dimension = typed_matrix.shape[0] // orbit_count
+    magnetic_width = 2 * target_L + 1
+    if typed_matrix.shape[1] != len(labels) * magnetic_width:
+        raise ArithmeticError("Typed orbit axes do not match compact label and M axes.")
+    fibers = typed_matrix.reshape(orbit_count, raw_dimension, -1)
+    coset_residual = float(np.max(np.abs(fibers - fibers[0])))
+    physical = fibers.sum(axis=0) / math.sqrt(orbit_count)
+    isometry_residual = float(np.max(np.abs(
+        physical.conj().T @ physical - np.eye(physical.shape[1])
+    )))
+    if coset_residual > 1.0e-9 or isometry_residual > 1.0e-9:
+        raise ArithmeticError(
+            "The typed trivial-Young orbit does not project isometrically "
+            "onto ordinary density."
+        )
+
+    block_types = tuple(tuple(block["type"]) for block in blocks)
+    block_sizes = tuple(int(block["size"]) for block in blocks)
+    grouped_types = tuple(
+        block_type
+        for block_type, size in zip(block_types, block_sizes)
+        for _ in range(size)
+    )
+    raw_states = tuple(product(*(
+        range(-ell, ell + 1) for _eta, ell in grouped_types
+    )))
+    if len(raw_states) != raw_dimension:
+        raise ArithmeticError("Typed raw magnetic rows have the wrong dimension.")
+    raw_keys = []
+    raw_multiplicities = []
+    for state in raw_states:
+        start = 0
+        key = []
+        multiplicity = 1
+        for size in block_sizes:
+            block = tuple(sorted(int(value) for value in state[start:start + size]))
+            key.append(block)
+            multiplicity *= factorial(size) // math.prod(
+                factorial(count) for count in Counter(block).values()
+            )
+            start += size
+        raw_keys.append(tuple(key))
+        raw_multiplicities.append(multiplicity)
+
+    compact = np.zeros(
+        (raw_dimension, len(labels) * magnetic_width), dtype=np.complex128
+    )
+    compact_hashes = []
+    for alpha, label in enumerate(labels):
+        compiled = compile_ace_coordinate(label)
+        table = compiled["coefficient_table"]
+        label_types = tuple(zip(table.n_tuple, table.l_tuple))
+        if Counter(label_types) != Counter(grouped_types):
+            raise ArithmeticError("Compact ACE label changes the typed factor content.")
+        if tuple(int(value) for value in table.M_R_values) != tuple(
+            range(-target_L, target_L + 1)
+        ):
+            raise ArithmeticError("Compact ACE label has incomplete magnetic axes.")
+        compact_hashes.append(
+            compiled["certificate"].get(
+                "coefficient_sha256",
+                compiled["certificate"].get("collected_coefficient_sha256"),
+            )
+        )
+        if not compact_hashes[-1]:
+            raise ArithmeticError("Compact ACE coefficient certificate has no hash.")
+        for component in range(magnetic_width):
+            magnetic, coefficients = table.component_terms(component)
+            terms = {}
+            for magnetic_tuple, coefficient in zip(magnetic, coefficients):
+                key = tuple(
+                    tuple(sorted(
+                        int(m) for factor_type, m in zip(label_types, magnetic_tuple)
+                        if factor_type == block_type
+                    ))
+                    for block_type in block_types
+                )
+                terms[key] = terms.get(key, 0j) + complex(coefficient)
+            for row, (key, multiplicity) in enumerate(
+                zip(raw_keys, raw_multiplicities)
+            ):
+                compact[row, alpha * magnetic_width + component] = (
+                    terms.get(key, 0j) / multiplicity
+                )
+
+    transport = physical.conj().T @ compact
+    transport_residual = float(
+        np.linalg.norm(physical @ transport - compact)
+        / max(np.linalg.norm(compact), 1.0e-30)
+    )
+    copy_transport = np.asarray([
+        [
+            sum(
+                transport[
+                    left * magnetic_width + magnetic,
+                    right * magnetic_width + magnetic,
+                ]
+                for magnetic in range(magnetic_width)
+            ) / magnetic_width
+            for right in range(len(labels))
+        ]
+        for left in range(len(labels))
+    ])
+    magnetic_residual = float(np.max(np.abs(
+        transport - np.kron(copy_transport, np.eye(magnetic_width))
+    )))
+    singular_values = np.linalg.svd(copy_transport, compute_uv=False)
+    minimum_singular_value = float(singular_values[-1])
+    condition_number = float(
+        singular_values[0] / minimum_singular_value
+        if minimum_singular_value > 0 else math.inf
+    )
+    compact_frame, _ = np.linalg.qr(compact, mode="reduced")
+    projector_residual = float(math.sqrt(2.0) * np.linalg.norm(
+        compact_frame - physical @ (physical.conj().T @ compact_frame)
+    ))
+    if (
+        transport_residual > 1.0e-9
+        or magnetic_residual > 1.0e-9
+        or projector_residual > 1.0e-9
+        or not np.isfinite(condition_number)
+        or condition_number > 1.0e10
+    ):
+        raise ArithmeticError(
+            "Compact ACE coefficients are not a well-conditioned, "
+            "M-independent basis of the typed physical image."
+        )
+    entries = tuple(
+        {
+            "row": int(row),
+            "col": int(col),
+            **_numeric_payload_for_sparse_value(compact[row, col]),
+        }
+        for row in range(compact.shape[0])
+        for col in range(compact.shape[1])
+        if compact[row, col] != 0
+    )
+    shape = tuple(int(value) for value in compact.shape)
+    physical_hash = _numeric_sparse_hash(shape, entries)
+    physical_table = {
+        "kind": "ace_density_compact_physical_coordinates",
+        "shape": shape,
+        "hash": physical_hash,
+        "entry_format": (
+            "numeric_complex"
+            if any("value_imag" in entry for entry in entries)
+            else "numeric_real"
+        ),
+        "entries": entries,
+        "nnz": len(entries),
+        "typed_orbit_hash": typed_table["hash"],
+        "compact_labels": tuple(label.to_dict() for label in labels),
+        "compact_coefficient_hashes": tuple(compact_hashes),
+        "output_axis_order": ("compact_label", "target_M"),
+        "raw_magnetic_order": "grouped_full_content_angular_blocks_then_signed_m_ascending",
+        "normalization": (
+            "authoritative_compact_polynomial_coefficients_distributed_"
+            "over_identical_factor_magnetic_occupancies"
+        ),
+    }
+    binding = {
+        "kind": "ace_density_compact_to_typed_binding_v1",
+        "compact_labels": tuple(label.to_dict() for label in labels),
+        "typed_route_count": len(routes),
+        "target_M_values": tuple(range(-target_L, target_L + 1)),
+        "copy_transport_real": copy_transport.real.tolist(),
+        "copy_transport_imag": copy_transport.imag.tolist(),
+        "copy_transport_condition_number": condition_number,
+        "copy_transport_minimum_singular_value": minimum_singular_value,
+        "physical_projector_residual": projector_residual,
+        "physical_table_hash": physical_hash,
+        "coefficient_authority": "ye3t.couplings.compile_ace_coordinate",
+    }
+    certificate = record_replace(
+        typed.certificate,
+        checks={
+            **dict(typed.certificate.checks),
+            "compact_count_matches_typed_routes": True,
+            "ordinary_density_coset_projection": True,
+            "ordinary_density_projected_isometry": True,
+            "compact_label_image_complete": True,
+            "compact_label_transport_m_independent": True,
+            "compact_and_typed_physical_projectors_agree": True,
+        },
+        residuals={
+            **dict(typed.certificate.residuals),
+            "ordinary_density_coset": coset_residual,
+            "ordinary_density_isometry": isometry_residual,
+            "compact_label_transport": transport_residual,
+            "compact_label_m_mixing": magnetic_residual,
+            "compact_label_transport_condition_number": condition_number,
+            "compact_label_transport_minimum_singular_value": minimum_singular_value,
+            "compact_and_typed_physical_projector": projector_residual,
+        },
+        coefficient_hash="sha256:" + hashlib.sha256(json.dumps(
+            {"typed": typed_table["hash"], "compact": physical_hash},
+            sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest(),
+        provenance={
+            **dict(typed.certificate.provenance),
+            "physical_source": "ordinary_commutative_density",
+            "compact_coefficient_source": "ye3t.couplings.compile_ace_coordinate",
+            "physical_projection": "normalized_coset_embedding_adjoint",
+            "compact_transport_validation": "binary64_tolerance_certified",
+        },
+        limitations=(
+            "The dense typed table is a bounded reference; ordinary-density "
+            "evaluation and serialization use the existing compact ACE coefficients. "
+            "The change of basis and projector comparison are binary64 "
+            "tolerance-certified.",
+        ),
+    )
+    return record_replace(
+        typed,
+        normalization={
+            **dict(typed.normalization),
+            "ordinary_density_physical_rows": (
+                "expanded_ordered_tensor_by_full_content_angular_block"
+            ),
+            "ordinary_density_projection": "normalized_coset_embedding_adjoint",
+            "compact_evaluation_basis": (
+                "existing_nonisometric_compact_ACE_coefficient_tables"
+            ),
+        },
+        sparse_coefficient_tables=tuple(typed.sparse_coefficient_tables)
+        + (physical_table,),
+        factorized_coefficient_tables=tuple(typed.factorized_coefficient_tables)
+        + (binding,),
+        certificate=certificate,
+    )
+
+
+def _compile_selected_typed_joint_route(
+    spec,
+    input_Ls,
+    *,
+    subduction_materialization_backend,
+    subduction_cache_dir,
+    subduction_constraint_backend,
+):
+    """Compile one complete typed route as executable local, CG, and Young maps."""
+
+    import numpy as np
+
+    target_partition = _partition_from_target(
+        spec.target_permutation, len(spec.content)
+    )
+    blocks, routes = _typed_joint_routes(spec, input_Ls, target_partition)
+    selected_alpha = spec.metadata.get("selected_typed_alpha")
+    if type(selected_alpha) is not int or not 0 <= selected_alpha < len(routes):
+        raise ValueError("selected_typed_alpha must index the exact typed route inventory.")
+    if len(blocks) != 2 or len(spec.content) > 8:
+        raise ValueError("Selected typed factorization currently supports two blocks through rank eight.")
+    if len(set(int(ell) for ell in input_Ls)) != 1:
+        raise ValueError("Selected typed factorization currently requires one common input l.")
+    natural_parity = "odd" if sum(input_Ls) % 2 else "even"
+    if spec.target_rotation.parity in {"even", "odd"} and (
+        spec.target_rotation.parity != natural_parity
+    ):
+        raise ValueError("Requested parity is incompatible with the natural product parity.")
+    route = routes[selected_alpha]
+    if (spec.block_permutation or "subgroup_partitions" in spec.metadata):
+        if _block_partitions_from_spec(spec) != route["block_partitions"]:
+            raise ValueError("Explicit block partitions disagree with the selected typed route.")
+    if (route["block_partitions"] != tuple((int(block["size"]),) for block in blocks)
+            or any(route["local_copy_indices"]) or route["young_copy"] != 0):
+        raise ValueError("Selected typed factorization requires trivial local Young blocks and first copies.")
+    if any((2 * int(block["type"][1]) + 1) ** int(block["size"]) > 81
+           for block in blocks):
+        raise ValueError("Selected typed local magnetic dimension exceeds the validated limit 81.")
+    from ye3t.fixed_content import FixedContentModule, FixedContentSpec
+
+    fixed = FixedContentModule(FixedContentSpec(
+        spec.content, input_Ls, tree_type=spec.tree_schedule
+    )).decompose()
+    expected = fixed.sector_multiplicity(
+        target_partition, int(spec.target_rotation.L_R)
+    )
+    if not fixed.validation_report.get("passed", False) or len(routes) != expected:
+        raise ValueError("Selected typed routes disagree with exact fixed-content count.")
+    if subduction_materialization_backend == "numeric_cached":
+        compare_exact = len(spec.content) <= 4
+        coupling = _build_cached_young_subgroup_specht_coupling(
+            route["block_partitions"], target_partition,
+            bracketing=spec.tree_schedule,
+            cache_dir=subduction_cache_dir,
+            constraint_backend=subduction_constraint_backend,
+            compare_exact_projector=compare_exact,
+            exact_reference_max_rank=4,
+        )
+    elif subduction_materialization_backend == "exact":
+        coupling = _build_young_subgroup_specht_coupling(
+            route["block_partitions"], target_partition,
+            bracketing=spec.tree_schedule,
+        )
+    else:
+        raise ValueError("Selected typed subduction backend must be exact or numeric_cached.")
+    if not coupling.validation.passed:
+        raise ArithmeticError("Selected typed Young subduction did not validate.")
+    numeric = coupling.numeric_validation_report
+    if numeric is not None and (
+        not numeric["ok"]
+        or not numeric["checks"].get("rank_gap_acceptable", False)
+        or not numeric["checks"].get("projector_idempotency_under_tolerance", False)
+        or not numeric["checks"].get("projector_symmetry_under_tolerance", False)
+        or (numeric["exact_reference"].get("projector_compared_to_exact", False)
+            and not numeric["checks"].get("exact_projector_under_tolerance", False))
+    ):
+        raise ArithmeticError("Selected typed numeric subduction lacks rank-gap/projector validation.")
+    cosets = tuple(tuple(int(value) for value in rep)
+                   for rep in coupling.tensor.coset_reps)
+    young = coupling.coefficient_matrix()
+    target_tableaux = tuple(coupling.tensor.target_tableaux)
+    if (young.rows != len(cosets) or young.cols != len(target_tableaux)
+            or len(cosets) * math.prod((2 * int(ell) + 1) for ell in input_Ls)
+            <= 0):
+        raise ArithmeticError("Selected typed Young axes do not match cosets/tableaux.")
+    young_values = np.asarray(
+        [[complex(young[row, col]) for col in range(young.cols)]
+         for row in range(young.rows)], dtype=np.complex128
+    )
+    local_values = []
+    for block, block_L in zip(blocks, route["block_Ls"], strict=True):
+        matrix, _states, copies, tableau_dim = _typed_local_isometry(
+            int(block["size"]), int(block["type"][1]),
+            (int(block["size"]),), int(block_L),
+        )
+        if copies != 1 or tableau_dim != 1:
+            raise ArithmeticError("Selected typed local map is not multiplicity free.")
+        local_values.append(np.asarray(
+            [[complex(matrix[row, col]) for col in range(matrix.cols)]
+             for row in range(matrix.rows)], dtype=np.complex128
+        ))
+    angular_rows = math.prod(2 * int(value) + 1 for value in route["block_Ls"])
+    magnetic_dim = 2 * int(spec.target_rotation.L_R) + 1
+    angular_values = np.zeros((angular_rows, magnetic_dim), dtype=np.complex128)
+    magnetic_ranges = tuple(range(-int(value), int(value) + 1)
+                            for value in route["block_Ls"])
+    for row, magnetic in enumerate(product(*magnetic_ranges)):
+        output_L, output_M, value = _typed_angular_coefficient(
+            route["angular_tree"], magnetic
+        )
+        if output_L != int(spec.target_rotation.L_R):
+            raise ArithmeticError("Selected typed angular path returned wrong L.")
+        if value != 0:
+            angular_values[row, output_M + int(output_L)] = complex(value)
+    matrices = (*local_values, young_values, angular_values)
+    residuals = tuple(float(np.max(np.abs(
+        matrix.conj().T @ matrix - np.eye(matrix.shape[1])
+    ))) for matrix in matrices)
+    if max(residuals) > 1.0e-8:
+        raise ArithmeticError("Selected typed factor is not isometric.")
+    if any(float(np.max(np.abs(matrix.imag))) > 1.0e-12 for matrix in matrices):
+        raise ArithmeticError("Selected typed factor is not real in the declared basis.")
+    payload = {
+        "kind": "selected_typed_joint_factorization_v1",
+        "selected_full_alpha": int(selected_alpha),
+        "full_target_count": int(expected),
+        "alpha_binding": route,
+        "typed_blocks": blocks,
+        "coset_representatives": cosets,
+        "local_matrices": tuple(matrix.real.tolist() for matrix in local_values),
+        "young_matrix": young_values.real.tolist(),
+        "angular_matrix": angular_values.real.tolist(),
+        "raw_magnetic_order": "grouped_typed_blocks_then_signed_m_ascending",
+        "output_axis_order": ("selected_path", "target_tableau", "target_M"),
+        "shape": (len(cosets) * math.prod(2 * int(ell) + 1 for ell in input_Ls),
+                  len(target_tableaux) * magnetic_dim),
+        "normalization": {"synthesis": "local_then_CG_then_Young", "analysis": "conjugate_adjoint"},
+    }
+    payload["hash"] = hashlib.sha256(json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")).hexdigest()
+    angular = AngularCGMap.build(
+        route["block_Ls"], int(spec.target_rotation.L_R),
+        parity=spec.target_rotation.parity, group=spec.target_rotation.group,
+        bracketing=spec.tree_schedule, cache_dir=False,
+    )
+    label = GlobalYE3TLabel(
+        boldsymbol_mu=route["block_partitions"],
+        boldsymbol_Lambda=route["block_Ls"],
+        boldsymbol_beta=("beta:" + str(route["angular_copy"]),),
+        gamma=(route["young_copy"],), pi=spec.tree_schedule,
+    )
+    certificate = YE3TCouplerCertificate(
+        validation_scope=spec.validation_scope,
+        runtime_status="implemented_under_validation", passed=True,
+        checks={
+            "full_count_matches_route_inventory": True,
+            "selected_subspace_of_full_typed_inventory": True,
+            "local_young_cg_isometries": True,
+            "numeric_rank_gap_and_projector_validated": bool(
+                numeric is None or numeric["ok"]
+            ),
+            "exact_projector_compared": bool(
+                numeric is None or numeric["exact_reference"].get(
+                    "projector_compared_to_exact", False
+                )
+            ),
+            "dense_typed_matrix_not_materialized": True,
+        },
+        residuals={"max_factor_isometry": max(residuals)},
+        coefficient_hash=payload["hash"],
+        provenance={
+            "compiler": "selected_typed_local_young_angular_coset_factorization",
+            "selected_full_alpha": int(selected_alpha),
+            "full_target_count": int(expected),
+            "young_backend": subduction_materialization_backend,
+            "coset_orientation": "canonical_local_slot_to_global_slot",
+            "numeric_subduction_report": numeric,
+        },
+        limitations=(
+            "This selected route is one valid coordinate, not the complete typed multiplicity space.",
+            *(("Rank-eight Young coefficients use binary64 numeric subduction; no exact rank-eight projector comparison was performed.",)
+              if numeric is not None and not numeric["exact_reference"].get("projector_compared_to_exact", False)
+              else ()),
+        ),
+    )
+    return JointYoungE3Coupler(
+        spec=spec, labels=(label,),
+        block_maps=({"content": tuple(spec.content), "input_Ls": tuple(input_Ls),
+                     "blocks": blocks, "validation": {"passed": True}},),
+        subduction_maps=(YoungSubductionMap.from_coupling(coupling),),
+        induction_couplers=(YoungInductionCoupler.from_coupling(coupling),),
+        angular_maps=(angular,),
+        normalization=payload["normalization"],
+        sparse_coefficient_tables=(),
+        factorized_coefficient_tables=(payload,),
+        backend_plan=YE3TBackendPlan(
+            requested_backend=spec.coefficient_backend,
+            selected_backend="global_coupler",
+            fast_path_policy=spec.fast_path_policy,
+            reason="validated selected typed route without dense orbit matrix",
+            runtime_status=certificate.runtime_status,
+        ),
+        certificate=certificate,
+    )
+
+
+def evaluate_selected_typed_slots_torch(coupler, slot_values, *, slot_types=None,
+                                        dtype=None, device=None):
+    """Analyze one ordered typed orbit fiber with a certified selected route."""
+
+    import torch
+
+    if not coupler.certificate.passed or len(coupler.factorized_coefficient_tables) != 1:
+        raise ValueError("Selected typed slot evaluation requires one certified factorization.")
+    table = coupler.factorized_coefficient_tables[0]
+    if table.get("kind") != "selected_typed_joint_factorization_v1":
+        raise ValueError("Coupler does not contain a selected typed factorization.")
+    canonical_types = tuple(zip(
+        tuple(int(value) for value in coupler.spec.content),
+        tuple(int(value) for value in coupler.block_maps[0]["input_Ls"]),
+    ))
+    if slot_types is None:
+        slot_types = canonical_types
+    else:
+        slot_types = tuple((int(value[0]), int(value[1])) for value in slot_types)
+    if len(slot_types) != len(canonical_types) or sorted(slot_types) != sorted(canonical_types):
+        raise ValueError("slot_types must permute the compiled (content,l) word.")
+    coset = next((index for index, rep in enumerate(table["coset_representatives"])
+                  if all(slot_types[int(rep[position])] == canonical_types[position]
+                         for position in range(len(rep)))), None)
+    if coset is None:
+        raise ArithmeticError("No certified typed coset transports this slot word.")
+    values = torch.as_tensor(slot_values, dtype=dtype, device=device)
+    if values.ndim != 2 or int(values.shape[0]) != len(slot_types):
+        raise ValueError("slot_values must have one full magnetic multiplet per ordered slot.")
+    widths = tuple(2 * int(ell) + 1 for _content, ell in slot_types)
+    if len(set(widths)) != 1 or int(values.shape[1]) != widths[0]:
+        raise ValueError("slot_values magnetic axes do not match the selected typed route.")
+    local_outputs = []
+    for block, matrix in zip(table["typed_blocks"], table["local_matrices"], strict=True):
+        positions = tuple(int(table["coset_representatives"][coset][int(pos)])
+                          for pos in block["positions"])
+        raw = values[positions[0]]
+        for position in positions[1:]:
+            raw = torch.tensordot(raw, values[position], dims=0)
+        raw = raw.reshape(-1)
+        local = torch.as_tensor(matrix, dtype=values.dtype, device=values.device)
+        local_outputs.append(raw @ local.conj())
+    outer = torch.kron(local_outputs[0], local_outputs[1])
+    angular = torch.as_tensor(table["angular_matrix"],
+                              dtype=values.dtype, device=values.device)
+    coupled = outer @ angular.conj()
+    young = torch.as_tensor(table["young_matrix"],
+                            dtype=values.dtype, device=values.device)
+    result = young[coset].conj().unsqueeze(1) * coupled.unsqueeze(0)
+    return result.unsqueeze(0)
+
+
 def CompileGlobalYE3TCouplers(
     spec,
     *,
@@ -4802,7 +5389,22 @@ def CompileGlobalYE3TCouplers(
     if len(input_Ls) != len(content):
         raise ValueError(f"input_Ls length {len(input_Ls)} must match content rank {len(content)}.")
     if spec.carrier != "ACE_density" and any(input_Ls):
+        if "selected_typed_alpha" in spec.metadata:
+            return _compile_selected_typed_joint_route(
+                spec, input_Ls,
+                subduction_materialization_backend=subduction_materialization_backend,
+                subduction_cache_dir=subduction_cache_dir,
+                subduction_constraint_backend=subduction_constraint_backend,
+            )
         return _compile_typed_joint_orbit(
+            spec,
+            input_Ls,
+            subduction_materialization_backend=subduction_materialization_backend,
+            subduction_cache_dir=subduction_cache_dir,
+            subduction_constraint_backend=subduction_constraint_backend,
+        )
+    if spec.carrier == "ACE_density" and any(input_Ls):
+        return _compile_ordinary_density_typed_orbit(
             spec,
             input_Ls,
             subduction_materialization_backend=subduction_materialization_backend,
@@ -5037,7 +5639,13 @@ def CompileYE3TCouplers(
     spec = spec if isinstance(spec, YE3TSpec) else YE3TSpec.from_dict(spec)
     plan = plan_ye3t_backend(spec)
     if plan.selected_backend == "symmetric_power_fast_path":
-        return CompileIndependentACE(spec, input_Ls=input_Ls)
+        return CompileIndependentACE(
+            spec,
+            input_Ls=input_Ls,
+            subduction_materialization_backend=subduction_materialization_backend,
+            subduction_cache_dir=subduction_cache_dir,
+            subduction_constraint_backend=subduction_constraint_backend,
+        )
     if plan.selected_backend == "exterior_power_fast_path":
         return CompileExteriorPower(spec, input_Ls=input_Ls)
     if plan.selected_backend == "global_coupler":
@@ -5078,7 +5686,14 @@ def compile_ye3t_couplers(
     )
 
 
-def CompileIndependentACE(spec, *, input_Ls=None):
+def CompileIndependentACE(
+    spec,
+    *,
+    input_Ls=None,
+    subduction_materialization_backend="numeric_cached",
+    subduction_cache_dir=None,
+    subduction_constraint_backend="auto",
+):
     """Compile the ACE global lambda=(N) case with explicit symmetric metadata."""
 
     spec = spec if isinstance(spec, YE3TSpec) else YE3TSpec.from_dict(spec)
@@ -5099,12 +5714,22 @@ def CompileIndependentACE(spec, *, input_Ls=None):
     compiled = CompileGlobalYE3TCouplers(
         _spec_with_updates(spec, coefficient_backend="symmetric_power_fast_path", metadata=metadata),
         input_Ls=input_Ls,
+        subduction_materialization_backend=subduction_materialization_backend,
+        subduction_cache_dir=subduction_cache_dir,
+        subduction_constraint_backend=subduction_constraint_backend,
     )
     plan = YE3TBackendPlan(
         requested_backend=spec.coefficient_backend,
         selected_backend="symmetric_power_fast_path",
         fast_path_policy=spec.fast_path_policy,
-        reason="ACE global lambda=(N) recovered as symmetric-power fast path metadata",
+        reason=(
+            "ACE compact symmetric-power coefficients bound to the typed "
+            "Young/rotation image"
+            if any(int(value) for value in (
+                input_Ls if input_Ls is not None else spec.metadata.get("input_Ls", ())
+            ))
+            else "ACE global lambda=(N) recovered as symmetric-power fast path metadata"
+        ),
         runtime_status=compiled.certificate.runtime_status,
     )
     return record_replace(compiled, backend_plan=plan)

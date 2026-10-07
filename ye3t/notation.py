@@ -199,7 +199,7 @@ def basis_label_from_entry(entry, *, quotient="full", carrier="ACE_density"):
         content=tuple(metadata.eta_tuple),
         radial_content=tuple(metadata.eta_tuple),
         block_young=block_young,
-        global_young=(sum(int(x) for x in metadata.eta_tuple),) if carrier == "ACE_density" else None,
+        global_young=(len(metadata.eta_tuple),) if carrier == "ACE_density" else None,
         block_angular=block_angular,
         total_L=int(metadata.root_L),
         multiplicity=None if handle is None else int(handle.basis_index),

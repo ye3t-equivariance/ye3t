@@ -214,6 +214,7 @@ class SchurWeylGuidedTreeProduct(torch.nn.Module):
         return int(self.irreps_out.dim)
 
     def forward(self, leaf_features):
+        """Apply the compiled tree to leaf features in tensor-slot order."""
         if len(leaf_features) != len(self.nin):
             raise ValueError(f"Expected {len(self.nin)} leaf feature tensors, got {len(leaf_features)}.")
         values = {}
@@ -424,7 +425,7 @@ def compile_schur_weyl_guided_tree_product(
     """Compile a Schur-Weyl-guided pairwise Young/E3 runtime tree.
 
     The admissible labels for each internal node are selected from
-    :func:`young_specht_basis_construction_plan` before constructing the
+    ``ye3t.couplings.young_specht_basis_construction_plan`` before constructing the
     corresponding ``JointYoungCGProduct``.  With the defaults, all Specht
     sectors selected by ``sector_families`` are requested at every internal
     span; only the root may be restricted by ``root_target_Ls``.

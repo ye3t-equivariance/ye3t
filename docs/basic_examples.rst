@@ -58,11 +58,12 @@ already-valid branches are materialized.
 Importable Examples
 -------------------
 
-Each example exposes a visible, editable ``cfg_ye3t`` dictionary and exactly
-one purpose-named ``run_*`` workflow. Shared constructors and printers live
-under ``ye3t.workflows`` and ``ye3t.utils``, but the recipe files keep their
-rank, sector, label-limit, and runtime knobs in the module so users can edit
-them directly.
+Each example exposes a visible, editable ``cfg_ye3t`` dictionary. The
+fixed-content count example is a direct top-to-bottom
+``YE3TRepresentation.from_config`` → ``count_fixed_content`` workflow;
+older examples retain a purpose-named ``run_*`` function while they migrate.
+The recipe files keep their rank, sector, label-limit, and runtime knobs
+visible so users can edit them directly.
 
 Reading ``cfg_ye3t``
 ~~~~~~~~~~~~~~~~~~~~
@@ -71,11 +72,11 @@ The examples and the tested snippets in :doc:`representation_snippets` share a
 small vocabulary:
 
 ``content`` / ``input_Ls`` / ``target_L``
-   A fixed-content coupling request, as used by
-   ``examples/coupling_multiplicity_counts.py`` and
-   ``examples/coupling_coefficient_materialization.py``: the non-angular
-   channel content, the slot angular momenta for that content, and the target
-   ``L_R``.
+   A fixed-content coupling request: the non-angular channel content, the
+   slot angular momenta, and target ``L_R``. The migrated
+   ``examples/coupling_multiplicity_counts.py`` places the target under
+   ``representation.parent.L`` and the first two values under ``basis``;
+   ``coupling_coefficient_materialization.py`` retains its older request shape.
 
 ``rank``
    The product rank ``N`` of a feature. In atomistic language this is related

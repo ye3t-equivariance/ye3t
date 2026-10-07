@@ -490,7 +490,7 @@ The quotient should be called directly only for mathematical audits,
 enumeration tools, or new runtime lowering work.  User-facing descriptor and
 message-passing workflows normally enter through higher-level helpers such as
 ``build_operator_ir`` in core or the ACE descriptor/message APIs in
-``ye3t-ace`` (separate package, not yet public).
+``ye3t-methods`` (the separate application package).
 
 Examples
 --------

@@ -2,7 +2,7 @@
 
 This module records the representation-theoretic bookkeeping needed by
 descriptor/model factories.  Numerical AO-shell feature materialization lives in
-``ye3t_ace`` because it depends on chemistry-facing AO metadata conventions.
+``ye3t_methods`` because it depends on chemistry-facing AO metadata conventions.
 """
 
 from ye3t._record import recordclass

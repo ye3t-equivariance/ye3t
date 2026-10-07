@@ -1,18 +1,18 @@
 YE3T Core Documentation
 =======================
 
-``ye3t`` contains the exact representation and product machinery used by the
-ACE and message-passing package. The core package is intentionally mathematical:
+``ye3t`` contains the exact representation and product machinery used by ACE
+and message-passing workflows. The core package is intentionally mathematical:
 it describes tensor factors, Young-subgroup irreps, angular irreps, exact
 Clebsch-Gordan couplings, and lowered tensor schedules without assuming a
 particular training task.
 
 LAMMPS inference for compiled models is provided by the separate
 `ye3t-lammps <https://github.com/ye3t-equivariance/ye3t-lammps>`_ package.
-Pages that mention ``ye3t-ace`` refer to the downstream application package
-(descriptor construction, fitting, ASE calculators), which is a separate
-package that is not yet publicly released; those passages describe how it
-consumes the ``ye3t`` API and are not part of this package.
+The separate `ye3t-methods <https://github.com/ye3t-equivariance/ye3t-methods>`_
+package provides descriptor construction, fitting, and ASE calculators. It
+consumes the ``ye3t`` compiler; its ``ye3t_ace`` module path remains a
+compatibility implementation.
 
 .. toctree::
    :maxdepth: 2

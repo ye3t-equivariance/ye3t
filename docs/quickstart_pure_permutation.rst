@@ -40,7 +40,7 @@ Common failure modes:
   operations.
 - Numeric subduction is valid only with the returned residuals and validation
   report.
-- Descriptor workflows in ``ye3t-ace`` should consume this kind of plan/report
+- Descriptor workflows in ``ye3t-methods`` should consume this kind of plan/report
   rather than enumerating local labels.
 
 Validation link: ``tests/test_pure_couplers.py`` checks this cached

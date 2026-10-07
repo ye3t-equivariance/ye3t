@@ -5,8 +5,8 @@ representation-theory package surface.
 
 | example | purpose |
 |---|---|
-| `coupling_multiplicity_counts.py` | Count valid fixed-content coupling labels through `ye3t.couplings.count`, including provenance and validation status. |
-| `coupling_coefficient_materialization.py` | Plan and compile coupling coefficients through `ye3t.couplings.plan` and `ye3t.couplings.compile`, including backend, convention hash, validation, and certificate metadata. |
+| `coupling_multiplicity_counts.py` | Construct `YE3TRepresentation`, then count valid fixed-content labels through its compiler-backed method and inspect validation. |
+| `coupling_coefficient_materialization.py` | Construct `YE3TRepresentation`, count the fixed-content sector, then plan and compile through `ye3t.couplings`; inspect backend, convention hash, validation, and certificate metadata. |
 | `compile_scalar_ace_lammps_plans.py` | Compile representative rank-3, H4, `[4,4]`, and H16 scalar ACE coordinates plus block and v3 coupled-product execution plans for downstream LAMMPS binding through `ye3t-lammps`. |
 | `exact_full_primitive_catalog.py` | Build a saved fixed-content basis for ranks 4, 6, and 16; inspect primitive and decomposable representations and request exact coefficient blocks or one normalized vector. |
 | `symbolic_young_partition_catalogue.py` | Expand symbolic Young partition templates by rank through `ye3t.couplings.expand_partition_templates` and print the positive O(3) multiplicities of each expanded partition. |
@@ -14,6 +14,16 @@ representation-theory package surface.
 
 Bounded benchmarks and diagnostics live in `benchmarks/`. They keep their
 output and cache paths visible in `cfg_ye3t`.
+
+For the shortest core route, run `coupling_multiplicity_counts.py`: its visible
+seven-section config creates `YE3TRepresentation`, and one
+`count_fixed_content` call returns the compiler's count and valid labels.
+For coefficients, run `coupling_coefficient_materialization.py` with the same
+seven-section shape. Its count, plan, and explicit compile calls use one
+fixed-content request; materialization can be expensive at larger ranks.
+`ye3t` deliberately does not accept ASE atoms; use the
+`ye3t-methods/examples/quickstart/ase_descriptors.py` example for atomistic
+descriptor arrays.
 
 The catalog is the current example of the short object workflow: edit the
 integer-keyed rank entries in `cfg_ye3t`, construct `YE3TFixedContentBasis`,

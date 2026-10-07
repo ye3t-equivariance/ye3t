@@ -84,7 +84,7 @@ from ye3t.couplings.partition_templates import (
     expand_partition_family_requests,
     expand_partition_templates,
 )
-from ye3t.couplings.scalar_ace import compile_scalar_ace_coordinate
+from ye3t.couplings.scalar_ace import compile_ace_coordinate, compile_scalar_ace_coordinate
 from ye3t.couplings.covariant_cauchy import (
     compile_covariant_cauchy,
     covariant_cauchy_count,
@@ -99,6 +99,7 @@ from ye3t.couplings.tagged_cauchy_carriers import (
     tagged_cauchy_carriers_count,
     tagged_cauchy_carriers_request,
     tagged_cauchy_carrier_schedule,
+    tagged_cauchy_carrier_physical_image_plan,
     tagged_cauchy_carrier_model_plan,
     validate_tagged_cauchy_carriers,
 )
@@ -1821,7 +1822,7 @@ def angular_edge_coupling_paths(
     This is the angular part of the SI S11 path-coupled message update for
     runtimes that preserve the permutation carrier and only couple the hidden
     rotational block with an edge rotational carrier. Coefficients are
-    evaluated by :mod:`ye3t.paired_cg`; this function only reports which
+    evaluated by ``ye3t.paired_cg``; this function only reports which
     paths are valid.
     """
 
@@ -4911,7 +4912,20 @@ def compile(
     if coupler_plan.report.validation_report.get("label_kind") == "multiplicity":
         expected = int(coupler_plan.report.counts_by_target[target_L])
         materialized = len(coupler.alpha_labels())
-        if materialized != expected:
+        selected_alpha = coupler_plan.spec.metadata.get("selected_typed_alpha")
+        if selected_alpha is not None:
+            bindings = tuple(coupler_plan.validation_report.get("alpha_bindings", ()))
+            tables = tuple(coupler.factorized_coefficient_tables)
+            if (type(selected_alpha) is not int or not 0 <= selected_alpha < expected
+                    or len(bindings) != expected or materialized != 1 or len(tables) != 1
+                    or tables[0].get("kind") != "selected_typed_joint_factorization_v1"
+                    or tables[0].get("selected_full_alpha") != selected_alpha
+                    or tables[0].get("alpha_binding") != bindings[selected_alpha]
+                    or tables[0].get("full_target_count") != expected):
+                raise ValueError(
+                    "Selected typed factorization does not match the exact public route inventory."
+                )
+        elif materialized != expected:
             raise ValueError(
                 "Fixed-content count/materialization mismatch: "
                 f"count={expected}, compiled_alpha_labels={materialized}, "
@@ -4937,8 +4951,51 @@ def compile(
                     "Typed joint compiled axes do not match the exact public "
                     "multiplicity-label bindings."
                 )
+    elif (
+        coupler_plan.spec.carrier == "ACE_density"
+        and any(resolved_input_Ls)
+    ):
+        expected_labels = tuple(coupler_plan.report.labels_for_target(target_L))
+        tables = tuple(coupler.sparse_coefficient_tables)
+        bindings = tuple(coupler.factorized_coefficient_tables)
+        magnetic_width = 2 * target_L + 1
+        if (
+            len(tables) != 2
+            or len(bindings) != 2
+            or tables[0].get("kind") != "typed_joint_orbit_isometry"
+            or tables[1].get("kind")
+            != "ace_density_compact_physical_coordinates"
+            or bindings[1].get("kind")
+            != "ace_density_compact_to_typed_binding_v1"
+            or len(coupler.alpha_labels()) != len(expected_labels)
+            or tuple(tables[1].get("compact_labels", ()))
+            != tuple(label.to_dict() for label in expected_labels)
+            or tuple(bindings[1].get("compact_labels", ()))
+            != tuple(label.to_dict() for label in expected_labels)
+            or int(bindings[1].get("typed_route_count", -1))
+            != len(expected_labels)
+            or tuple(bindings[1].get("target_M_values", ()))
+            != tuple(range(-target_L, target_L + 1))
+            or int(tables[1]["shape"][1])
+            != len(expected_labels) * magnetic_width
+            or not certificate.checks.get("compact_label_image_complete", False)
+            or not certificate.checks.get(
+                "compact_label_transport_m_independent", False
+            )
+            or not certificate.checks.get(
+                "compact_and_typed_physical_projectors_agree", False
+            )
+        ):
+            raise ValueError(
+                "Mixed-angular ordinary-density compilation does not bind "
+                "every exact compact label and magnetic component."
+            )
     validation_report = {
         **dict(coupler_plan.validation_report),
+        "selected_typed_alpha": coupler_plan.spec.metadata.get("selected_typed_alpha"),
+        "selected_subspace_of_full_typed_inventory": bool(
+            "selected_typed_alpha" in coupler_plan.spec.metadata
+        ),
         "compiled_certificate_passed": bool(certificate.passed),
         "compiled_runtime_status": certificate.runtime_status,
         "compiled_checks": dict(certificate.checks),
@@ -8073,6 +8130,7 @@ __all__ = [
     "choose_intermediate_L",
     "compile_ace_factorized_schedules_by_L",
     "compile_scalar_ace_coordinate",
+    "compile_ace_coordinate",
     "compile_covariant_cauchy",
     "compile_lifted_cauchy_scalar",
     "build_radial_species_product_record",
@@ -8129,6 +8187,7 @@ __all__ = [
     "tagged_cauchy_carriers_count",
     "compile_tagged_cauchy_carriers",
     "tagged_cauchy_carrier_schedule",
+    "tagged_cauchy_carrier_physical_image_plan",
     "tagged_cauchy_carrier_model_plan",
     "rank_additive_hidden_lineage_request",
     "hidden_lineage_contract",

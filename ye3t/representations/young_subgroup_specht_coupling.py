@@ -424,7 +424,8 @@ def build_cached_young_subgroup_specht_coupling(
     numeric_result = numeric_subduction_nullspace(
         spec.subgroup_partitions,
         spec.target_partition,
-        cache_dir=_default_numeric_subduction_cache_dir() if cache_dir is None else cache_dir,
+        cache_dir=(_default_numeric_subduction_cache_dir() if cache_dir is None
+                   else None if cache_dir is False else cache_dir),
         constraint_backend=constraint_backend,
         compare_exact_projector=bool(compare_exact_projector),
         exact_reference_max_rank=exact_reference_max_rank,

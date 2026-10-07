@@ -16,6 +16,10 @@ HOMOGENEOUS_CONFIG_REQUIRED_SECTIONS = {
     "targets",
     "validation",
 }
+DIRECT_WORKFLOW_EXAMPLES = {
+    "coupling_multiplicity_counts.py",
+    "coupling_coefficient_materialization.py",
+}
 
 
 def _example_imports(path):
@@ -204,10 +208,11 @@ def assert_top_level_config_comments(path, cfg_name):
 
 
 def run_example_workflow(name, config):
-    module = load_example(name)
     stream = io.StringIO()
     with contextlib.redirect_stdout(stream):
-        workflow_function(module)(config=config)
+        module = load_example(name)
+        if name not in DIRECT_WORKFLOW_EXAMPLES:
+            workflow_function(module)(config=config)
     return stream.getvalue()
 
 
@@ -249,6 +254,11 @@ def test_ye3t_examples_expose_import_first_workflows():
         module = load_example(relpath)
         assert isinstance(module.cfg_ye3t, dict), relpath
         assert module.cfg_ye3t, relpath
+        if relpath in DIRECT_WORKFLOW_EXAMPLES:
+            assert not workflow_definitions(path), relpath
+            assert _cfg_literal_keys(path, "cfg_ye3t") == (
+                HOMOGENEOUS_CONFIG_REQUIRED_SECTIONS), relpath
+            continue
         assert len(workflow_definitions(path)) == 1, relpath
         workflow_function(module)
         assert_guarded_workflow_call(path)
@@ -292,6 +302,7 @@ def test_coupling_multiplicity_counts_example_runs():
 
 def test_coupling_coefficient_materialization_example_runs():
     stdout = run_example_workflow("coupling_coefficient_materialization.py", None)
+    assert "coupling count source: ye3t.couplings.count" in stdout
     assert "coupling plan source: ye3t.couplings.plan" in stdout
     assert "coefficient source: ye3t.couplings.compile" in stdout
     assert "backend plan selected: symmetric_power_fast_path" in stdout

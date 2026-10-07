@@ -6,6 +6,7 @@ implicit ``repr`` serialization are deliberately unsupported.
 """
 
 from collections.abc import Mapping
+import errno
 import hashlib
 from importlib import metadata
 import json
@@ -153,9 +154,11 @@ class YE3TArtifactStore:
         self.mode = str(
             os.environ.get("YE3T_CACHE_MODE", "auto") if mode is None else mode
         ).strip().lower()
+        if self.mode == "refresh":
+            self.mode = "rebuild"
         if self.mode not in {"auto", "read_only", "rebuild", "off"}:
             raise ValueError(
-                "Artifact-cache mode must be auto, read_only, rebuild, or off."
+                "Artifact-cache mode must be auto, read_only, refresh, rebuild, or off."
             )
         self.verify = str(
             os.environ.get("YE3T_CACHE_VERIFY", "hash")
@@ -234,6 +237,8 @@ class YE3TArtifactStore:
             dependency_hashes,
             producer,
         )
+        if self.mode != "off" and (self.directory / "artifacts").is_symlink():
+            raise ArtifactCacheError("Artifact cache directory must not be a symlink.")
         if self.mode == "off":
             return self._build_resolution(
                 identity,
@@ -249,6 +254,11 @@ class YE3TArtifactStore:
                 ("user", self.directory),
             ):
                 path = self.path_for_identity(identity, root)
+                if ((Path(root) / "artifacts").is_symlink() or
+                        path.parent.is_symlink()):
+                    raise ArtifactCacheError(
+                        "Artifact cache directories must not be symlinks."
+                    )
                 if not path.is_file():
                     continue
                 try:
@@ -261,7 +271,8 @@ class YE3TArtifactStore:
                 except ArtifactCacheValidationError as error:
                     self._event(identity, "reject", source, path, str(error), 0)
                     if source == "user" and self.mode == "auto":
-                        self._quarantine(path)
+                        # Only quarantine under the per-key lock. Another writer
+                        # may replace this entry between validation and removal.
                         continue
                     raise
                 self._event(
@@ -280,6 +291,8 @@ class YE3TArtifactStore:
             )
 
         path = self.path_for_identity(identity)
+        if path.parent.is_symlink():
+            raise ArtifactCacheError("Artifact type directory must not be a symlink.")
         path.parent.mkdir(parents=True, exist_ok=True)
         lock_path = path.with_suffix(path.suffix + ".lock")
         with _ArtifactLock(lock_path):
@@ -450,52 +463,202 @@ class YE3TArtifactStore:
         except FileNotFoundError:
             pass
 
+    def _inspect_path(self, path):
+        root = Path(os.path.abspath(self.directory))
+        record = {"path": str(path.relative_to(root)),
+                  "bytes": 0, "status": "missing", "reason": "absent"}
+        try:
+            if not path.is_file():
+                return record
+            record["bytes"] = path.stat().st_size
+        except FileNotFoundError:
+            return record
+        except OSError as error:
+            record.update(status="invalid", reason=str(error))
+            return record
+        if ".json.invalid." in path.name:
+            record.update(status="quarantined", reason="superseded invalid entry")
+            return record
+        try:
+            if record["bytes"] > 256 * 1024 * 1024:
+                raise ValueError("entry exceeds 256 MiB")
+            envelope = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(envelope, dict):
+                raise ValueError("envelope is not a mapping")
+            identity = {name: envelope[name] for name in (
+                "store_schema", "artifact_type", "artifact_schema", "request",
+                "dependency_hashes", "producer")}
+            body = {name: value for name, value in envelope.items()
+                    if name != "envelope_hash"}
+            if (envelope["store_schema"] != ARTIFACT_STORE_SCHEMA or
+                    envelope["artifact_type"] != path.parent.name or
+                    envelope["request_hash"] != artifact_hash(envelope["request"]) or
+                    envelope["semantic_hash"] != artifact_hash(identity) or
+                    path.stem != envelope["semantic_hash"] or
+                    envelope["payload_hash"] != artifact_hash(envelope["payload"]) or
+                    envelope["envelope_hash"] != artifact_hash(body)):
+                raise ValueError("identity or payload hash mismatch")
+            _minimum_certificate(envelope.get("certificate"), ())
+        except FileNotFoundError:
+            return {**record, "bytes": 0, "status": "missing", "reason": "absent"}
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError,
+                TypeError, ValueError, ArtifactCacheValidationError) as error:
+            record.update(status="invalid", reason=str(error))
+            return record
+        record.update(status="integrity_valid", reason="verified envelope hashes")
+        return record
+
+    def inspect(self):
+        """List local cache entries with envelope-integrity status only."""
+        root = Path(os.path.abspath(self.directory)) / "artifacts"
+        if root.is_symlink():
+            raise ValueError("Artifact cache directory must not be a symlink.")
+        if not root.is_dir():
+            return []
+        records = []
+        for path in sorted(root.glob("*/*")):
+            if not (path.name.endswith(".json") or ".json.invalid." in path.name):
+                continue
+            if (path.is_symlink() or path.parent.is_symlink() or
+                    path.resolve().parent.parent != root.resolve()):
+                records.append({"path": str(path.relative_to(root.parent)),
+                                "bytes": 0, "status": "invalid",
+                                "reason": "entry resolves outside artifact root"})
+                continue
+            records.append(self._inspect_path(path))
+        return records
+
+    def prune(self, paths, dry_run=True, invalid_only=True):
+        """Remove only explicitly selected local entries after an integrity check."""
+        if isinstance(paths, (str, Path)):
+            paths = (paths,)
+        cache_root = Path(os.path.abspath(self.directory))
+        root = cache_root / "artifacts"
+        if root.is_symlink():
+            raise ValueError("Artifact cache directory must not be a symlink.")
+        selected = []
+        for value in paths:
+            candidate = Path(value)
+            if not candidate.is_absolute():
+                candidate = cache_root / candidate
+            path = Path(os.path.abspath(candidate))
+            if (path.parent.parent != root or path.is_symlink() or
+                    path.parent.is_symlink() or
+                    path.resolve().parent.parent != root.resolve()):
+                raise ValueError("Prune selection is outside the artifact cache root.")
+            name = path.name
+            if ".json.invalid." in name:
+                name = name.split(".json.invalid.", 1)[0] + ".json"
+            if (not name.endswith(".json") or
+                    _HASH.fullmatch(name[:-5]) is None or
+                    _ARTIFACT_COMPONENT.fullmatch(path.parent.name) is None):
+                raise ValueError("Prune selection is not an artifact entry.")
+            selected.append((path, path.with_name(name + ".lock")))
+        if invalid_only:
+            for path, _ in selected:
+                if self._inspect_path(path)["status"] == "integrity_valid":
+                    raise ValueError("Refusing to prune an integrity-valid cache entry.")
+        results = []
+        for path, lock_path in selected:
+            if dry_run:
+                record = self._inspect_path(path)
+                record["removed"] = False
+                results.append(record)
+                continue
+            if not path.is_file():
+                record = self._inspect_path(path)
+                record["removed"] = False
+                results.append(record)
+                continue
+            with _ArtifactLock(lock_path):
+                if path.is_symlink() or path.parent.is_symlink():
+                    raise ValueError("Prune selection became a symlink.")
+                record = self._inspect_path(path)
+                if invalid_only and record["status"] == "integrity_valid":
+                    raise ValueError("Refusing to prune an integrity-valid cache entry.")
+                if not dry_run and record["status"] != "missing":
+                    path.unlink()
+                    _fsync_directory(path.parent)
+                    record["removed"] = True
+                else:
+                    record["removed"] = False
+                results.append(record)
+        return results
+
 
 class _ArtifactLock:
-    def __init__(self, path, timeout=30.0, stale_after=600.0):
+    def __init__(self, path, timeout=None):
         self.path = Path(path)
-        self.timeout = float(timeout)
-        self.stale_after = float(stale_after)
-        self.acquired = False
+        self.timeout = None if timeout is None else float(timeout)
+        self.stream = None
 
     def __enter__(self):
         started = time.monotonic()
-        while True:
-            try:
-                descriptor = os.open(
-                    self.path,
-                    os.O_CREAT | os.O_EXCL | os.O_WRONLY,
-                    0o600,
-                )
-            except FileExistsError:
+        if self.path.is_symlink():
+            raise ArtifactCacheError("Cache lock path must not be a symlink.")
+        flags = os.O_RDWR | os.O_CREAT
+        if hasattr(os, "O_BINARY"):
+            flags |= os.O_BINARY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(self.path, flags, 0o600)
+        try:
+            stream = os.fdopen(descriptor, "r+b")
+        except BaseException:
+            os.close(descriptor)
+            raise
+        self.stream = stream
+        try:
+            if os.name == "nt":
+                # Windows byte-range locking needs a byte in the persistent
+                # lock file. Its contents have no ownership semantics.
+                stream.seek(0, os.SEEK_END)
+                if stream.tell() == 0:
+                    stream.write(b"\0")
+                    stream.flush()
+            while True:
                 try:
-                    age = time.time() - self.path.stat().st_mtime
-                except FileNotFoundError:
-                    continue
-                if age > self.stale_after:
-                    try:
-                        self.path.unlink()
-                    except FileNotFoundError:
-                        pass
-                    continue
-                if time.monotonic() - started >= self.timeout:
-                    raise TimeoutError(f"Timed out waiting for cache lock {self.path}.")
-                time.sleep(0.05)
-                continue
-            try:
-                os.write(descriptor, (str(os.getpid()) + "\n").encode("ascii"))
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
-            self.acquired = True
-            return self
+                    if os.name == "nt":
+                        import msvcrt
+
+                        stream.seek(0)
+                        msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                    else:
+                        import fcntl
+
+                        fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    return self
+                except OSError as error:
+                    if error.errno not in (errno.EACCES, errno.EAGAIN):
+                        raise
+                    if (self.timeout is not None
+                            and time.monotonic() - started >= self.timeout):
+                        raise TimeoutError(
+                            f"Timed out waiting for cache lock {self.path}."
+                        ) from error
+                    time.sleep(0.05)
+        except BaseException:
+            stream.close()
+            self.stream = None
+            raise
 
     def __exit__(self, exc_type, exc_value, traceback):
-        if self.acquired:
-            try:
-                self.path.unlink()
-            except FileNotFoundError:
-                pass
+        stream = self.stream
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+        finally:
+            stream.close()
+            self.stream = None
+        # Keep the lock inode. Unlinking it would let a third process create a
+        # different inode while another process still holds the first lock.
         return False
 
 

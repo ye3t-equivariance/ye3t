@@ -176,7 +176,7 @@ or the workflow-friendly top-level aliases ``target_L_R`` / ``L_R``,
 to the same ``YE3TSpec.target_rotation`` object, validates that every requested
 ``M_R`` lies in ``[-L_R, L_R]``, and writes the canonical nested form from
 ``to_dict()``.  This keeps homogeneous config inputs available across
-``ye3t`` and ``ye3t-ace`` without changing the mathematical target sector.
+``ye3t`` and ``ye3t-methods`` without changing the mathematical target sector.
 Carrier-specific runtime options should be placed in ``carrier_options``.  For
 example, A_s role-coordinate settings such as
 ``role_coordinate_policy="role_resolved"`` or ``"commutative_density"`` are

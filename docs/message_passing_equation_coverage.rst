@@ -87,7 +87,7 @@ below.
        carrier
    * - MP-EQ-13
      - Primitive one-interaction feature
-     - Implemented in ``ye3t-ace``
+     - Implemented in ``ye3t-methods``
      - Radial/angular site-basis evaluators with scalar species/charge
        conditioning
    * - MP-EQ-14

@@ -32,11 +32,20 @@ Typical fields include:
 
 .. code-block:: python
 
-   from ye3t.couplings import count
+   from ye3t.couplings import count, plan, compile
 
    report = count(content=(1, 1, 1), input_Ls=(0, 1, 1), target_L=0)
    print(report.validation_report["passed"])
    print(report.validation_report["valid_labels_from"])
+   compiled = compile(plan(report))
+   print(compiled.certificate.passed)
+
+This case has the same radial/content channel at both ``l=0`` and ``l=1``.
+Compilation checks the full content-and-angular blocks, then binds the
+existing compact ACE coefficient to the counted label. The compiled
+ordinary-density table records its physical projection and every magnetic
+component. A count report alone still does not certify coefficient
+materialization.
 
 Common failure modes:
 

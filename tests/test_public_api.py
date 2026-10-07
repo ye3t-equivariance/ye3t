@@ -15,6 +15,7 @@ def test_ye3t_top_level_public_exports_are_classified():
         "PermutationIrrep",
         "PermutationSubgroup",
         "PermutationSubgroupFactor",
+        "YE3TRepresentation",
         "symmetric_group_character",
     }
 

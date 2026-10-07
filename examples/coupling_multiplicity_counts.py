@@ -1,46 +1,44 @@
-"""Count valid YE3T coupling labels for a fixed-content ACE sector."""
+"""Inspect compiler-valid multiplicities for one fixed-content ACE sector."""
 
-# coupling_multiplicity_counts.py
-# Use ye3t.couplings.count as the single source of truth for valid labels and
-# multiplicities. Edit content/input_Ls/target_L to inspect another sector.
-
-from ye3t import couplings
-from ye3t.workflows import merge_workflow_config
+from ye3t import YE3TRepresentation
 
 
-# YE3T config dictionary.
 cfg_ye3t = {
-    "content": (1, 1, 2, 2),  # Fixed non-angular channel content.
-    "input_Ls": (1, 1, 2, 2),  # Slot angular momenta for the same content.
-    "target_L": 0,  # Target angular momentum L_R.
-    "target_permutation": "trivial",  # ACE invariant sector.
-    "carrier": "ACE_density",  # Ordinary compact ACE density carrier.
-    "label_preview": 2,  # Number of valid labels to print.
+    "metadata": {"schema": "ye3t_config_v1",
+                 "name": "fixed_content_count", "status": "stable",
+                 "label_preview": 2},
+    "representation": {
+        "group": "O3", "ranks": [4],
+        "parent": {"young_lambda": "(N)", "L": 0, "parity": "even"},
+        "factorization": "cauchy", "subspace": "full",
+        "uncoupled_factor_inputs": {
+            "eta_count_per_rank": {4: 2}, "l_max_per_rank": {4: 2},
+        },
+        "intermediates": {
+            "young_kappa": "all_valid", "block_rotation": {"policy": "all_valid"},
+        },
+    },
+    "basis": {
+        "fixed_content": [1, 1, 2, 2],
+        "input_Ls": [1, 1, 2, 2],
+        "carrier": "ACE_density",
+    },
+    "runtime": {}, "model": {}, "targets": {}, "validation": {},
 }
 
-
-def run_coupling_multiplicity_counts(config=None):
-    """Print a compact multiplicity report from ye3t.couplings.count."""
-    settings = merge_workflow_config(cfg_ye3t, config)
-    report = couplings.count(
-        content=tuple(settings["content"]),
-        input_Ls=tuple(settings["input_Ls"]),
-        target_L=int(settings["target_L"]),
-        target_permutation=str(settings["target_permutation"]),
-        carrier=str(settings["carrier"]),
-    )
-    counts_by_target = dict(report.counts_by_target)
-    labels = list(report.labels_for_target(int(settings["target_L"])))
-    print("coupling count source:", "ye3t.couplings.count")
-    print("content:", tuple(report.content))
-    print("carrier:", report.carrier)
-    print("target:", report.target)
-    print("counts by target:", counts_by_target)
-    print("total labels for target:", len(labels))
-    print("validation passed:", bool(report.validation_report.get("passed", False)))
-    for index, label in enumerate(labels[: max(0, int(settings["label_preview"]))]):
-        print("label", index, label)
-
-
-if __name__ == "__main__":
-    run_coupling_multiplicity_counts(config=cfg_ye3t)
+representation = YE3TRepresentation.from_config(cfg_ye3t["representation"])
+report = representation.count_fixed_content(
+    cfg_ye3t["basis"]["fixed_content"], cfg_ye3t["basis"]["input_Ls"],
+    carrier=cfg_ye3t["basis"]["carrier"],
+)
+labels = report.labels_for_target(representation.L)
+print("coupling count source: ye3t.couplings.count")
+print("representation:", representation)
+print("content:", tuple(report.content))
+print("carrier:", report.carrier)
+print("target:", report.target)
+print("counts by target:", dict(report.counts_by_target))
+print("total labels for target:", len(labels))
+print("validation passed:", bool(report.validation_report.get("passed", False)))
+for index, label in enumerate(labels[:cfg_ye3t["metadata"]["label_preview"]]):
+    print("label", index, label)
