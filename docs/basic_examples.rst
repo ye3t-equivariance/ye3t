@@ -1,59 +1,33 @@
 Basic YE3T Examples
 ===================
 
-The remaining examples in ``examples/`` are deterministic importable workflows
-for the core ``ye3t`` representation and tensor-product API. Small API
-demonstrations that only print counts, characters, or schedule metadata live in
+The examples in ``examples/`` show editable configurations for the core
+``ye3t`` representation and tensor-product API. Short API demonstrations that
+print counts, representation traces, or schedule metadata live in
 :doc:`representation_snippets` as tested copy/paste snippets.
 
-General Joint Coupling
-----------------------
+Joint Rotation and Permutation Coupling
+---------------------------------------
 
-Use ``JointYoungCGProduct`` or the dictionary helper
-``build_joint_young_cg_product_from_config`` when a workflow needs a product
-between explicit joint sectors
+For rank ``N``, YE3T couples ordered tensor factors into a parent sector
 
 .. math::
 
-   V_{L_1}\otimes W_{\lambda_1}
-   \;\otimes\;
-   V_{L_2}\otimes W_{\lambda_2}
-   \longrightarrow
-   V_L\otimes W_\lambda.
+   [\lambda]\otimes V_L, \qquad \lambda\vdash N.
 
-The angular factor is an exact Clebsch-Gordan map and the permutation factor is
-the exact lowered Young/change-of-group map. The product schedules only retain
-branches allowed by both factors.
+The multiplicity count identifies independent coupling paths; each path has
+Young-carrier and magnetic components. The complete config and runnable
+factor-array example are in ``examples/user_supplied_factors.py``. Change its
+``representation.parent`` and ``basis.fixed_content`` to select a different
+Young type, angular momentum, and factor content. The symmetric and
+antisymmetric factor examples cover their respective parent types for any
+reachable output ``L``.
 
-.. code-block:: python
-
-   from ye3t.workflows import build_joint_young_cg_product_from_config
-
-   product = build_joint_young_cg_product_from_config(
-       {
-           "left": {
-               "blocks": [
-                   {"nin": [1], "lin": [1], "L": 1, "mul": 2},
-               ],
-           },
-           "right": {
-               "blocks": [
-                   {"nin": [1], "lin": [1], "L": 1, "mul": 1},
-               ],
-           },
-           "tree_type": "balanced",
-           "L_max": 1,
-           "permutation_policy": "mixed_character",
-       }
-   )
-
-   print(product.format_instruction_report())
-   schedule = product.static_schedule()
-   loaded = product.from_static_schedule(schedule)
-
-``L_max`` and ``permutation_policy`` are admissibility controls. They do not
-replace the Clebsch-Gordan or Young-product rules; they only restrict which
-already-valid branches are materialized.
+Programs that multiply already-coupled sectors can use the lower-level
+``JointYoungCGProduct`` schedule API described in
+:doc:`operator_ir_and_schedules`. Rank-increasing products use induction and
+Littlewood--Richardson multiplicities; same-rank products under one diagonal
+``S_N`` action use Kronecker multiplicities.
 
 Importable Examples
 -------------------
@@ -74,8 +48,8 @@ small vocabulary:
 
 ``content`` / ``input_Ls`` / ``target_L``
    A fixed-content coupling request: the non-angular channel content, the
-   slot angular momenta, and target ``L_R``. The migrated
-   ``examples/coupling_multiplicity_counts.py`` places the target under
+   factor angular momenta, and target ``L``. The
+   ``examples/coupling_multiplicity_counts.py`` config places the target under
    ``representation.parent.L`` and the first two values under ``basis``;
    ``coupling_coefficient_materialization.py`` uses the same seven-section shape.
 
@@ -85,7 +59,7 @@ small vocabulary:
 
 ``nin`` / ``lin``
    Tuples that define one product sector. They must have the same length. Each
-   slot pairs a non-angular channel ``eta_i`` from ``nin`` with an angular
+   factor pairs a non-angular channel ``eta_i`` from ``nin`` with an angular
    momentum ``l_i`` from ``lin``. Repeated pairs induce Young/permutation
    subgroups such as ``S2{0,1}``.
 
@@ -117,35 +91,14 @@ small vocabulary:
    Bound on representative labels printed per section. It does not change the
    exact count.
 
-Use :doc:`representation_snippets` for small copy/paste count and enumeration
-snippets, and use ``examples/coupling_multiplicity_counts.py`` or
-``examples/coupling_coefficient_materialization.py`` when you want a dedicated
-script that exercises the public coupling report/compiler surface. To choose
-your own sector, edit ``cases`` directly:
+Use :doc:`representation_snippets` for short copy/paste count and enumeration
+queries. For an editable seven-section configuration, run
+``examples/coupling_multiplicity_counts.py`` and change its parent Young type,
+target ``L``, factor content, and factor angular momenta. The companion
+``examples/coupling_coefficient_materialization.py`` compiles coefficients for
+the same kind of request.
 
-.. code-block:: python
-
-   from ye3t.utils.printing import print_basis_enumeration
-
-   config = {
-       "mode": "labels_by_L",
-       "include_rank16": False,
-       "max_target_L": 3,
-       "print_limit": 3,
-       "tree_type": "balanced",
-       "cases": (),
-   }
-   config["cases"] = (
-       {
-           "name": "my rank-3 sector",
-           "nin": (1, 1, 2),
-           "lin": (0, 1, 2),
-       },
-   )
-   config["max_target_L"] = 3
-   print_basis_enumeration(config)
-
-The snippet page also covers generalized permutation/rotation characters,
+The snippet page also covers permutation/rotation representations,
 exact change-of-group tensor products, structured basis coordinates, and
 schedule metadata.
 
@@ -190,7 +143,7 @@ schedule metadata.
 ``examples/cauchy_supplied_density.py``
    Counts and applies a nontrivial local ``κ=(1,1)`` Cauchy path to a pair of
    role-resolved real tesseral densities. The output is an axial ``L=1``
-   multiplet with globally symmetric factor character.
+   multiplet with globally symmetric factor symmetry.
 
 ``examples/tagged_cauchy_linear_coordinates.py``
    Counts and compiles the scalar tagged-Cauchy physical coordinates for the

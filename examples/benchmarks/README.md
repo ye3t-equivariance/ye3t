@@ -1,6 +1,6 @@
 # YE3T benchmarks
 
-Benchmark, profiling, timing, and ablation examples live here.
+These scripts measure coupling construction, caching, and kernel costs.
 
 Rules:
 
@@ -12,7 +12,7 @@ Rules:
   paper figures, or reproducible engineering decisions.
 - Keep machine metadata optional and disabled by default.
 
-Current scripts:
+Benchmarks:
 
 - `benchmark_permutation_subduction_fastpath.py`: exact symbolic versus
   numeric permutation-subduction construction with validation.

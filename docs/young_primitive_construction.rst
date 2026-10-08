@@ -43,19 +43,18 @@ Rank-2 Young-Yamanouchi / CG Runtime Schedules
 
 Use ``compile_young_yamanouchi_pair_cg_runtime_schedule`` for the first
 materialized runtime bridge between the Young-sector convention and executable
-coefficient tensors.  The current implementation supports repeated rank-2
-slots.  It combines Young-orthogonal Specht induction coefficients with exact
+coefficient tensors. The implementation supports repeated rank-2
+factors. It combines Young-orthogonal Specht induction coefficients with exact
 YE3T Clebsch-Gordan coefficients and returns sparse bilinear entries that can
 be evaluated by ``evaluate_young_yamanouchi_pair_cg_runtime_schedule``.
 The emitted rows are the coefficients that remain after Young symmetrization
 and CG recoupling have been summed.  For example, with two repeated ``l=1``
-slots, ``(2)`` appears only at ``L_R=0,2`` and ``(1,1)`` appears only at
+factors, ``(2)`` appears only at ``L_R=0,2`` and ``(1,1)`` appears only at
 ``L_R=1``.
 
 This is intended for small, controlled filtered-density ``A_s`` ablations where
-the goal is to compare trivial and nontrivial slot characters with an explicit
-coefficient convention.  It is not yet an arbitrary-rank Young-E3 coefficient
-materializer.
+the goal is to compare trivial and nontrivial factor-permutation types with an
+explicit coefficient convention.
 
 .. code-block:: python
 
@@ -85,16 +84,14 @@ References for the mathematical setting:
 * V. Chilla, "A reduced subduction graph and higher multiplicity in S_n
   transformation coefficients", arXiv:math-ph/0606037.  This is used as
   reference context for reduced subduction graphs, selection/identity rules,
-  and higher-multiplicity cases; the current implementation is a finite-rank
+  and higher-multiplicity cases; the implementation is a finite-rank
   YE3T-specific graph-propagation backend, not a full reproduction of every
   algorithm in that paper.
 
 Schur-Weyl-Guided Balanced Runtime Trees
 ----------------------------------------
 
-Status: implemented and tested for selected finite cases; not yet an
-independent arbitrary-rank normalized Young-Yamanouchi subduction-coefficient
-generator.
+Status: implemented and tested for the finite cases listed below.
 
 Use ``compile_schur_weyl_guided_tree_product`` when inspecting balanced
 pairwise runtime schedule shapes beyond rank 2.  Each internal node first
@@ -104,26 +101,26 @@ then requests only those admissible target labels from the existing exact
 materialized node dimension matches the selected Schur-Weyl/Specht plan and
 that no requested target labels are missing or duplicated.
 
-``JointYoungCGProduct`` now emits fused irreducible target blocks.  When
+``JointYoungCGProduct`` emits fused irreducible target blocks. When
 multiple pairwise branches land in the same canonical final label, the runtime
 uses one output block and accumulates the exact branch coordinate maps into
 that block.  It does not expose an unfused coupling-path output mode.
 
 Root parity can be filtered with ``root_target_parity="even"`` or
-``root_target_parity="odd"``.  This uses the total slot parity
+``root_target_parity="odd"``. This uses the total spherical-factor parity
 ``(-1)^{sum_i l_i}``; the default ``None`` keeps all ``SO(3)`` sectors.
 
-Validated cases currently include:
+Tests cover:
 
-* rank-3 non-repeated slots, e.g. ``nin=(1,1,1)``,
+* rank-3 non-repeated factors, e.g. ``nin=(1,1,1)``,
   ``lin=(0,1,2)``, with exact runtime dimension matching the plan dimension;
-* rank-4 balanced scalar slots, e.g. ``lin=(0,0,0,0)``, with exact runtime
+* rank-4 balanced scalar factors, e.g. ``lin=(0,0,0,0)``, with exact runtime
   dimension matching the plan dimension.
-* rank-3 repeated slots ``nin=(1,1,1)``, ``lin=(1,1,1)``, with fused runtime
+* rank-3 repeated factors ``nin=(1,1,1)``, ``lin=(1,1,1)``, with fused runtime
   dimension ``27`` matching the Schur-Weyl/Specht plan dimension.
 
 ``littlewood_richardson_tableaux`` and
-``littlewood_richardson_coefficient`` now provide an independent exact
+``littlewood_richardson_coefficient`` provide an independent exact
 finite-rank multiplicity-label route for one subgroup-adapted merge
 ``S_a x S_b -> S_{a+b}``.  The coupling constructor checks that the LR
 coefficient agrees with the character inner product and the exact
@@ -162,12 +159,10 @@ same subspace of the same n-ary induced representation.
 same check over enumerated small-rank cases; current tests exercise this
 through rank 4.
 
-Remaining limitation: the current fused runtime reuses exact lowered
-coordinate maps from the existing generalized composer and coalesces them by
-canonical target label.  The subduction-graph backend is implemented and
-tested on small finite-rank cases, including a binary multiplicity-two case,
-but it is not yet benchmarked and should not be described as production
-optimized.
+The fused runtime reuses exact lowered coordinate maps from the generalized
+composer and coalesces them by canonical target label. The subduction-graph
+backend is tested on small finite-rank cases, including a binary
+multiplicity-two case. Its production performance has not been measured.
 
 Balanced Message-Passing Reference Schedules
 --------------------------------------------
@@ -177,9 +172,9 @@ recursive tensor message passing remains planned and not public.
 
 ``CompileBalancedYE3TMessagePassingSchedule`` consumes a
 ``BalancedYE3TMessageStateSpec`` and expands each requested hidden sector into
-certified global Young--E3 coupler records.  The schedule records the task
+validated global Young--E3 coupler records.  The schedule records the task
 readout selection rule, selected coefficient backend, repeated-content image-map
-metadata when needed, and balanced-tree certificates.  It intentionally keeps
+metadata when needed, and balanced-tree validation records. It keeps
 ``implemented_tensor_runtime=False`` and
 ``full_message_passing_runtime_status="planned_not_public"``.
 For repeated-content balanced splits, ``RepeatedContentImageMap`` exposes both
@@ -287,8 +282,8 @@ order; a policy that should ignore child order must check both sides.
 
 ``factor_route_policy="matched_pairs"`` admits equal-content rank-one pairs
 and then merges even-rank children. With ``factor_scope="recursive"``, this
-certifies that every retained branch is built from matched pairs. For exactly
-three distinct two-slot content blocks, the exact backend handles every
+validates that every retained branch is built from matched pairs. For exactly
+three distinct two-factor content blocks, the exact backend handles every
 reachable output ``L_R`` in the pair-CG basis. It builds each allowed
 three-pair product tree and computes exact overlaps between its angular path
 and a canonical tree. Consequently, overlapping routes at ``L_R > 0`` are
@@ -381,7 +376,7 @@ carriers; the compiler does not promise bounded cost at arbitrary rank.
    # 208 2016 1312 (208 total copies; 126 generated and 82 primitive,
    #                 each with Young dimension 16)
 
-The global lift has no rank-six guard. For example, an eight-slot pattern
+The global lift has no rank-six guard. For example, an eight-factor pattern
 with four distinct pairs and one active angular pair has an exact
 ``L_R=1`` sector with global partition ``(7,1)`` and generated rank seven::
 
@@ -449,12 +444,12 @@ form avoids a dense full-orbit matrix. Supply a subgroup partition signature
 to calculate just one block; ``induction_map(signature)`` supplies its exact
 Young placement coefficients on demand. The returned orthogonal subspace is
 intrinsic to the chosen invariant inner product and factor policy, while its
-individual normalized columns depend on the declared coordinate ordering.
+individual normalized columns depend on the specified coordinate ordering.
 ``orthonormal_primitive_vector(...)`` selects one primitive copy, LR channel,
 Young component, and magnetic component. It returns sparse
 ``(target_basis_label, magnetic_M, exact_coefficient)`` terms in the
 symmetry-adapted target basis. It does not expand those terms into every
-uncoupled magnetic-slot and content-orbit coefficient.
+uncoupled magnetic-factor and content-orbit coefficient.
 
 .. code-block:: python
 

@@ -79,11 +79,11 @@ has a bounded dense-table size cap and is meant for tests and comparisons;
 For an ordinary commutative ACE-density label, ``compile_ace_coordinate``
 materializes all ``2L+1`` complex-magnetic components. It composes the
 compiler's symmetric-power block coordinates with its angular schedule,
-then collects equivalent density monomials. The returned certificate checks
+then collects equivalent density monomials. The returned validation record checks
 fixed-content membership, magnetic sign reversal, and the SO(3) raising
 generator. The algebraic map is exact for compiler-issued labels with maximal
 fixed-content blocks through rank eight; stored binary64 coefficients use
-tolerance pruning and are numerically certified. ``L=0`` delegates to the
+tolerance pruning and pass numerical validation. ``L=0`` delegates to the
 existing scalar compiler so its coefficient convention stays compatible.
 
 .. code-block:: python

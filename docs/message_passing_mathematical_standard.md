@@ -16,13 +16,13 @@ Status tags:
 - **`[STD]`**: standard representation theory, angular-momentum theory, or graph/message-passing mathematics.
 - **`[DERIVED]`**: a direct application of standard results to the stated YE3T carrier.
 - **`[PROPOSED]`**: a YE3T architecture or realization interface requiring project proof and validation.
-- **`[VERIFY]`**: plausible or draft-supported, but not yet promoted to a proved project theorem.
+- **`[VERIFY]`**: supported by a draft argument; the proof and scope still need review.
 
 Project-source precedence:
 
 1. latest explicit project decision or correction;
 2. this file for message-passing mathematics;
-3. the manuscript, which is evidence rather than automatic authority.
+3. the manuscript, with each claim checked against derivations and tests.
 
 ### 0.1 Non-negotiable implementation rules
 
@@ -47,7 +47,7 @@ Project-source precedence:
 
    \(W_\theta\) acts only on axes carrying the trivial group action: exact multiplicity copies, source/content channels, radial/chemical channels, coupling-path coordinates after a basis is fixed, and ordinary learned channels. It never acts arbitrarily on Young components \(t\), magnetic components \(M\), or a different \((N,\lambda,L)\) block.
 
-3. **Different angular momenta do interact, but this is not linear “mixing of \(L\).”** They interact through tensor products and exact Clebsch--Gordan projection:
+3. **Different angular momenta interact through tensor products and exact Clebsch--Gordan projection.** The resulting operation is
 
    \[
    V_{L_A}\otimes V_{L_B}
@@ -86,7 +86,7 @@ Translation invariance is obtained from relative positions, giving the spatial
 behavior needed for \(E(3)\)-equivariant atomistic models without introducing a
 separate translation carrier. `parity=None` denotes only an explicit
 `SO3_legacy` carrier. All spaces are finite-dimensional complex inner-product
-spaces unless a fixed real-basis conversion is declared and serialized.
+spaces unless a fixed real-basis conversion is specified and serialized.
 
 ### 0.3 O(3) carrier and product convention
 
@@ -102,7 +102,7 @@ D^{(L,p)}(Q)=p^kD^{(L)}(R).
 \]
 
 Parity is independent of \(L\). In particular, \(L=0,p=-1\) is a
-pseudoscalar rather than an invariant scalar.
+pseudoscalar with odd inversion parity.
 
 #### MP-EQ-O3-02 -- polar spherical-harmonic sources `[STD]`
 
@@ -117,7 +117,7 @@ p_{\mathrm{source}}=(-1)^{\sum_f l_f}.
 \]
 
 Any axial, pseudoscalar, spinful, or otherwise intrinsic-parity source must
-declare that source convention separately; it must not reuse the polar-source
+specify that source convention separately; it must not reuse the polar-source
 default silently.
 
 #### MP-EQ-O3-03 -- product and coupling parity `[STD]`
@@ -247,7 +247,7 @@ implementation source is copied or mechanically translated.
 | \(\mathsf C\) | raw-to-coupled synthesis matrix |
 | \(W\) | learned map on \(\mathcal A_\theta\), never on \(t,M\) |
 | \(s\) | optional role/filter label for a lifted density |
-| \(b=(Z_i,Z_j)\) | declared directed or unordered chemical pair type |
+| \(b=(Z_i,Z_j)\) | specified directed or unordered chemical pair type |
 | \(K_b\) | number of available lifted source roles for pair type \(b\) |
 | \(\chi\) | source realization: role tuple, motif embedding, or another typed source |
 | \(Q_i\) | scalar per-atom charge or charge-like variable |
@@ -257,13 +257,13 @@ The role label \(s\) has two legitimate uses:
 - if it is an intrinsic one-factor radial/channel label, it may be included in \(\eta\);
 - if it is an architecture-level factor role, branch, or support label, keep it separate.
 
-The mathematical requirement is not a particular symbol placement. It is that ordered factor-role/channel information is retained through orbit closure and coupling rather than collapsed to an unordered commutative product.
+The mathematical requirement is to retain ordered factor-role/channel information through orbit closure and coupling. Symbol placement is a notation choice; an unordered commutative product erases the required action.
 
 ---
 
 ## 2. Orbit-closed fixed-content carrier
 
-### MP-EQ-01 — content, stabilizer, and orbit carrier `[DERIVED]`
+### MP-EQ-01: content, stabilizer, and orbit carrier `[DERIVED]`
 
 Let
 
@@ -307,7 +307,7 @@ Then
 
 The orbit contains distinct orderings, not one duplicate for every stabilizer element.
 
-### MP-EQ-02 — commuting factor-permutation and rotation actions `[DERIVED]`
+### MP-EQ-02: commuting factor-permutation and rotation actions `[DERIVED]`
 
 Use
 
@@ -354,7 +354,7 @@ Therefore
 
 This factor-position action is distinct from reordering a physical neighbor list.
 
-### MP-EQ-03 — raw basis and raw coordinate vector `[STD/DERIVED]`
+### MP-EQ-03: raw basis and raw coordinate vector `[STD/DERIVED]`
 
 The orthonormal raw product basis satisfies
 
@@ -410,7 +410,7 @@ Enumerating every orbit coordinate does not make \(\mathbf Z\) invariant. Invari
 
 ## 3. Exact decomposition and multiplicity spaces
 
-### MP-EQ-04 — repeated-block decomposition `[STD/DERIVED]`
+### MP-EQ-04: repeated-block decomposition `[STD/DERIVED]`
 
 For repeated block \(b\),
 
@@ -462,7 +462,7 @@ d_{\boldsymbol\kappa\boldsymbol\Lambda}
 
 The symbol \(\boxtimes\) is the external tensor product for the product group \(G_{\boldsymbol\nu}=\prod_bS_{k_b}\).
 
-### MP-EQ-05 — block-to-parent permutation induction `[STD]`
+### MP-EQ-05: block-to-parent permutation induction `[STD]`
 
 \[
 \boxed{
@@ -494,7 +494,7 @@ c_{\boldsymbol\kappa}^{\lambda}
 \right).
 \]
 
-### MP-EQ-06 — block-to-parent angular restriction `[STD]`
+### MP-EQ-06: block-to-parent angular restriction `[STD]`
 
 \[
 \boxed{
@@ -523,7 +523,7 @@ V_L,
 
 Different complete coupling trees give different path bases but the same total \(M_{\boldsymbol\Lambda}^{L}\).
 
-### MP-EQ-07 — full joint decomposition `[DERIVED; theorem status VERIFY]`
+### MP-EQ-07: full joint decomposition `[DERIVED; theorem status VERIFY]`
 
 \[
 \boxed{
@@ -588,7 +588,7 @@ The dimension identity is
 
 ## 4. Coupled orthonormal basis, intertwiners, and learned maps
 
-### MP-EQ-08 — synthesis basis and feature analysis `[DERIVED]`
+### MP-EQ-08: synthesis basis and feature analysis `[DERIVED]`
 
 Let \(\upalpha=(\lambda,L,a,t,M)\). For a selected tree \(\mathcal T\),
 
@@ -617,7 +617,7 @@ Z_{i,q}
 \tag{MP-EQ-08a}
 \]
 
-### MP-EQ-09 — orthonormality, completeness, and selected projectors `[STD/DERIVED]`
+### MP-EQ-09: orthonormality, completeness, and selected projectors `[STD/DERIVED]`
 
 For retained columns,
 
@@ -662,7 +662,7 @@ The character projector onto the \(\lambda\)-isotypic component is
 
 It does not select an individual tableau component or multiplicity copy.
 
-### MP-EQ-10 — intertwining property `[STD/DERIVED]`
+### MP-EQ-10: intertwining property `[STD/DERIVED]`
 
 With \(\rho_{\mathrm{raw}}(\sigma,R)=P(\sigma)D(R)\),
 
@@ -683,7 +683,7 @@ I_{\mathscr M_{\boldsymbol\nu}^{\lambda L}}
 
 Tableaux, diagrams, and paths label states or copies; they do not themselves supply the numerical coefficients in \(\mathsf C\).
 
-### MP-EQ-11 — change of complete coupling tree `[STD/DERIVED]`
+### MP-EQ-11: change of complete coupling tree `[STD/DERIVED]`
 
 For complete orthonormal trees \(\mathcal T\) and \(\mathcal T'\), using the same parent Young and magnetic bases,
 
@@ -705,7 +705,7 @@ I_{[\lambda]\otimes V_L}
 
 The recoupling unitary acts on path/multiplicity coordinates. A complete linear tree does not change \(\alpha_{\boldsymbol\nu}^{\lambda L}\). Pruning, truncation, or nonlinear operations between partial couplings can change the retained subspace and therefore define a different architecture.
 
-### MP-EQ-12 — most general linear equivariant map `[STD]`
+### MP-EQ-12: most general linear equivariant map `[STD]`
 
 For each fixed rank \(N\), let
 
@@ -718,7 +718,7 @@ U_{N\lambda L}\otimes\mathcal A_{N\lambda L},
 U_{N\lambda L}=[\lambda]\otimes V_L.
 \]
 
-Over the declared complex convention, Schur's lemma gives
+Over the specified complex convention, Schur's lemma gives
 
 \[
 \boxed{
@@ -737,7 +737,7 @@ U_{N\lambda' L'}\otimes\mathcal B_{N\lambda' L'}
 \tag{MP-EQ-12}
 \]
 
-The concrete map in the matching block is \(I_{U_{N\lambda L}}\otimes W_{N\lambda L}\). Different ranks carry representations of different symmetric groups; a generic linear layer must therefore keep \(N\) fixed. A rank-changing operation requires an explicit induction, restriction, insertion/removal, or other declared group-changing map.
+The concrete map in the matching block is \(I_{U_{N\lambda L}}\otimes W_{N\lambda L}\). Different ranks carry representations of different symmetric groups; a generic linear layer must therefore keep \(N\) fixed. A rank-changing operation requires an explicit induction, restriction, insertion/removal, or other specified group-changing map.
 
 **Interpretation of \(W_\theta\):**
 
@@ -755,7 +755,7 @@ This is the precise replacement for the vague sentence “\(W\) mixes only multi
 
 The YE3T analysis map is independent of how the raw coordinates are physically realized. The main realizations here are lifted-density products and explicit rooted motifs.
 
-### MP-EQ-13 — primitive one-interaction feature `[PROPOSED input convention]`
+### MP-EQ-13: primitive one-interaction feature `[PROPOSED input convention]`
 
 \[
 \boxed{
@@ -775,7 +775,7 @@ Y_l^m(\widehat{\mathbf r}_{ij}),
 
 Here \(x_i^{\mathrm{sc}}\) denotes scalar atom attributes. Scalar charge may condition a radial/filter map without changing the \(V_l\) carrier. A vectorial atom variable must carry its own nontrivial rotational representation.
 
-### MP-EQ-14 — ordinary and edge-filtered lifted densities `[PROPOSED realization]`
+### MP-EQ-14: ordinary and edge-filtered lifted densities `[PROPOSED realization]`
 
 \[
 \boxed{
@@ -795,11 +795,11 @@ A_{i,s,\eta lm}
 The scalar weight \(w_{is}(j)\):
 
 - must be rotation invariant;
-- must depend on atom/edge data rather than arbitrary neighbor-list position;
+- must depend on atom/edge data and be invariant to neighbor-list ordering;
 - may be a smooth shell/window, radial filter, scalar attention weight, role map, or another permutation-compatible scalar;
 - does not create a physical symmetry that exchanges different radial shells.
 
-### MP-EQ-15 — formal post-pooling radial-role map `[PROPOSED; exact under span condition]`
+### MP-EQ-15: formal post-pooling radial-role map `[PROPOSED; exact under span condition]`
 
 When the filtered radial functions lie in the span of a base radial basis, define
 
@@ -831,7 +831,7 @@ This is the formal meaning of an equivariant radial-channel/role lift: \(K_{i,s}
 
 No radial polynomial family automatically creates mixed permutation symmetry. Nontrivial factor-permutation content arises from retaining different ordered factor vectors/roles through the YE3T coupling.
 
-### MP-EQ-16 — exact density-product expansion `[STD/DERIVED]`
+### MP-EQ-16: exact density-product expansion `[STD/DERIVED]`
 
 \[
 \boxed{
@@ -851,7 +851,7 @@ A_{i,s_f,\mu_fm_f}
 
 Repeated neighbors \(j_f=j_{f'}\) are allowed. Injectivity, exclusion of repeated neighbors, or removal of self-interaction is an additional modeling choice.
 
-### MP-EQ-17 — explicit rooted motif realization `[PROPOSED realization]`
+### MP-EQ-17: explicit rooted motif realization `[PROPOSED realization]`
 
 Let \(\mathsf M\) be a typed rooted motif with root \(v_\star\) and factor-support edges \(e_f=(u_f,v_f)\). For a root-preserving, type-preserving injective embedding
 
@@ -883,9 +883,9 @@ Distinct unlabeled physical occurrences may be represented by
 \operatorname{Aut}_\star(\mathsf M).
 \]
 
-Quotienting physical embeddings must not silently project away a desired nontrivial internal representation of motif roles. Use an automorphism-adapted internal carrier or a declared orientation/transformation convention.
+Quotienting physical embeddings must not silently project away a desired nontrivial internal representation of motif roles. Use an automorphism-adapted internal carrier or a specified orientation/transformation convention.
 
-### MP-EQ-18 — unified raw coordinates `[PROPOSED interface]`
+### MP-EQ-18: unified raw coordinates `[PROPOSED interface]`
 
 For \(q=(\boldsymbol\mu,\mathbf m)\), let \(\chi\) be either a motif embedding or a lifted-density role tuple \(\boldsymbol s=(s_1,\ldots,s_N)\). Define
 
@@ -918,7 +918,7 @@ The raw source input to coupling is the coordinate vector
 
 This avoids the notational ambiguity of calling both \(Z_q\) and \(Z_q|q\rangle\) “the uncoupled basis.”
 
-### MP-EQ-19 — ordinary-density selection rule and lifted-role covariance `[DERIVED]`
+### MP-EQ-19: ordinary-density selection rule and lifted-role covariance `[DERIVED]`
 
 For one shared density vector, commutativity gives
 
@@ -956,17 +956,17 @@ The span of the role orbit may contain nontrivial \([\lambda]\) carriers. Such c
 The formal left \(S_N\) action above must not be confused with relabeling the
 typed role/filter alphabet itself. For right-coset coordinates \(gH\), the
 physical lifted coordinate is serialized with
-\(s_f=s^\circ_{g^{-1}(f)}\). A formal slot permutation acts by left
+\(s_f=s^\circ_{g^{-1}(f)}\). A formal factor permutation acts by left
 multiplication on \(gH\) and therefore on the Young tableau axis. A permutation
 of distinct role labels acts through the right normalizer when defined and may
 mix multiplicity/source channels. Different radial shells are not implicitly
-exchangeable. If an architecture declares such a role automorphism as a
+exchangeable. If an architecture includes such a role automorphism in its
 symmetry, its learned maps must be compiled to commute with that additional
 action; otherwise no role-label-swap invariance may be claimed.
 
-### MP-EQ-19b — pair-dependent lifted source families `[DERIVED/PROPOSED interface]`
+### MP-EQ-19b: pair-dependent lifted source families `[DERIVED/PROPOSED interface]`
 
-Let \(b(i,j)=(Z_i,Z_j)\) denote a declared directed chemical pair type, or its
+Let \(b(i,j)=(Z_i,Z_j)\) denote a specified directed chemical pair type, or its
 unordered analogue when the model enforces pair symmetry. Pair-dependent
 cutoffs, radial decay rates, and radial basis sizes may be included in the
 scalar radial map:
@@ -1019,7 +1019,7 @@ combined as a direct sum and mixed or summed after analysis into aligned copies
 of the same \(\theta\). Raw source coordinates of different types must not be
 added before their typed intertwiners. A packed runtime may use offsets or
 source-signature buckets. Padding is valid only when the padded zero subspace is
-invariant under the complete declared source action.
+invariant under the complete specified source action.
 
 The role count \(K_b\), formal tensor rank \(N\), and radial basis size are
 independent quantities. For an ordered rank-\(N\) role assignment with
@@ -1052,13 +1052,13 @@ a_{\lambda}(\mathbf m)
 \]
 
 When the sorted nonzero occupancy is the partition \(\mu\), this multiplicity
-is the Kostka number \(K_{\lambda\mu}\). If a repeated block carries a declared
+is the Kostka number \(K_{\lambda\mu}\). If a repeated block carries a specified
 nontrivial internal source representation \(\rho\), replace the trivial
 representation in MP-EQ-19d by \(\rho\). These finite-group multiplicities must
 still be intersected with angular coupling multiplicities for the selected
 input \(l\) values and parent \(L\).
 
-### MP-EQ-19e — rank growth with fewer role types `[DERIVED/VERIFY source image]`
+### MP-EQ-19e: rank growth with fewer role types `[DERIVED/VERIFY source image]`
 
 Formal rank is not bounded by role count. Let a rank-3 child use three role
 types \((a,b,c)\). A rank-additive product of two such children has six formal
@@ -1097,8 +1097,7 @@ The role occupancy module
 child copies may reduce the remaining copies further. In particular, the
 self-product of one identical child vector can occupy only a symmetric-square
 subspace. Compiler-distinct source branches or channels may realize a larger
-image, but code must not declare every formal LR path independent without the
-source-image calculation.
+image, but code must check the source image before treating formal LR paths as independent.
 
 The same principle gives rank 4 from three roles through occupancy \((2,1,1)\),
 whose role module contains
@@ -1188,7 +1187,7 @@ V_{L_A}\otimes V_{L_B}
 
 ### 6.3 Exact joint binary coupler `[STD/PROPOSED interface]`
 
-For a typed path \(p\), let \(\mathsf Y_p\) be the appropriate finite-group synthesis intertwiner (LR-induced or same-rank Kronecker, as declared) and let \(\mathsf A_p\) be the angular synthesis intertwiner. Define
+For a typed path \(p\), let \(\mathsf Y_p\) be the appropriate finite-group synthesis intertwiner (LR-induced or same-rank Kronecker, as specified) and let \(\mathsf A_p\) be the angular synthesis intertwiner. Define
 
 \[
 \boxed{
@@ -1232,7 +1231,7 @@ Balanced, left-recursive, block-aligned, and graph-aligned trees are permitted. 
 
 ## 7. Master YE3T message-passing equations
 
-### MP-EQ-25 — rank-graded hidden state `[PROPOSED interface]`
+### MP-EQ-25: rank-graded hidden state `[PROPOSED interface]`
 
 \[
 \boxed{
@@ -1252,7 +1251,7 @@ U_{N\lambda L}=[\lambda]\otimes V_L.
 
 This direct-sum notation is a **rank-graded storage/type declaration**, not one representation of a single symmetric group acting simultaneously on every rank. Each fixed-\(N\) block carries its own \(S_N\times SO(3)\) action. Different ranks must not be merged merely because arrays have similar shapes.
 
-### MP-EQ-26 — source-to-message analysis `[PROPOSED]`
+### MP-EQ-26: source-to-message analysis `[PROPOSED]`
 
 For source \(\chi\) with content \(\boldsymbol\nu_\chi\) and tree \(\mathcal T_\chi\),
 
@@ -1275,7 +1274,7 @@ W_{\chi}^{(r),N\lambda L}
 
 The source-specific multiplicity/channel space may be mapped to a common output channel basis before aggregation. Equivalent physical sources must use tied parameterization or another explicitly equivariant sharing rule.
 
-### MP-EQ-27 — carrier-aligned aggregation and update `[PROPOSED]`
+### MP-EQ-27: carrier-aligned aggregation and update `[PROPOSED]`
 
 \[
 \boxed{
@@ -1306,9 +1305,9 @@ h_i^{(r+1)}
 \tag{MP-EQ-28}
 \]
 
-For every fixed-rank carrier block, \(\mathcal U^{(r)}\) must intertwine the declared \(S_N\times SO(3)\) action. Any rank-changing part of \(\mathcal U^{(r)}\) must be assembled explicitly from typed couplers such as MP-EQ-20--MP-EQ-24; there is no single common \(S_N\) action across all ranks.
+For every fixed-rank carrier block, \(\mathcal U^{(r)}\) must intertwine the specified \(S_N\times SO(3)\) action. Any rank-changing part of \(\mathcal U^{(r)}\) must be assembled explicitly from typed couplers such as MP-EQ-20--MP-EQ-24; there is no single common \(S_N\) action across all ranks.
 
-### MP-EQ-29 — compact architecture-neutral master layer `[PROPOSED]`
+### MP-EQ-29: compact architecture-neutral master layer `[PROPOSED]`
 
 \[
 \boxed{
@@ -1331,7 +1330,7 @@ W_\chi^{(r),N\lambda L}\right)
 
 Use this collapsed equation only when \(\mathcal T_\chi\) is a factorization of one linear analysis map. If learned maps, gates, nonlinearities, pruning, or aggregation occur at internal nodes, use the local recursion MP-EQ-24.
 
-### MP-EQ-30 — safe scalar gate `[STD/PROPOSED architecture]`
+### MP-EQ-30: safe scalar gate `[STD/PROPOSED architecture]`
 
 \[
 \boxed{
@@ -1350,7 +1349,7 @@ where \(g_{i,a}^{N\lambda L}\) is invariant and shared across all \(t,M\) compon
 A scalar charge \(Q_i\) may:
 
 - condition \(R_{\eta l}\), \(w_{is}\), or \(K_{i,s}^{(l)}\);
-- appear as an \(L=0\) node feature with a declared trivial permutation type;
+- appear as an \(L=0\) node feature with a specified trivial permutation type;
 - be predicted by a scalar readout and reused in later layers.
 
 Equivariance does not impose charge conservation. A constraint such as
@@ -1434,7 +1433,7 @@ C_dagger               : (n_lambdaL, n_raw)   # analysis
 W[theta]               : (a_out, a_in)
 ```
 
-A factorized implementation may store sparse local couplers rather than a dense full \(\mathsf C\), but it must implement the same declared map.
+A factorized implementation may store sparse local couplers. Its contraction must implement the same map as the full \(\mathsf C\).
 
 ### 8.4 Required metadata
 

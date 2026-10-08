@@ -4,7 +4,7 @@ The experimental `tagged_cauchy_image_request(catalogue=..., species=...)`
 uses count/plan/compile. Chemical channels are indicators, not learned embeddings.
 The repeated-channel key is neighbor species, radial degree, angular degree and
 source family; the application binds central species and directed-pair cutoff.
-The certified tag-count scope is `s=0,1,2`. The algebra has no fixed tensor-order
+The validated tag-count scope is `s=0,1,2`. The algebra has no fixed tensor-order
 or angular-degree restriction; compiler resource checks still apply.
 
 For a fixed center, collided factors of one species share `x=r/r_cut(pair)`.
@@ -32,50 +32,50 @@ Coincident samples can be approached continuously by distinct points. The claim
 concerns **all finite coordination numbers**, not a fixed maximum coordination
 or a finite dataset. Each directed species pair has one fixed radial support.
 
-Version-4 compiler artifacts embed compiler-produced, hash-bound, internally
-validated lifted-Cauchy parents. Loading replays exact physical lowering from
-those parents, pivots, source inventory and real schedules. It does not regenerate
-the parent's named coupling coefficients: this preserves the existing compiler
-artifact/cache trust boundary. Process-local validation caches rehash current
-complete bytes before reuse. Old N=4 orthonormal artifacts retain version-3 meaning.
+Version-4 compiler artifacts contain hash-bound lifted-Cauchy parent couplings,
+physical-image pivots, source inventory, and real schedules. The full loader
+replays exact physical lowering. It reads the parent coupling coefficients from
+the validated artifact and rehashes all artifact bytes before using a
+process-local validation cache. Version-3 N=4 orthonormal artifacts keep their
+version-3 interpretation.
 
-General V4 loaders accept `compiler_validation="certificate"` to trust the
-stored symmetry and physical-image proof instead of replaying it. The default
-`"full"` preserves the exact replay described above. Certificate mode checks
+The loader accepts `compiler_validation="certificate"` to check the stored
+validation record without replaying the full physical-image calculation. The
+default `"full"` performs the exact replay described above. Certificate mode checks
 request/plan/certificate identities, source polynomial tables, real forms,
 selected-coordinate bindings, exact/binary64 executable coefficients and the
 independently derived runtime adjoint. It does not reconstruct parent couplings,
 perform physical lowering or repeat the sparse independence calculation.
-Integrity hashes are not signatures. Use full mode to re-prove the artifact's
-algebraic claims; a certificate-only load never populates the full-replay cache.
-The application example exposes the same policy for cache loads and model
-reloads, while newly compiled cache entries always receive full validation.
+Integrity hashes provide consistency checks. Use full mode to verify the
+artifact's algebraic claims by replay; a certificate-mode load leaves the
+full-replay cache empty. The application example exposes this choice for cache
+loads and model reloads. Compilation performs full validation before caching.
 
-Image reduction uses no Gram–Schmidt. Existing role and scalar-angular templates
-use exact pivots/nullspaces. The general workflow selects
+Image reduction uses exact pivots and nullspaces for role and scalar-angular
+templates. The general workflow selects
 `angular_basis_backend="exact_weight_space_v1"` for positive angular momenta:
 content-class coset matrix units construct the Young first-row image in weight
 `M=L`; the kernel of `J+` selects highest weights; normalized `J-` steps generate
 the other magnetic components without repivoting. Exact multiplicities, Young
-actions, ladders and low-rank legacy spans validate this construction. It avoids
-full magnetic projectors and unrelated L sectors. The new copy gauge is bound
-into requests, labels and template caches; scalar templates remain unchanged.
+actions, ladders and low-rank reference spans validate this construction. It
+builds the requested angular sector from highest weights and lowering steps.
+The copy gauge is bound into requests, labels and template caches.
 
 The equal-value stabilizer sum is factored through the chain of symmetric
 subgroups. With adjacent matrices G and an interval ending at p,
 `S_r=(I+G_(p-1)+G_(p-2)G_(p-1)+...+G_a...G_(p-1))*S_(r-1)`.
 The left multiplication follows from the established anti-representation
 convention and left-coset decomposition. Exact small-group sums, generator
-invariance, symmetry and `S_r^2=r!*S_r` certify the replacement. Its cost is
+invariance, symmetry and `S_r^2=r!*S_r` validate the replacement. Its cost is
 quadratic in interval length in matrix products, rather than factorial
 permutation enumeration; matrix dimensions and exact arithmetic still matter.
-The new backend therefore uses explicit resource limits without a fixed
-eight-slot block ceiling. Legacy full-permutation requests retain that guard.
+This backend uses explicit resource limits. The full-permutation reference
+backend has an eight-factor block limit.
 
-The legacy full-sector path remains for old artifacts and as an oracle. Outer
-coupling still uses its existing cached construction. Numerical Young subduction
-solves a different intertwiner problem; its redundant QR after SVD was removed,
-while the independent projector-validation oracle retains QR.
+The full-sector path reads older artifacts and provides an independent
+reference calculation. Outer coupling uses cached construction. Numerical Young
+subduction solves a separate intertwiner problem and checks its result with
+an independent projector calculation.
 
 ## Why selecting two order-eight coordinates can still be expensive
 

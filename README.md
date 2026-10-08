@@ -1,20 +1,36 @@
 # ye3t
 
-`ye3t` is a representation-theory compiler for `G_N x SO(3)` / E(3)
-equivariant bases. Given the content of a product of atomic (or other)
-factors, it enumerates the valid permutation- and rotation-symmetry-adapted
-labels, counts their multiplicities exactly, materializes the coupling
-coefficients with a validation report, and lowers the result to
-execution plans that run on its native CPU/CUDA runtime or through optional
-accelerator kernels. The ordinary symmetric sector of that basis is the
-linear Atomic Cluster Expansion (ACE); the nontrivial Young sectors extend it.
+`ye3t` builds features with controlled rotation and permutation symmetry.
+Given the types of $N$ input factors and the desired output symmetry, it
+counts the independent ways to combine them, constructs their coupling
+coefficients, and evaluates them on supplied factor arrays. The factors may
+come from atomistic densities, explicit cluster interactions, electronic
+calculations, or another model. The resulting features can be used in
+invariant descriptors, linear models, and rotation/permutation-equivariant
+message passing. Applications supply the physical factors, aggregation, and
+model fitting.
+
+The coupled symmetry is $S_N \times SO(3)$: $S_N$ permutes the $N$ tensor
+factors, and $SO(3)$ rotates them. A parity-aware $O(3)$ option is also
+available. For atomistic $E(3)$ models, applications obtain translation
+invariance by building factors from relative positions. Outputs can have
+fully symmetric, antisymmetric, or mixed permutation symmetry and a chosen
+angular momentum $L$. With atomistic neighbor-density factors, the fully
+symmetric sector contains the Atomic Cluster Expansion (ACE) basis. The same
+permutation-invariant sector supplies couplings for rotation-equivariant
+message passing; other sectors retain nontrivial permutation information.
 
 ## Quick start
+
+This short example counts and compiles a fully symmetric scalar sector:
 
 ```python
 from ye3t.couplings import count, plan, compile_ace_factorized_schedules_by_L
 
-report = count(content=(1, 1, 2), input_Ls=(1, 1, 0), target_L=0)
+report = count(
+    content=(1, 1, 2), input_Ls=(1, 1, 0), target_L=0,
+    target_permutation="trivial", carrier="ACE_density",
+)
 labels = report.labels_for_target(0)
 report.require_label(labels[0], target_L=0)
 
@@ -26,26 +42,33 @@ assert compiled.schedules_by_L[0].basis_count == len(labels)
 print(len(labels), coupler_plan.backend, compiled.convention_hash)
 ```
 
-`count` returns the exact multiplicity report, `plan` records the backend and
-count provenance, and the ACE compiler builds a factorized coefficient
-schedule with a validation report. Every result carries its convention hash
-and provenance. Generic full angular typed-orbit matrix assembly is a bounded
-dense reference that requires explicit opt-in for tests and comparisons.
+`count` finds the valid labels before building coefficients. `plan` selects a
+compiler, and the ACE compiler builds a factorized coefficient schedule.
+The results include the conventions needed to reproduce the calculation.
+For nontrivial permutation output and batched supplied factors, see
+[`user_supplied_factors.py`](examples/user_supplied_factors.py). The
+[`symmetric_external_factors.py`](examples/symmetric_external_factors.py) and
+[`antisymmetric_external_factors.py`](examples/antisymmetric_external_factors.py)
+examples cover arbitrary reachable $L$ in their respective permutation types.
+Mixed and antisymmetric outputs need a factor source that preserves their
+permutation action; an ordinary commutative neighbor density supports only
+the fully symmetric parent.
+
 The pages under `docs/` walk through fixed-content couplers, pure rotation and
 pure permutation cases, validation reports, execution plans, and the native
 runtime.
 
 ## Related packages
 
-- [ye3t-lammps](https://github.com/ye3t-equivariance/ye3t-lammps) provides
-  LAMMPS inference (`pair_style ye3t` and `ye3t/kk`) for models compiled with
-  this package.
 - [ye3t-methods](https://github.com/ye3t-equivariance/ye3t-methods) is the
   application package for descriptor construction, model fitting, and ASE
   calculators. Its configured flow starts with this package's
   `YE3TRepresentation`, then constructs `ye3t_methods.Basis` and optionally
-  `ye3t_methods.LinearModel`. The retained `ye3t_ace` module path is a
-  compatibility implementation inside `ye3t-methods`.
+  `ye3t_methods.LinearModel`. `ye3t-methods` includes a `ye3t_ace` import
+  shim for compatible saved models.
+- [ye3t-lammps](https://github.com/ye3t-equivariance/ye3t-lammps) provides
+  LAMMPS inference (`pair_style ye3t` and `ye3t/kk`) for models compiled with
+  this package.
 
 ## Requirements
 
@@ -133,7 +156,7 @@ describes the options and the install layout.
 | `YE3T_CACHE_VERIFY` | `hash` (default) or `full` verification of cached artifacts |
 | `YE3T_DISABLE_TRITON=1` | disable the Triton coupling kernels in `ye3t.backends`; the native/PyTorch paths are used instead |
 | `YE3T_DISABLE_OPENEQUIVARIANCE=1` | skip the OpenEquivariance bridge in automatic packed-CG dispatch (an explicit `backend="openequivariance"` still uses it) |
-| `YE3T_REQUIRE_NATIVE=1` | raise instead of falling back to reference implementations |
+| `YE3T_REQUIRE_NATIVE=1` | require a native implementation and raise if none is available |
 | `YE3T_DEBUG_TRITON=1` | verbose Triton diagnostics |
 
 Inspect local cache envelopes with `python -m ye3t.cache inspect`. Prune a
@@ -173,8 +196,7 @@ Each script in `examples/` shows its editable `cfg_ye3t` dictionary; run it
 with `python examples/<name>.py`. The fixed-content count and coefficient
 examples read top-to-bottom through `YE3TRepresentation.from_config(...)`,
 `representation.count_fixed_content(...)`, and, for coefficients,
-`ye3t.couplings.plan(report)` and the applicable factorized compiler. The specialized catalogues
-and benchmarks retain `run_*` functions for their multi-case workflows.
+`ye3t.couplings.plan(report)` and the applicable factorized compiler.
 `examples/README.md` describes them in
 full.
 
@@ -221,9 +243,11 @@ symmetric-power kernels; see `examples/benchmarks/README.md`.
 ```bash
 python -m pip install -e ".[dev]" --no-build-isolation
 python -m pytest -m fast
+python -m pytest
 ```
 
-`-m fast` is the subset run by CI. The full suite adds the `slow` tests and
+`-m fast` is the subset run by CI; the second command runs the full suite.
+The full suite adds the `slow` tests and
 the `optional`, `gpu`, `triton`, `oeq`, and `cueq` tests, which skip when
 their hardware or packages are absent.
 
@@ -240,4 +264,6 @@ BSD-3-Clause, copyright (c) 2026 James M. Goff; see `LICENSE` and `AUTHORS.md`.
 
 ## Citation
 
-Citation metadata is in `CITATION.cff`.
+For the mathematical construction and notation, see the
+[YE3T paper](https://arxiv.org/abs/2609.31895). Citation metadata is in
+`CITATION.cff`.

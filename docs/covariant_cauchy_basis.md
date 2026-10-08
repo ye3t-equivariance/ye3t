@@ -48,8 +48,8 @@ For larger repeated blocks, the compiler also keeps role and angular vectors
 separate. The local evaluation contracts the ordered factors first against
 role vectors, then against angular vectors and the orthonormal copy kernel.
 If `r` and `s` are the numbers of retained role and angular columns, this
-stores `r d^k + s(2l+1)^k` component entries plus the copy kernel, instead of
-the joint `d^k(2l+1)^k` product table for every output column. Small blocks retain a sparse local
+stores `r d^k + s(2l+1)^k` component entries plus the copy kernel. A joint
+product table would store `d^k(2l+1)^k` entries for every output column. Small blocks retain a sparse local
 table that serves as an independent reference for the tensor network.
 
 The copy indices in each route name the lexicographically ordered seed
@@ -94,7 +94,7 @@ Each adjacent-transposition action in `D^lambda` has at most two entries
 per column, so the saved transport uses `O((N-1)f)` generator entries rather
 than the orbit-sized table. When every block has size one, `Q` is a scaled
 matrix unit and is stored by its scale and axes. The implementation checks
-low-rank results against the previous full matrix, verifies subgroup
+low-rank results against the full-matrix reference, verifies subgroup
 constraints and the reduced multiplicity Gram, and tests a rank-eight
 nontrivial Young isometry. The numeric cached backend still constructs its
 full Young table during compilation, then saves the compact restriction.
@@ -161,15 +161,15 @@ C_N\in\operatorname{Hom}_G\!\bigl(\mathcal P^N(U),\,Y\bigr).
 `P^N` is the degree-`N` product functor realized by the physical carrier:
 
 - `Sym^N(U)` for ordinary commuting densities;
-- an ordered product of distinct slot carriers
-  `U^(1) (x) ... (x) U^(N)` for slot- or role-resolved sources;
+- an ordered product of distinct factor carriers
+  `U^(1) (x) ... (x) U^(N)` for factor- or role-resolved sources;
 - `Lambda^N(U)`, realized only as the antisymmetrized image of `N`
-  slot-resolved carriers (a single commuting vector has `a ^ a = 0`). Spinful
-  fermionic carriers additionally require `SU(2)` or a declared double-group
+  factor-resolved carriers (a single commuting vector has `a ^ a = 0`). Spinful
+  fermionic carriers additionally require `SU(2)` or a specified double-group
   convention; spatial exterior powers alone do not support that claim.
 
 Lower-order and constant terms are part of the model: a rank-`n` product
-cannot represent a geometry-independent block unless each slot carrier
+cannot represent a geometry-independent block unless each factor carrier
 contains a constant scalar channel or the lower ranks are included
 explicitly. Translation invariance is assumed throughout because every
 one-particle feature is a function of relative positions.
@@ -179,7 +179,7 @@ of the finite-dimensional model space `Hom_G(P^N(U), Y)`. The scalar
 descriptor basis is the case `Y = V_0^+`.
 
 The symmetry group is `G = O(3) x Gamma`, where `Gamma` is a finite group of
-physical relabellings (identical atoms). Formal tensor-slot permutations are
+physical relabellings (identical atoms). Formal tensor-factor permutations are
 **not** part of `G`; they organize the spaces through Schur-Weyl duality and
 become physical only through the stabilizer construction of section 6.
 
@@ -212,7 +212,7 @@ The hypothesis fails for point groups with complex-type irreps (`C_n` with
 `n >= 3`, `T`, `C_3h`), lattice translations, and half-integer `SU(2)` or
 double-group spinors; there the commutant is `C` or `H` and coefficients act
 as `a + bJ` on irrep components rather than as the identity. An
-implementation certifies a Frobenius-Schur indicator of `+1` for every
+implementation validates a Frobenius-Schur indicator of `+1` for every
 stabilizer it emits.
 
 Consequences:
@@ -294,11 +294,11 @@ with `beta'` the conjugate partition. Hence
 \]
 
 The symmetric form is the identity used by `linear_lifted_cauchy_basis.md`.
-The skew form is the natural identity for spin-orbital or particle-slot
+The skew form is the natural identity for spin-orbital or particle-factor
 fermionic carriers. A general output or parent sector `mu` needs the full
 Kronecker form (3); neither Cauchy identity alone is sufficient.
 
-This matches the project invariant: rank-additive products of disjoint slot
+This matches the project invariant: rank-additive products of disjoint factor
 sets use LR (2), and same-rank diagonal products use Kronecker (3).
 
 **O(3) branching.** For an angular carrier `V_l` with its natural parity
@@ -341,7 +341,7 @@ carriers to the target,
 The subscript `(k_b)` denotes the component of multidegree `(k_b)`, and the
 blocks are maximal with distinct complete channels, so that repeated content
 never appears in two blocks. `S_alpha(W)` vanishes when `alpha` has more rows
-than `dim W`, and likewise for `V_l`. For carriers with a declared parity
+than `dim W`, and likewise for `V_l`. For carriers with a specified parity
 `p_b` different from `(-1)^{l_b}` (hidden or message carriers) the parity rule
 generalizes to `epsilon = prod_b p_b^{k_b}`.
 
@@ -368,7 +368,7 @@ A basis label is therefore
   `rho_b = kappa_b'`;
 - role-resolved commuting densities stay in the parent `(N)`; their role
   content appears only as the internal `kappa_b`;
-- only slot-resolved ordered products realize a general `lambda`, in the
+- only factor-resolved ordered products realize a general `lambda`, in the
   sectors allowed by section 6. For `f^lambda > 1` the carrier is
   `S^lambda (x) V_L`, the label gains a tableau component, and in
   Young-orthogonal form the Gram structure is
@@ -385,7 +385,7 @@ the emitted multiplets has the form
 G = D\otimes I_{2L+1},
 \]
 
-by Schur's lemma, so the orthogonal-output certificate
+by Schur's lemma, so the orthogonal-output condition
 `C^dagger M C = D` of the scalar standard carries over unchanged and its size
 does not grow with `L`. Two kinds of restriction apply to orthogonalization
 and must not be confused:
@@ -403,7 +403,7 @@ and must not be confused:
 **Complete multiplets.** For `L > 0` a basis element is the whole
 `(2L+1)`-component multiplet. All components are emitted together from one
 highest-weight (or any fixed reference) vector by the lowering operator, with
-one declared real-tesseral or complex convention. The basis chosen in each
+one specified real-tesseral or complex convention. The basis chosen in each
 highest-weight multiplicity space must be real under the conjugation
 structure; an arbitrary complex orthonormal basis of a multiplicity space
 does not yield real multiplets. The injective-source and
@@ -417,8 +417,8 @@ and carry over verbatim.
 | `lambda=(N)`, `L=0`, `epsilon=+` | exactly `linear_lifted_cauchy_basis.md` |
 | `lambda=(N)`, general `(L, epsilon)` | equivariant lifted-Cauchy features; only the outer space `M^{0,+}` is replaced by `M^{L,epsilon}` |
 | `lambda=(N)`, one role (`dim W = 1`) | ordinary equivariant ACE features; only `kappa_b=(k_b)` survives |
-| `lambda=(1^N)` | skew Cauchy, `rho_b = kappa_b'`; fermionic particle-slot carriers |
-| general `lambda` | slot/role-resolved message or operator carriers |
+| `lambda=(1^N)` | skew Cauchy, `rho_b = kappa_b'`; fermionic particle-factor carriers |
+| general `lambda` | factor/role-resolved message or operator carriers |
 
 ## 5. Output-side theorem: arbitrary Young-symmetric targets
 
@@ -532,17 +532,17 @@ square after removing `Lambda^4`.
 
 ## 6. Binding-attached models and the physical meaning of `lambda_geom`
 
-For a binding `b` with `n` index slots, let `Y_b` be its output block from (6)
-and let `Gamma_b` be the stabilizer of `b` in `Gamma`. A slot-resolved feature
-attaches one one-particle carrier to every slot,
+For a binding `b` with `n` factor positions, let `Y_b` be its output block from (6)
+and let `Gamma_b` be the stabilizer of `b` in `Gamma`. A factor-resolved feature
+attaches one one-particle carrier to every factor position,
 
 \[
 F_b = U^{(1)}\otimes\cdots\otimes U^{(n)}
 \;\cong\;\bigoplus_{\lambda\vdash n}\mathbb S_\lambda(U)\otimes S^\lambda
-\quad\text{(when the slot carriers are copies of one }U\text{)},
+\quad\text{(when the factor carriers are copies of one }U\text{)},
 \]
 
-and the label `lambda = lambda_geom` is the formal slot sector. The model block
+and the label `lambda = lambda_geom` is the formal factor-permutation sector. The model block
 for a binding type `tau` is
 
 \[
@@ -551,9 +551,9 @@ C_\tau\in\operatorname{Hom}_{O(3)\times\Gamma_b}(F_b,\,Y_b),
 
 tied across all bindings of type `tau`, and block diagonal by (1).
 
-Only `Gamma_b` must be respected. It acts on the slots through a homomorphic
-image in `N(K_b)/K_b`, where `K_b` is the Young subgroup of coincident slots;
-it is not in general a subgroup of `S_n` acting by slot permutation alone.
+Only `Gamma_b` must be respected. It acts on the factor positions through a homomorphic
+image in `N(K_b)/K_b`, where `K_b` is the Young subgroup of coincident factors;
+it is not in general a subgroup of `S_n` acting by factor permutation alone.
 Formal `S_n` equivariance is **not** required. (If one imposed equivariance
 under formal permutations of the feature factors with `S_n` acting on `Y_b`
 through `S^mu` only, it would force `lambda_geom = mu`; that is not the
@@ -570,7 +570,7 @@ both wedge axes.
 Selection rule: a sector `lambda_geom` contributes at binding `b` if and only if
 
 1. its physical source image is nonzero. For identical carriers on
-   coincident slots with content `k`, this holds exactly when the Kostka
+   coincident factors with content `k`, this holds exactly when the Kostka
    number `K_{lambda,k}` is positive; and
 2. `Hom_{O(3) x Gamma_b}( S_lambda(U) (x) Res S^lambda , Y_b )` is nonzero,
    with the full induced action on `Y_b`.
@@ -598,19 +598,19 @@ are reachable; with `s` shells only `(2,2)` survives.
 
 Two-centre and pair carriers additionally carry orientation signs under
 `Gamma_b` (a bond vector picks up `(-1)^l` under reversal), so their action
-is the induced slot permutation together with those signs.
+is the induced factor permutation together with those signs.
 
 Two limits make the meaning concrete.
 
-- **All slots coincide** (same site, same one-particle carrier). The slot
+- **All factors coincide** (same site, same one-particle carrier). The factor
   features commute, `F_b` collapses to `Sym^n(U)`, and only
   `lambda_geom = (n)` survives. This is the rule that ordinary commutative
   density products carry only the trivial sector.
-- **All slots distinct, `Gamma_b` trivial.** Every `lambda_geom` with a nonzero
-  source image contributes, and together they span the full slot-resolved
+- **All factors distinct, `Gamma_b` trivial.** Every `lambda_geom` with a nonzero
+  source image contributes, and together they span the full factor-resolved
   space `U^{(x)n}`. The `(n)` sector alone is the strict subspace of
-  slot-symmetrized features, which no longer record which index slot saw
-  which environment.
+  factor-symmetrized features, which erase the assignment of environments to
+  individual factors.
 
 For a composite source built from two pair carriers of type `(1,1)`, the LR
 product rule `S_a(U) (x) S_b(U) = (+)_lambda c^lambda_{ab} S_lambda(U)` gives
@@ -620,7 +620,7 @@ by an exact LR result, not by a missing software path.
 **Consequence for the sector-utility question.** In a linear model the span of
 a mixed-sector feature set contains the span of the symmetric-sector set at
 the same rank, content, and one-particle source. Containment is strict unless
-all slots share one carrier, `dim U = 1`, `lambda` has more rows than
+all factors share one carrier, `dim U = 1`, `lambda` has more rows than
 `dim U`, no `O(3) x Gamma_b` route exists for any nontrivial sector, the
 physical source image is degenerate over configurations, or, on a finite
 training set, the `(n)`-sector design already has full row rank.
@@ -628,7 +628,7 @@ training set, the `(n)`-sector design already has full row rank.
 There are two distinct mechanisms, and only the first is a capacity effect:
 
 - *more features*: for a binding with trivial `Gamma_b`, the nontrivial
-  sectors add slot-resolved coordinates. Their benefit is the decrease in the
+  sectors add factor-resolved coordinates. Their benefit is the decrease in the
   in-sample, unregularized least-squares projection residual. With ridge
   only the penalized objective is monotone, and nothing is implied about
   test error;
@@ -672,7 +672,7 @@ Conditions and caveats:
   constant across `M` and across `Gamma`-related bindings. Feature scaling
   must use one scale per multiplet and no per-component centering for
   `L > 0`, or covariance is broken;
-- "orthonormal" refers to the declared Frobenius inner product on the full
+- "orthonormal" refers to the specified Frobenius inner product on the full
   tensor or wedge matrix; storing only canonical components requires
   orbit-size weights, the analogue of the inverse-orbit-size metric of the
   scalar standard;
@@ -706,10 +706,10 @@ coupling coefficients depend on `M`. A single kernel family therefore serves
 every target: the scalar energy and force path is `L = 0` with output
 cotangent `1`. The adjoint is the algebraic covector pullback from the chain
 rule; a metric (Riesz) adjoint must not be substituted. The density cotangent
-is indexed by `(c, m)`, not by slot: coincident slots, or slots bound to the
+is indexed by `(c, m)`: coincident factors, or factors bound to the
 same site feature, accumulate into the same entry. For complex carriers the
 analysis or synthesis orientation and the conjugation convention of the
-pullback must be declared, because automatic-differentiation conventions
+pullback must be specified, because automatic-differentiation conventions
 differ.
 
 ### Real-form phase convention for pseudo-tensors
@@ -749,11 +749,11 @@ which is the rule already used for every binary real coupling in
   of odd nodes. The emitted sign is a basis gauge; it is recorded in the
   artifact and bound by its hash.
 
-Required exact certificate: every emitted real coefficient has zero imaginary
+Required exact checks: every emitted real coefficient has zero imaginary
 part after the phase, and the `L = 1` pseudo-vector from `1 (x) 1` equals the
 `_real_cg_entries_cpu(1, 1, 1)` contraction of the same inputs.
 
-**Declared backup.** The Fano-Racah convention `Y_lm -> i^l Y_lm`, under which
+**Alternative convention.** The Fano-Racah convention `Y_lm -> i^l Y_lm`, under which
 every tensor satisfies `conj(T_LM) = (-1)^{L-M} T_{L,-M}` and the property is
 closed under coupling with real Clebsch-Gordan coefficients for all `L` and
 parities, so no parity case distinction is needed. It differs from the adopted
@@ -763,7 +763,7 @@ default, because it would break byte identity of the hash-bound scalar
 artifacts. REFERENCE_TODO: verify the primary citation for the `i^l`
 convention before it is quoted in publication-facing text.
 
-Covariance to be certified on complete multiplets, for `R` in `SO(3)` and the
+Covariance to be validated on complete multiplets, for `R` in `SO(3)` and the
 inversion `P`:
 
 \[
@@ -773,7 +773,7 @@ B^{L\epsilon}(PX)=\epsilon\,B^{L\epsilon}(X),
 \]
 
 together with `Gamma` covariance: relabelling identical atoms permutes
-bindings within a type and acts on slot-resolved features by the induced slot
+bindings within a type and acts on factor-resolved features by the induced factor
 permutation, with orientation signs for pair carriers, and tableau-axis
 covariance when `f^lambda > 1`. `epsilon` is the total inversion eigenvalue
 and equals the signed parity `p` of the `O(3)` amendments MP-EQ-O3-01..07 in
@@ -824,7 +824,7 @@ verified numerically.
 14. Finite-difference VJP on a content-`(2,1,1)` binding with a shared site
     carrier, to catch a missing accumulation factor.
 
-Additional required certificates for an implementation: complete-multiplet
+Additional required checks for an implementation: complete-multiplet
 proper and improper `O(3)` covariance, `Gamma` covariance, Gram structure
 `D (x) I_{2L+1}`, canonical versus factored forward and VJP agreement,
 finite-difference VJP with random output cotangents, and exact reduction to
@@ -834,15 +834,15 @@ the scalar path.
 
 1. **Real-tesseral convention for emitted multiplets.** The statement is
    convention independent, but the emitted coefficient tensors are not. The
-   implementation must declare one convention and reuse the existing
+   implementation must specify one convention and reuse the existing
    real/complex equivalence tests.
 2. **Pseudo-tensor conventions.** The real-form phase is resolved in section 8
    (adopted: the `paired_cg.py` odd-coupling `-i` rule; backup: Fano-Racah).
    Still to confirm: that `epsilon`, defined here by `B(PX) = epsilon B(X)`,
    matches the signed-parity convention of the `O(3)` amendments
    MP-EQ-O3-01..07 in `message_passing_mathematical_standard.md`.
-3. **Slot carriers that differ between slots.** Section 6 writes the Schur-Weyl
-   form for identical slot carriers. When slot carriers differ (for example
+3. **Factor carriers that differ between positions.** Section 6 writes the Schur-Weyl
+   form for identical factor carriers. When factor carriers differ (for example
    shell-conditioned sources), `lambda_geom` remains a valid organizing label
    through the subgroup preserving the carrier assignment, defined on the
    orbit closure; the exact statement should be reviewed against the current

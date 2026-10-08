@@ -1,8 +1,10 @@
 General YE3T Tensor Products
 ============================
 
-``JointYoungCGProduct`` is the public exact product for joint
-``SO(3) x G_nu`` sectors. Each accepted instruction has two exact pieces:
+``JointYoungCGProduct`` couples already-constructed angular and Young sectors.
+For a fixed-content rank-``N`` YE3T basis, the parent symmetry is
+``S_N x SO(3)``; the repeated-content subgroup ``G_nu`` enters the internal
+induction or restriction step. Each accepted product instruction combines:
 
 .. math::
 
@@ -10,26 +12,27 @@ General YE3T Tensor Products
    \quad\text{and}\quad
    Y_{\lambda_1,\lambda_2}^{\lambda},
 
-where the first factor is a Clebsch-Gordan coefficient and the second is the
-lowered Young/change-of-group coupling matrix. The runtime contraction uses the
-joint tensor obtained by composing those two exact maps.
+The first factor is a Clebsch-Gordan coefficient; the second is the Young
+coupling map for the relevant group change. The runtime composes the maps.
 
 The output is a fused irreducible target space: if several pairwise coupling
-branches reach the same canonical ``SO(3) x G_nu`` label, they share one output
-block and their exact coordinate maps are accumulated into that block.  The
-runtime does not expose unfused coupling-path blocks as a public backend.
+branches reach the same output sector, they share one output block. The
+runtime adds their coordinate maps into that block.
 
 By default, products are ``SO(3)``-resolved and do not discard pseudoscalar or
-odd-parity sectors.  Pass ``target_parity="even"`` or ``target_parity="odd"``
-to request an ``O(3)``-style parity filter using the total input parity
-``(-1)^{sum_i l_i}``.  For example, a scalar from three ``l=1`` slots is an
+odd-parity sectors. Pass ``target_parity="even"`` or ``target_parity="odd"``
+to request an ``O(3)`` parity filter. For spherical-harmonic input factors,
+the total parity is ``(-1)^{sum_i l_i}``. A scalar from three ``l=1`` factors is an
 odd-parity ``SO(3)`` scalar and is excluded by ``target_parity="even"``.
 
-Dictionary Construction
------------------------
+Low-Level Product Construction
+------------------------------
 
-For examples and configuration files, use ``ye3t.workflows`` to build the
-runtime irreps and product from explicit dictionaries.
+Programs that already hold coupled sectors can use ``ye3t.workflows`` to build
+their runtime product from explicit dictionaries. For a new fixed-content
+calculation, use the seven-section configuration in
+``examples/user_supplied_factors.py`` with ``ye3t.couplings.count``, ``plan``,
+and ``compile``.
 
 .. code-block:: python
 
@@ -65,9 +68,7 @@ Each block describes one exact canonical sector:
    Multiplicity copies carried by the runtime feature tensor.
 
 The product-level controls ``rank_cap``, ``L_max``, ``requested_targets``, and
-``permutation_policy`` are truncation and admissibility controls. They do not
-change the mathematical coupling rules; they only decide which exact valid
-branches are retained.
+``permutation_policy`` select which valid branches appear in this schedule.
 
 Static Schedules
 ----------------

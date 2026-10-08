@@ -151,7 +151,7 @@ installed operators execute. Registered autograd uses native adjoints where
 available and preserves double backward; the CMake and installed-wheel smokes
 compare values, VJPs, mixed second derivatives, and readout contractions with
 independent Torch formulas. ``native_execution_plan_capabilities()`` lists the
-promoted CUDA operations and measured automatic-dispatch thresholds
+supported CUDA operations and measured automatic-dispatch thresholds
 explicitly.
 
 The CUDA spherical kernels have no fixed ``lmax``. They evaluate the derivatives
@@ -216,7 +216,7 @@ squared-loss HVP, fake/meta, and ``opcheck`` coverage. This is not yet a
 generic mixed-block Schur/Young instruction or cross-descriptor subtree
 schedule.
 
-Selected output irreps from one repeated block can now be concatenated into a
+Selected output irreps from one repeated block can be concatenated into a
 single grouped native call. The result is sliced back into the established
 ``L_R`` and multiplicity shapes without copying. On the validation GPU,
 combined execution was 2.1--3.6 times faster than separate native calls for
@@ -225,16 +225,16 @@ combined execution was 2.1--3.6 times faster than separate native calls for
 at 1.03 times.
 
 ``SymmetricPowerProductPlan`` also lowers all full-channel exponent vectors
-to one grouped table. YE3T-ACE uses this tensor-valued runtime for descriptor
+to one grouped table. ``ye3t-methods`` uses this tensor-valued runtime for descriptor
 values and batches compiler-selected output seeds for explicit root rows.
 The complex native adjoint is conjugated back to the application's established
 holomorphic ``dB/dA`` convention before radial/angular position VJPs. Real and
 complex root rows remain available inside ``torch.no_grad()``. For a complete
 15-component ``Sym^4(V_1)`` descriptor plan, grouped CUDA values plus root
-rows were 19.5 and 24.0 times faster than the previous Python exponent loop
+rows were 19.5 and 24.0 times faster than the Python exponent-loop baseline
 at batches 8 and 256 respectively.
 
-The compiler now additionally lowers repeated exponent rows to a unique
+The compiler also lowers repeated exponent rows to a unique
 monomial table and a sparse coefficient map. Native CPU/CUDA forward computes
 each unique monomial once; reverse first accumulates output adjoints onto the
 unique monomials and then applies their zero-safe polynomial derivatives.
@@ -255,8 +255,8 @@ the measured batches.
 ABI 29 adds a native CUDA double-backward operator for the plain sparse
 monomial symmetric-power schedule. It evaluates the output tangent and the
 zero-safe polynomial Hessian action directly from the compiler-owned exponent
-table, so force training no longer expands that second derivative into many
-small PyTorch complex reductions. The capability report exposes
+table, avoiding many small PyTorch complex reductions in force training. The
+capability report exposes
 ``symmetric_power_monomial_double_backward``. Real and complex FP64 reference
 tests include zero coordinates, and rank-general value/VJP/HVP coverage
 includes ranks 8, 12, 16, and 32.
@@ -286,7 +286,7 @@ The segmented schedule stores target-major, source-major, and channel-major
 edge or feature permutations. Kernels therefore perform no runtime sorting or
 path discovery and use one destination-owned reduction rather than atomic
 fan-in. Real or complex carriers with real invariant gates follow the same
-declared carrier convention.
+specified carrier convention.
 
 The application policy is ``atomic``, ``auto``, or strict ``segmented``.
 ``atomic`` remains the production default. On the retained 474-atom,
@@ -313,12 +313,12 @@ shape is ``[seed, batch, output]``, but it reads one physical
 ``[batch, input]`` tensor and returns ``[seed, batch, input]`` without
 expanding the input or evaluating an unused expanded forward result.
 
-Against the previous expanded-root implementation, the broadcast adjoint was
+Against the expanded-root baseline, the broadcast adjoint was
 1.84--2.65 times faster for low-reuse ``Sym^2(V_1)`` and ``Sym^4(V_1)`` cases
 at batches 32 and 256 with 4 or 16 roots, while reducing measured peak
 allocation by 40--46 percent. High-reuse ``Sym^4(V_2)`` cases at batches
 32--1024 were 1.28--2.28 times faster and reduced peak allocation by
-approximately 48 percent. YE3T-ACE therefore uses the broadcast root path
+approximately 48 percent. ``ye3t-methods`` uses the broadcast root path
 unconditionally when a compiler-owned shared-monomial product table is
 available.
 
@@ -327,7 +327,7 @@ two CUDA kernels. Its linear readout wrapper contracts the native analysis
 with an ATen matrix product. It is therefore a functional native boundary,
 not a claim of final one-kernel fusion or measured performance leadership.
 Primary-complex factorized angular DAG forward/adjoint and fixed-linear-readout
-forward/adjoint now run on CUDA.
+forward/adjoint run on CUDA.
 Direct physical-source-to-readout fusion, mixed Schur/Young exterior
 projections, Hermitian operator actions on CUDA, real-basis factorized
 execution with a serialized unitary transform, and full message-layer fusion
@@ -337,7 +337,7 @@ ABI 13 retains the Torch-independent CPU kernels for the built-in ``ChebExpCos``
 radial family and fixed-``L`` complex Condon--Shortley spherical harmonics,
 and adds packed radial and all-``L`` table operators on CPU/CUDA.
 Both return analytic radial or Cartesian derivatives. The real-tesseral
-operator is obtained through the declared unitary convention and returns the
+operator is obtained through the specified unitary convention and returns the
 same signed-``m`` ordering. Value autograd uses the analytic first derivative;
 the Torch reference in the registered backward preserves double backward.
 The same core owns ordinary edge-to-center density accumulation and its exact
@@ -406,13 +406,17 @@ for ordinary and nontrivial ``lambda=(2,1)`` role-resolved plans. Against the
 existing Torch DAG reference on the validation GPU, forward measured
 2.4--13.4 times faster and forward plus adjoint measured 1.82--11.3 times
 faster across batches 1--1024.
+These older DAG tests exercise algebraic source-coordinate buffers. The
+complete typed compiler is required to enumerate all independent angular
+and local Young routes; a raw child-tableau buffer alone is not a physical
+``A_s`` realization.
 ABI 20 adds a heterogeneous-root factorized operator for exact block
-composition across parent angular momenta. Each root carries compiler-certified
+composition across parent angular momenta. Each root carries compiler-validated
 projection-column bounds, magnetic dimension through its root node, and an
 output offset. Projection tables remain source-major, plan hashes and logical
 output slices remain independent, and the operation changes execution
 grouping only: it does not mix different ``L`` sectors. CPU validates that
-root output intervals exactly partition the declared output; CUDA validates
+root output intervals exactly partition the specified output; CUDA validates
 bounds in the kernel without host reads.
 Forward, adjoint, and double-backward operators pass mixed-``L`` lifted
 ``A_s`` value, VJP, HVP, fake/meta, ``opcheck``, and ``torch.compile`` tests.
@@ -598,7 +602,7 @@ for force training rather than silently compiling only the forward pass.
 Factorized-angular CUDA traversal uses one independent serial DAG traversal
 per batch/source coordinate. Launching those register-heavy traversals in
 256-thread blocks left the canonical 744-coordinate workload with only three
-resident blocks. ABI 26 now uses one-warp blocks and computes the grid from
+resident blocks. ABI 26 uses one-warp blocks and computes the grid from
 that block size. This changes neither traversal order nor arithmetic. On the
 canonical complex128 workload, heterogeneous cached double backward decreases
 from 1.084 to 0.467 ms and its two adjoints from 0.657 to 0.317 ms. The final
@@ -621,7 +625,7 @@ not acquire an artificial complex learned-parameter axis.
 
 CPU/CUDA mixed-dtype values, gradients, HVPs, gradcheck, gradgradcheck,
 fake/meta behavior, ``opcheck``, and full-graph forward compilation match the
-independent Torch reference. The role-resolved lifted-density model now passes
+independent Torch reference. The role-resolved lifted-density model passes
 its real graph gates directly to the native scatter. On the canonical FP64
 force-training profile this removes six CUDA events and 0.63 MB peak
 allocation; graph-scatter double backward falls from approximately 0.126 to
@@ -636,9 +640,8 @@ still acts on packed complex ``[channel,t,M]`` values; native CPU/CUDA
 adjoints return complex value gradients and real gate/map gradients, and
 double backward preserves those mixed tangent types. Same-dtype real and
 legacy complex controls remain supported. The role-resolved lifted-density
-model therefore no longer creates temporary complex copies of either learned
-control while retaining ``A_s``, its explicit role axis, and compiler-owned
-``L_v -> C^dagger`` analysis unchanged.
+model keeps learned controls real while evaluating ``A_s`` through its explicit
+role axis and compiler-owned ``L_v -> C^dagger`` analysis.
 
 Mixed-control values, VJPs, HVPs, gradcheck, gradgradcheck, fake/meta,
 ``opcheck``, and full-graph forward compilation match the independent Torch
@@ -650,14 +653,14 @@ bytes. FP64 and FP32 maximum force residuals are respectively ``2.1e-22`` and
 evidence.
 
 The lifted application stores each layer's compiler-ordered real channel maps
-as one persistent packed parameter. It no longer concatenates per-sector map
-parameters during every forward and force derivative. Strict checkpoint
-loading migrates the prior ``channel_maps.N`` layout into the packed layout.
+as one persistent packed parameter and uses it during forward and force
+derivative evaluation. Strict checkpoint loading accepts the
+``channel_maps.N`` layout and converts it to the packed layout.
 The canonical FP64 profile removes two additional CUDA events and two
 ``aten::to`` calls, with exact energy and a ``2.6e-22`` force residual. This is
 a storage/layout correction, not a claimed standalone wall-time speedup.
 
-The application now computes each active edge distance once and reuses it for
+The application computes each active edge distance once and reuses it for
 pair selection, native radial tables, radial directions, role filters, and
 soft-neighbor normalization. The explicit VJP record and ASE model paths use
 the same geometry contract. Runtime reports expose ``shared_edge_geometry``;
@@ -723,11 +726,11 @@ coefficients. FP64/FP32 values, source and parameter adjoints, HVPs, complete
 role-placement invariance, and strict no-fallback dispatch are validated.
 ``native_execution_plan_capabilities()`` reports C++ extension capabilities
 and optional Triton availability separately, including the required real
-convention ID and promoted packed source-analysis operations.
+convention ID and supported packed source-analysis operations.
 Factorized source-analysis CUDA, rooted-motif buffers, direct
 edge-source-to-readout fusion in the C++ core, and native geometry double
 backward remain open.
-The application package now materializes the preceding physical
+The application package materializes the preceding physical
 ``[atom, role, channel]`` lifted-density source through the native center
 scatter without flattening away the logical role coordinate. That source
 materialization is not itself a Young projection; complete role placements
@@ -745,7 +748,7 @@ parent validates native energy and analytic atomic forces.
 Exact real-basis ``JointYoungCGProduct`` binary nodes have a separate packed
 Triton path: every instruction in one product is lowered to one sparse
 bilinear table and evaluated in one launch. The table is derived from the
-serialized complex-primary coefficients through the declared fixed real
+serialized complex-primary coefficients through the specified fixed real
 unitary transformation; it preserves logical
 ``[channel_or_multiplicity, tableau_t, magnetic_M]`` output axes. Its forward,
 analytic adjoint, and double-backward behavior match the instruction-einsum
@@ -795,7 +798,7 @@ one typed source map; a physical lifted-density or motif layer must still
 materialize all source placements required by its complete ``L_v``.
 
 The application
-artifact now binds explicit ordinary-density source slots and performs
+artifact binds explicit ordinary-density source factors and performs
 validated streaming energy/force/virial traversal without descriptor or
 edge-derivative buffers. The analytic
 derivative outputs themselves are first-order data and are not differentiable

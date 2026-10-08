@@ -22,7 +22,7 @@ below.
    * - MP-EQ-00
      - Linear maps preserve ``(N, lambda, L)``
      - Axis scope enforced
-     - Exact carrier layouts and channel-only maps act on the declared trivial
+     - Exact carrier layouts and channel-only maps act on the specified trivial
        axis and never on tableau or magnetic components
    * - MP-EQ-00a
      - Cross-``L`` interaction uses angular coupling
@@ -33,7 +33,7 @@ below.
      - Implemented
      - ``fixed_content`` orbit/stabilizer reports and global-coupler plans
    * - MP-EQ-02
-     - Commuting slot and rotation actions
+     - Commuting factor-permutation and rotation actions
      - Validated at representative ranks
      - Global-coupler permutation and rotation action tests
    * - MP-EQ-03
@@ -67,7 +67,7 @@ below.
    * - MP-EQ-09
      - Orthonormality, completeness, and selected projectors
      - Validated where the retained table scope permits
-     - Coupler certificates, matrix-unit tests, and complete low-rank
+     - Coupler validation records, matrix-unit tests, and complete low-rank
        projector/dimension audits
    * - MP-EQ-10
      - Joint intertwining
@@ -82,7 +82,7 @@ below.
      - General equivariant linear map
      - Exact carrier and axis scope enforced
      - Logical ``[trivial_axis, tableau_t, magnetic_M]`` layouts permit
-       mixing of declared multiplicity, source/content, path, radial,
+       mixing of specified multiplicity, source/content, path, radial,
        chemical, and learned-channel copies only after they share one exact
        carrier
    * - MP-EQ-13
@@ -118,7 +118,7 @@ below.
    * - MP-EQ-19
      - Density selection and role covariance
      - Implemented and validated at representative ranks
-     - ACE carrier guards, nontrivial-sector rejection, ``A_s`` slot
+     - ACE carrier guards, nontrivial-sector rejection, ``A_s`` role
        permutation/value/VJP tests, rank-3 parent ``(2,1)`` tableau action, and
        repeated-role collapse tests
    * - MP-EQ-19b
@@ -150,7 +150,7 @@ below.
      - Under validation
      - Exact dimension/intertwining, role reordering, source-image, angular
        intersection, value, VJP, and HVP records are required for each
-       promoted heterogeneous-role path
+       heterogeneous-role path used in the public runtime
    * - MP-EQ-20
      - Rank-additive LR induction
      - Implemented; rank-6 targeted parent path validated
@@ -224,7 +224,7 @@ Validation Coverage Required by the Updated Standard
   rejected.
 - Ordinary-density and role-resolved selection tests are present.
 - Density tests retain repeated physical-neighbor indices, whereas explicit
-  rooted-motif tests require the declared injective/automorphism semantics.
+  rooted-motif tests require the specified injective/automorphism semantics.
 - Neighbor-list reordering and scalar charge typing have dedicated application
   tests; global charge conservation remains a separate model constraint.
 

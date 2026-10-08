@@ -34,9 +34,9 @@ Expected output shape:
 Common failure modes:
 
 - ``output_L`` must satisfy the angular triangle rule.
-- ``group="O3"`` parity filters require a declared parity convention.
-- Large scans should use cached calls rather than rebuilding coefficient
-  tables inside loops.
+- ``group="O3"`` parity filters require a specified parity convention.
+- Large scans should use cached calls to avoid rebuilding coefficient tables
+  inside loops.
 
 Validation link: ``tests/test_pure_couplers.py`` checks this exact public path.
 

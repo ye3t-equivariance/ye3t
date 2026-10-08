@@ -6,9 +6,9 @@ Status: stable
 Requires:
    ``ye3t`` installed.
 
-These snippets replace small script-style examples that only demonstrated
-core representation queries. They are copy/paste friendly and use public
-``ye3t`` workflow or utility functions directly.
+These short queries use public ``ye3t`` coupling and representation functions.
+For a complete editable seven-section config, see
+``examples/coupling_multiplicity_counts.py``.
 
 Count Basis Labels
 ------------------
@@ -18,82 +18,40 @@ coefficients.
 
 .. doctest::
 
-   >>> import contextlib
-   >>> import io
-   >>> from ye3t.utils.printing import print_label_count_case
-   >>> case = {
-   ...     "name": "rank-2 repeated channel",
-   ...     "rank": 2,
-   ...     "target_l_avs": (0.0, 1.0),
-   ...     "strict_max_li": 2,
-   ...     "homogeneous_n": False,
-   ...     "print_limit": 2,
-   ...     "spec": {
-   ...         "mode": "restricted",
-   ...         "n_orbits": ((1, 1),),
-   ...         "l_orbits": ((1, 1),),
-   ...         "pair_orbits": ((1, 1),),
-   ...     },
-   ... }
-   >>> stream = io.StringIO()
-   >>> with contextlib.redirect_stdout(stream):
-   ...     print_label_count_case(case)
-   >>> text = stream.getvalue()
-   >>> "rank-2 repeated channel" in text and "count:" in text
+   >>> from ye3t.couplings import count
+   >>> report = count(content=(1, 1), input_Ls=(1, 1), target_L=0,
+   ...                target_permutation="trivial", carrier="ACE_density")
+   >>> len(report.labels_for_target(0)) > 0
    True
 
 Enumerate Basis Sectors
 -----------------------
 
-The same sector can be queried by target angular momentum ``L`` without
-constructing all coefficient tensors.
+Query the same factor content for several output angular momenta ``L``
+without constructing coefficient tensors.
 
 .. doctest::
 
-   >>> import contextlib
-   >>> import io
-   >>> from ye3t.utils.printing import print_basis_enumeration
-   >>> config = {
-   ...     "mode": "counts_by_L",
-   ...     "max_target_L": 3,
-   ...     "include_rank16": False,
-   ...     "print_limit": 2,
-   ...     "tree_type": "balanced",
-   ...     "cases": (
-   ...         {"name": "rank-2 repeated", "nin": (1, 1), "lin": (1, 1)},
-   ...     ),
-   ... }
-   >>> stream = io.StringIO()
-   >>> with contextlib.redirect_stdout(stream):
-   ...     print_basis_enumeration(config)
-   >>> text = stream.getvalue()
-   >>> "rank-2 repeated" in text and "mode=counts_by_L" in text
+   >>> counts = {L: len(count(content=(1, 1), input_Ls=(1, 1), target_L=L,
+   ...                        target_permutation="trivial", carrier="ACE_density").labels_for_target(L))
+   ...           for L in (0, 1, 2)}
+   >>> counts[0] > 0 and counts[2] > 0
    True
 
 Structured Basis Coordinates
 ----------------------------
 
-Use structured-sector printing when you want representative coordinate labels
-for a fixed ``(eta_i, l_i)`` sector.
+Inspect compiler-issued coordinate labels for a fixed factor-content and
+angular-momentum sector.
 
 .. doctest::
 
-   >>> import contextlib
-   >>> import io
-   >>> from ye3t.utils.printing import print_structured_basis_sector
-   >>> case = {
-   ...     "name": "rank4_mixed_scalar",
-   ...     "nin": (1, 1, 1, 2),
-   ...     "lin": (1, 1, 2, 2),
-   ...     "L_R": 0,
-   ...     "print_limit": 2,
-   ...     "tree_type": "balanced",
-   ... }
-   >>> stream = io.StringIO()
-   >>> with contextlib.redirect_stdout(stream):
-   ...     print_structured_basis_sector(case)
-   >>> text = stream.getvalue()
-   >>> "rank4_mixed_scalar" in text and "Basis:" in text
+   >>> report = count(content=(1, 1, 2, 2), input_Ls=(1, 1, 2, 2),
+   ...                target_L=0, target_permutation="trivial", carrier="ACE_density")
+   >>> labels = report.labels_for_target(0)
+   >>> len(labels) > 0
+   True
+   >>> report.require_label(labels[0], target_L=0) is not None
    True
 
 Generalized Characters And Change Of Group

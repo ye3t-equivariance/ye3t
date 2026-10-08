@@ -39,7 +39,7 @@ Common failure modes:
 
 - Invalid manual labels are rejected by ``MultiplicityReport.require_label``.
 - Ordinary ACE density products only realize the globally trivial Young sector.
-- ``A_s``, ``Phi``, and message-state carriers must declare their carrier
+- ``A_s``, ``Phi``, and message-state carriers must specify their carrier
   constraints before planning.
 - This zero-angular example uses the direct scalar path. For nonzero angular
   ACE inputs, use ``compile_ace_factorized_schedules_by_L``. Full generic

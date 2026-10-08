@@ -15,7 +15,7 @@ local smoke table for central coefficient-construction paths:
 Each local row records the selected backend, elapsed construction time for the
 small case, a conservative ``target_elapsed_seconds`` guardrail,
 ``within_target`` status, sparse table kinds, sparse entry counts, factorized
-table kinds, certificate status, selected fast-path policy, main certificate
+table kinds, validation status, selected fast-path policy, primary validation
 checks, angular coefficient normalization status, dimension-sum status,
 coefficient hash, fast-path policy mode, any forced backend, and whether the row
 is a normal-test guardrail or an optional external placeholder.  These rows are
@@ -83,7 +83,7 @@ mode, elapsed seconds, multiplicity, basis dimension, coefficient nonzeros,
 memory estimate, cache status, validation report, residuals, tolerance,
 convention hash, and coefficient hash.  Numeric subduction rows include the
 validation report produced by the numeric backend, including residual and
-rank-gap metadata.  Joint Young--E3 rows include compiler certificate checks
+rank-gap metadata.  Joint Young--E3 rows include compiler validation checks
 and coefficient hashes.
 
 External rows are not run by default.  They document capability overlap for

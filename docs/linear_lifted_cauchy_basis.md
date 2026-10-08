@@ -87,7 +87,7 @@ trivial parent \((N)\) sector.
 
 The decomposition theorem is valid for every finite \(N\). The first Ta
 workflow uses a bounded rank-4 catalogue, and current software remains subject
-to its declared per-block and resource limits. Higher-rank plans are described
+to its specified per-block and resource limits. Higher-rank plans are described
 as implemented only after their `count`, `plan`, `compile`, and resource gates
 pass.
 
@@ -101,11 +101,11 @@ by lexicographic pivots and analyzed with the exact metric dual
 C^\sharp=(C^\dagger M C)^{-1}C^\dagger M,
 \]
 
-where \(M\) is the declared ordered-carrier or orbit-weighted monomial metric.
+where \(M\) is the specified ordered-carrier or orbit-weighted monomial metric.
 
-That remains the independence and reconstruction certificate for pivot
-coordinates. The implemented, hash-bound orthogonal-output plan additionally
-constructs $O=RC$ inside each strict fixed sector and certifies
+This proves independence and gives the reconstruction rule for pivot
+coordinates. The hash-bound orthogonal-output plan also
+constructs $O=RC$ inside each strict fixed sector and validates
 $R(C^\dagger M C)R^\dagger=D>0$. Thus emitted orthogonal-output coordinates
 are independent and orthogonal, and normalization by $D^{-1/2}$ is optional.
 They can be extended to a complete orthogonal basis of the full fixed-
@@ -114,7 +114,7 @@ $N$, fixed-content sector when the request itself is complete.
 Orthogonalization may mix compiler-owned copies within one fixed role,
 angular, or outer multiplicity space. It must not mix different rank, content,
 \(\kappa\), block \(\Lambda\), target \(L\), or parity sectors. The copy
-transformation is serialized, applied offline, and must certify
+transformation is serialized, applied offline, and must validate
 
 \[
 C^\dagger M C=D,
@@ -129,7 +129,7 @@ performs no coordinate Gram, whitening, or dense change of basis. A dense Gram
 matrix or inverse remains a validation oracle, not part of fitting iterations
 or LAMMPS execution.
 
-The required certificates are exact dimension counts, diagonal coordinate
+The required checks are exact dimension counts, diagonal coordinate
 Gram, completeness-projector rank for complete requests, unique valid labels,
 all multiplicity copies emitted once, and canonical/factored forward and VJP
 agreement.
@@ -172,7 +172,7 @@ coordinate throughout the Cauchy coupling, so an injective source does not
 remove the nontrivial permutation information.
 
 An injective map need not be isometric under a physical radial inner product.
-For a declared positive measure \(d\mu_l\), define
+For a specified positive measure \(d\mu_l\), define
 
 \[
 G^{\rm src}_{sn,s'n'}
@@ -190,18 +190,19 @@ different notions that must be reported separately:
    coordinates under the exact carrier or orbit metric; and
 3. empirical feature covariance on a finite atomistic dataset.
 
-The third is neither a basis certificate nor a replacement for the first two.
+Empirical covariance describes the sampled structures and does not establish
+either algebraic basis orthogonality or source-map injectivity.
 If \(J\) is isometric and the compiler emits normalized orthogonal Cauchy
 coordinates, the realized fixed-\(N\) descriptors inherit the corresponding
 orthogonality. If \(J\) is only injective, they remain independent but are
 orthogonal only in the transported abstract metric, not necessarily in the
-declared physical radial metric.
+specified physical radial metric.
 
 ## Source-orthogonal primary construction
 
 The primary lifted-density construction should choose the joint functions
 \(\psi_{snl}\) directly from an orthogonal radial/source family. For example,
-let \(Q_{ql}\), \(q=0,\ldots,SC-1\), be orthogonal under the declared
+let \(Q_{ql}\), \(q=0,\ldots,SC-1\), be orthogonal under the specified
 \(d\mu_l\), choose a bijection \(q=q(s,n)\), and set
 
 \[
@@ -218,7 +219,7 @@ physical inner/outer shells. Their ordering and the bijection \(q(s,n)\) are
 part of the serialized convention.
 
 An equivalent orthogonal one-particle family may be obtained by an exact or
-certified offline basis change. A transform block-diagonal in source-family
+validated offline basis change. A transform block-diagonal in source-family
 index \(n\) preserves the fixed-content grading. A transform mixing different
 \(n\) maps one fixed-content sector into a sum of sectors under
 \(\operatorname{Sym}^N(T)\). In that case exact use requires either defining
@@ -233,7 +234,7 @@ loops and LAMMPS timesteps. A fixed compiler-emitted source-coordinate
 transform may run as a separately benchmarked bounded kernel; it is not a
 runtime Gram construction.
 
-For a chosen finite candidate span \(Q_{ql}\), an offline certificate may form
+For a chosen finite candidate span \(Q_{ql}\), an offline source check may form
 
 \[
 G^Q_{qq'}=\langle Q_{ql},Q_{q'l}\rangle_{\mu_l},
@@ -265,11 +266,11 @@ exact runtime lowerings to benchmark:
 The second path evaluates the same orthogonal-coordinate model and preserves
 its fixed-content catalogue because the descriptor receives
 \(A^{\widehat Q}\), not \(A^f\). It must not apply a dense transform on every
-edge. The source Gram is certificate metadata; \(T\) and its explicitly stored
+edge. The source Gram is validation metadata; \(T\) and its explicitly stored
 and validated transpose are compact executable lowering records.
 
 The exact polynomial family, envelope, measure, normalization, and origin
-regularity are model choices and must be displayed and certified before a
+regularity are model choices and must be displayed and validated before a
 fit. Direct source-orthogonal functions are the mathematical primary;
 separable \(w_sR_{nl}\) sources remain useful measured fast-path ablations.
 
@@ -413,7 +414,7 @@ h_{ql}=
 {(2q+2l+7)q!\Gamma(q+2l+7)}.
 \]
 
-These functions have exact identity radial/source Gram under the declared
+These functions have exact identity radial/source Gram under the specified
 measure. Tensor rank \(N\), Jacobi degree \(q\), total radial polynomial
 degree \(l+q+2\), source-span dimension \(2C\), and empirical design-matrix
 rank remain distinct quantities. The role label is retained through the
@@ -457,9 +458,9 @@ Before fitting or native deployment, require:
 
 1. exact dimension identities for a bounded matrix of ranks, contents, role
    dimensions, angular carriers, and internal partitions;
-2. direct orthogonal-coordinate or exact change-of-basis certificates;
-3. an exact source-span/injectivity certificate and a physical source-Gram
-   certificate under the declared measure for every selected source family;
+2. direct orthogonal-coordinate or exact change-of-basis checks;
+3. an exact source-span/injectivity check and a physical source-Gram
+   check under the specified measure for every selected source family;
 4. nonzero generic examples for each retained nontrivial \(\kappa\);
 5. synthetic carrier collapse \(A_s=c_sA\) for every source family, plus
    physical filter collapse for factorized sources;

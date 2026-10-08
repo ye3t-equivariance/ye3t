@@ -89,6 +89,12 @@ multi-operator.  ``max_target_L`` can cap that expansion.
        optimization_policy="auto",
    )
 
+For a fixed-content basis with a chosen parent :math:`(\lambda,L)`, use the
+seven-section ``YE3TRepresentation`` examples and
+``ye3t.couplings.count`` / ``plan`` / ``compile``. The lower-level
+``JointYoungCGProduct`` API in :doc:`tensor_products` combines sectors that
+have already been coupled.
+
 Central Young--E3 Coupler Records
 ---------------------------------
 
@@ -109,10 +115,10 @@ record separates:
    factorized binary CG tables for n-ary balanced/left/right schedules.
 
 ``JointYoungE3Coupler``
-   The composed Young/block/angular coefficient record, including complete
-   alpha labels ``(mu, Lambda, beta, gamma, pi)``, sparse coefficient tables,
+   The composed Young/block/angular coefficient record, including internal
+   route labels ``(mu, Lambda, beta, gamma, pi)``, sparse coefficient tables,
    factorized coefficient tables, backend provenance, and a validation
-   certificate.
+   validation record.
 
 ``JointYoungE3Coupler.to_dict()["component_inventory"]`` summarizes which
 coefficient-object families are present: complete labels, block maps,
@@ -120,7 +126,9 @@ subduction maps, induction/coset couplers with Frobenius-lift metadata,
 angular maps including parity metadata, sparse tables, factorized tables, and
 normalization keys.  The
 inventory is a downstream completeness check; the individual maps and
-certificate remain the source of the tested finite-rank identities.
+validation record hold the tested finite-rank identities. The paper's coupled
+coordinate is :math:`\alpha=(\lambda,L,a,t,M)`; the route tuple above is an
+internal path label.
 
 ``RepeatedContentImageMap`` records the exact projector image used when a
 balanced tree split separates repeated full-channel content, for example the
@@ -130,8 +138,8 @@ corresponding projector, sparse tables, hashes, split metadata, and a
 checks idempotency, image rank, agreement with the direct global coupler image,
 and the absence of descriptor-level SVD or numerical descriptor reduction.
 ``CompileBalancedTree`` accepts an optional ``metadata["balanced_content_split"]``
-with two child index blocks so tests and examples can state the split being
-certified; otherwise it records the default midpoint split.  The emitted image
+with two child factor-index blocks so tests and examples can state the split
+being validated; otherwise it records the default midpoint split. The image
 map also records whether repeated channel support crosses the selected split.
 The current raw-path table is the exact projected induced-basis Gram
 ``G=P^T P`` for the emitted Young image projector ``P=S S^T``.  Its pivot
@@ -139,7 +147,7 @@ columns give the recorded exact rank profile.  This is a representation-level
 Gram table over induced-basis candidate paths; a future lowerer may still
 factor earlier local path graphs before this global image projector is formed.
 The balanced-tree compilation also emits ``balanced_tree_node_ledger`` records
-for the recursive binary tree.  Each internal node records its slot indices,
+for the recursive binary tree. Each internal node records its factor indices,
 child split, child content, repeated labels crossing the split, whether image
 reduction is required, and whether the current compiler materialized that
 node's image map.  At present the root global image map is materialized when
@@ -147,7 +155,18 @@ needed.  Non-root scalar-trivial repeated-content nodes are also materialized
 as exact local image maps, while unsupported intermediate sectors remain
 recorded as requirements for the future local tree lowerer.
 
-The current certificate checks small-rank dimension sums, projector
+The repeated-content image-map construction above uses an explicit Young
+subduction matrix.  A complete factorized Young--E3 coupler can instead carry
+its routes without that matrix.  ``CompileBalancedTree`` currently rejects a
+repeated-content factorized request with an explicit scope error; the complete
+coupler remains available from ``CompileGlobalYE3TCouplers``.  The balanced
+message-state reference evaluator accepts scalar-factor permutation tables.
+Its scalar feature inputs have factor angular momenta zero.  For nonzero
+factor angular momenta, the schedule can retain a complete factorized plan,
+but its scalar reference evaluator requires ordered tensor factors and does
+not evaluate that plan.
+
+The compiler validation checks small-rank dimension sums, projector
 idempotency, pairwise projector orthogonality, sum of projectors on the induced
 space, subgroup generator/multiplicity residuals, induction/coset counts,
 trivial-target normalized orbit sums, angular admissibility, angular
@@ -190,10 +209,10 @@ Balanced Message-State Schedule Records
 
 ``CompileBalancedYE3TMessagePassingSchedule`` consumes
 ``BalancedYE3TMessageStateSpec`` and emits balanced-tree sector schedules plus
-the central coupler certificates used by the reference evaluator.  The schedule
-is rank-graded: each retained hidden sector carries its own slot group
+the central coupler validation records used by the reference evaluator. The schedule
+is rank-graded: each retained hidden sector carries its own factor-permutation group
 ``S_N`` for the corresponding rank/content.  The default pair-product schedule
-combines disjoint child slot sets and grows rank through induction/LR
+combines disjoint child factor sets and grows rank through induction/LR
 multiplicities.  It is not a same-rank nonlinear product of two features that
 already transform under one common ``S_N`` action; such products require a
 separate Kronecker-coupling implementation before they can be claimed as part
@@ -203,13 +222,13 @@ implemented-under-validation schedule mode, while ``"same_rank_kronecker"`` is
 carried as an unsupported planned mode.
 ``BalancedYE3TRankCouplingPolicy(...)`` and schedule payloads expose the same
 boundary as structured metadata.  For rank-additive schedules the policy names
-induction from disjoint slot sets and Littlewood--Richardson multiplicities;
+induction from disjoint factor sets and Littlewood--Richardson multiplicities;
 for ``"same_rank_kronecker"`` it reports
 ``implemented_in_balanced_schedule=False`` and
 ``required_backend="same_rank_kronecker_coupler"`` before schedule
 compilation.
 The schedule
-record now includes ``input_value_specs``: one entry per scheduled hidden
+record includes ``input_value_specs``: one entry per scheduled hidden
 sector, with the expected input feature-axis width, expected output coefficient
 width, backend, and coefficient-table kind.  Generic sectors report the sparse
 subduction/coefficient matrix shape; exterior/sign sectors report the exterior
@@ -218,12 +237,19 @@ evaluator.  The direct exterior/sign evaluator keeps its historical default of
 returning the contracted tensor, while balanced message-sector evaluation uses
 the singleton-axis form so the hidden-state feature axis remains explicit; the
 metadata records ``coefficient_axis_kept`` and ``coefficient_axis_status``.
+For a complete factorized Young--E3 plan without a sparse reference table,
+the plan remains inspectable and reports its factorized table kind; reference
+input and output widths are ``None`` because the scalar hidden-state input
+contract does not describe its ordered tensor factors.  Calling the scalar
+reference evaluator for such a plan raises a scope error.
 ``BalancedYE3TMessageStateSpec`` also carries optional
 ``input_Ls_by_content`` records, for example
 ``{"content": [1, 1], "input_Ls": [1, 1]}``, so JSON/YAML and Python configs
 can specify the input angular labels used when compiling each content sector.
 The low-level compiler still accepts an explicit ``input_Ls_by_content``
 override for reference tests.
+An example with one scalar value per hidden factor uses angular input labels
+``[0, 0]``.  Labels ``[1, 1]`` require full vector multiplets as inputs.
 For exterior/sign sectors with repeated content labels, the emitted metadata
 also carries ``content_label_wedge_vanish_report`` and
 ``carrier_realization_required_to_enforce_vanish``.  The sign-vector reference
@@ -323,10 +349,10 @@ checks the autograd Jacobian of the scalar reference readout with respect to
 the packaged direct-sum hidden-state tensor under the same node/site relabeling.
 This is a hidden-state tensor check only.  It is not a geometry-carrier force
 check, finite-difference force validation, or MLIP suitability claim.
-All of these schedule/reference objects now expose
+All of these schedule/reference objects expose
 ``runtime_scope="balanced_coefficient_schedule_reference_only"`` and
 ``missing_recursive_message_passing_stages`` so downstream descriptor/model
-code can check the difference between a certified coefficient schedule and a
+code can check the difference between a validated coefficient schedule and a
 trainable recursive message-passing runtime.
 The balanced schedule also records ``task_family``, ``readout_target``,
 ``readout_selection_rule_status``, and ``required_runtime_validation``.  Atomic
@@ -346,7 +372,7 @@ are run.
 
 Balanced-tree compilation also records exact recoupling evidence for checked
 small ranks.  In addition to comparing the left/right/balanced image
-projectors, the certificate provenance includes overlap matrices
+projectors, the validation record includes overlap matrices
 ``C_comparison^T C_balanced`` between the orthonormal subduction bases.  The
 checks require these overlaps to be orthogonal and to reconstruct the balanced
 subduction basis from the left/right bases.  This is a representation-level
@@ -359,27 +385,27 @@ Schur-Weyl Guided Tree Backend
 ``compile_schur_weyl_guided_tree_product_from_coupler`` consumes the central
 global coupler record and carries its certificate hash, backend, target
 partition metadata, and angular/parity target into the runtime-tree report.
-The backend certificate now records whether the global coupler certificate was
+The backend validation record states whether the global coupler validation was
 present and passed, whether the coefficient hash is present, whether node
 dimensions match the cached Schur-Weyl/Specht plans, and whether requested
 labels are missing or duplicated.
 When the runtime tree is built through ``CompileBalancedTree(...,
 build_runtime_tree=True)``, the backend provenance also receives the balanced
 node ledger, local repeated-content image maps, and remaining non-root image-map
-requirements.  The backend certificate checks that this balanced compiler
+requirements.  The backend validation record checks that this balanced compiler
 metadata is present when requested and that materialized local image maps
 validate.
 
 For roots whose subgroup-adapted tree has one symmetric-group factor, the
 adapter also passes the global target partition into the tree selector and the
-certificate records ``root_permutation_target_status`` as
+validation record sets ``root_permutation_target_status`` to
 ``"enforced_single_root_symmetric_group_factor"``.  The report includes the
 enforced partition, ``single_root_factor_target_enforced=True``,
 ``full_global_induction_coset_lift_required=False``, the root subgroup factor
 count/multiplicities, and the actual root output partition signatures.  For
 multi-factor fixed-content roots, the tree selector can enforce only the
 subgroup-local Specht restriction; the full global ``S_N`` target still requires
-the global induction/coset lift.  Those cases now report
+the global induction/coset lift. Those cases report
 ``root_permutation_target_directly_enforceable=False``,
 ``full_global_induction_coset_lift_required=True``, and
 ``root_permutation_target_direct_enforcement_kind="requires_global_induction_coset_lift"``.

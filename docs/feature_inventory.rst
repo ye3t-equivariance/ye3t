@@ -61,7 +61,7 @@ Feature: Exterior/sign and fermion carrier support
   Keep / move / deprecate / delete: keep
   Replacement: none
   Backward compatibility: stable only with explicit carrier conventions
-  Notes: spinful fermion support requires ``SU(2)`` or a declared double-group
+  Notes: spinful fermion support requires ``SU(2)`` or a specified double-group
   convention; spatial exterior powers alone do not provide it.
 
 Feature: Rank-graded message-passing compiler core
@@ -72,7 +72,7 @@ Feature: Rank-graded message-passing compiler core
   Replacement: none
   Backward compatibility: stable compiler-side representation logic
   Notes: ``ye3t-methods`` message paths take labels and coupling plans from this
-  compiler rather than enumerating them locally.
+  compiler, with no local label enumeration.
 
 Feature: Visualization helpers
   Current file: ``ye3t/utils/illustrators.py``

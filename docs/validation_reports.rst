@@ -44,7 +44,7 @@ This case has the same radial/content channel at both ``l=0`` and ``l=1``.
 Compilation checks the full content-and-angular blocks, then binds the
 existing compact ACE coefficient to the counted label. The compiled
 ordinary-density table records its physical projection and every magnetic
-component. A count report alone still does not certify coefficient
+component. A count report alone still does not validate coefficient
 materialization.
 
 Common failure modes:

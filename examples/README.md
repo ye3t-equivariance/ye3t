@@ -33,7 +33,7 @@ Default output checks for the short core examples:
 | `tagged_cauchy_linear_coordinates.py` | 81 compiler raw coordinates and 14 independent scalar physical coordinates for the rank-four catalogue. |
 | `ordered_role_cauchy_factors.py` | Three independent copies and output shape `(3, 2, 3)` for `(a,t,M)`. |
 
-Bounded benchmarks and diagnostics live in `benchmarks/`. They keep their
+Benchmarks and diagnostics are in `benchmarks/`. They keep their
 output and cache paths visible in `cfg_ye3t`.
 
 For the shortest core route, run `coupling_multiplicity_counts.py`: its visible
@@ -63,37 +63,29 @@ can evaluate nontrivial global Young outputs. Here `ordered_role` means the
 factor array retains both its order and a role coordinate; it is not a new
 atomistic density or motif source. The commutative role-density
 example supports a globally symmetric parent with nontrivial local Cauchy
-paths. The user-supplied example evaluates every valid multiplicity coordinate from
-the full exact count. The default external-factor compiler stores separate
-local, binary angular, and Young maps. Exact general Young compilation solves
-identity-coset subgroup-generator equations and transports other factor
-orders with sparse adjacent-generator actions. Outside the small reference
-comparison cases, it does not build or store the full Young orbit table. It
-never builds the full joint orbit matrix. The numeric cached
-Young backend still builds its Young orbit table during compilation. Distinct
-factor channels use scaled matrix-unit storage instead of a dense identity
-block. Small sectors are checked against the older full-table compiler.
-The symmetric and alternating repeated blocks use occupation and determinant
-contractions. Their bound runtimes reuse coefficient tensors, symmetric
-occupation transitions, and alternating minor indices across evaluations.
-`user_supplied_factors.py` also demonstrates a batched message input and its
-factor gradient through a source-neutral factorized execution plan. These
-examples evaluate one ordered factor set; physical
-density or motif sums belong to the application. The bounded dense
-typed-orbit matrix remains available with `allow_dense_reference=True` for
-tests and comparisons. `ordered_role_cauchy_factors.py` lowers its compiler
-result into a source-neutral `YE3TExecutionPlan` and binds the tested Torch
-runtime from that plan. The plan carries every `(a,t,M)` route and O(3) parity.
-Native packed message-passing kernels for this instruction, and a physical
-source that supplies atomistic values and derivatives, remain separate work.
-The existing native linear lifted and tagged Cauchy paths in `ye3t-lammps`
-are unaffected.
+paths. The external-factor examples evaluate every valid multiplicity
+coordinate from the exact count with factorized plans. The general Young
+compiler uses subgroup-generator equations and sparse permutation actions;
+symmetric and alternating repeated blocks use occupation and determinant
+contractions. These routes do not assemble the full joint orbit matrix.
+The optional numeric cached Young backend still builds a Young orbit table
+during compilation.
+The bounded dense typed-orbit matrix is available for tests and comparisons
+with `allow_dense_reference=True`.
 
-In the paper notation, `a` indexes independent multiplicity copies and the
-output axes are `(a,t,M)`. The saved compiler schema retains the older
-`alpha_index` key for compatibility. On a selected-coordinate artifact it is
-the local output-axis index (zero); `full_alpha_index` in the public resolved
-label identifies the coordinate in the complete `(lambda,L)` sector. For a scalar tagged potential, the
+`user_supplied_factors.py` demonstrates batched message inputs and factor
+gradients. `ordered_role_cauchy_factors.py` binds a `YE3TExecutionPlan` to
+the Torch runtime with every `(a,t,M)` route and O(3) parity. Both examples
+accept supplied factor arrays. Constructing atomistic factors, derivatives,
+and physical density or motif sums belongs in the application package.
+
+The paper labels a coupled coordinate by $\alpha=(\lambda,L,a,t,M)$: $a$
+indexes an independent multiplicity copy, $t$ a Young-carrier component, and
+$M$ a magnetic component. After selecting $(\lambda,L)$, evaluator arrays
+have axes `(a,t,M)`. The saved schema uses `alpha_index` for compatibility;
+on a selected-coordinate artifact it is the local output-axis index (zero).
+`full_alpha_index` in the resolved label identifies the coordinate in the
+complete $(\lambda,L)$ sector. For a scalar tagged potential, the
 `tagged_cauchy_linear_coordinates.py` catalogue matches the basis choices in
 the `ye3t-methods` tagged fit example. Core `ye3t` compiles its coordinates;
 `ye3t-methods` constructs atomistic descriptor rows and fits energy, force,
@@ -136,11 +128,8 @@ also carry their Young induction multiplicity. `build_basis()` constructs the
 reduced exact product matrices; full Young placement coefficient tables are
 compiled only when `yb.basis.induction_map(rank, cap, partitions)` is called.
 
-The catalog's former diagnostic cases remain in
-`tests/test_core_counts_and_characters.py`: legacy rank-2/3 normalization,
-rank-3 child angular/Young limits, rank-6 route filters and recoupling, the
-mixed `S_6` induction checks, and `S_8`/`S_16` rank checks. The example keeps
-only the cases needed to explain the quotient and its output.
+Related normalization, induction, recoupling, and high-rank regression cases
+are in `tests/test_core_counts_and_characters.py`.
 
 | benchmark | purpose |
 |---|---|

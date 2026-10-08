@@ -44,8 +44,8 @@ in the example files:
 - ``tree_type`` selects the recoupling tree used for compact paths.
 - ``mode`` switches between count-only and materialized-label views in
   enumeration examples.
-- ``write_diagrams=True`` writes SVG diagrams from constructed runtime objects
-  instead of drawing a fixed conceptual sketch.
+- ``write_diagrams=True`` writes SVG diagrams from runtime objects built from
+  the coupling report.
 - ``max_diagram_instructions`` and ``max_diagram_segments`` keep actual
   instruction/segment graphs compact when a product has many branches.
 
