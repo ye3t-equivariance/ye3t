@@ -246,6 +246,7 @@ def rank3_coupled_product_plan():
                 "max_product_columns": 256,
                 "max_nodes": 2048,
                 "max_static_bytes": 16 * 1024 * 1024,
+                # Linux counts pages private to the forked compiler worker.
                 "max_compile_peak_bytes": 1024 * 1024 * 1024,
                 "max_serialized_plan_bytes": 16 * 1024 * 1024,
                 "max_compile_seconds": 60.0,

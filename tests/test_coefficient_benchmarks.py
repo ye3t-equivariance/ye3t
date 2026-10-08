@@ -25,10 +25,16 @@ def test_local_coefficient_materialization_benchmark_table_reports_local_and_opt
         assert row["within_target"] is True
         assert row["target_scope"] == "conservative local smoke guardrail, not a cross-machine performance claim"
         assert row["coefficient_table_count"] >= 1
-        assert row["sparse_table_kinds"]
-        assert len(row["sparse_table_entry_counts"]) == row["coefficient_table_count"]
-        assert row["total_sparse_entry_count"] >= 1
-        assert row["factorized_table_kinds"]
+        assert len(row["sparse_table_entry_counts"]) == len(row["sparse_table_kinds"])
+        assert len(row["factorized_table_entry_counts"]) == len(row["factorized_table_kinds"])
+        assert row["coefficient_table_count"] == (
+            len(row["sparse_table_kinds"]) + len(row["factorized_table_kinds"])
+        )
+        assert row["total_stored_term_count"] == (
+            row["total_sparse_entry_count"]
+            + sum(row["factorized_table_entry_counts"])
+        )
+        assert row["total_stored_term_count"] >= 1
         assert "global_young_label" in row
         assert isinstance(row["global_target_partition"], tuple)
         assert isinstance(row["block_mu_labels"], tuple)
@@ -77,6 +83,8 @@ def test_local_coefficient_materialization_benchmark_table_reports_local_and_opt
         for row in same_rank["same_rank_target_terms"]
     ) == (((3,), 1), ((2, 1), 1), ((1, 1, 1), 1))
     assert same_rank["same_rank_table_shapes"] == ((4, 1), (4, 2), (4, 1))
+
+
     assert same_rank["same_rank_evaluator_shapes"] == ((2, 1), (2, 2), (2, 1))
     assert same_rank["sparse_table_kinds"] == (
         "same_rank_kronecker_runtime_sparse_table",
@@ -119,6 +127,23 @@ def test_local_coefficient_materialization_benchmark_table_reports_local_and_opt
         assert row["task_readout_selection_rule_passed"] is None
         assert row["normal_test_guardrail"] is False
         assert row["external_dependency_required"] is True
+
+
+def test_typed_benchmark_row_keeps_parent_partition_without_dense_subduction():
+    from ye3t import CompileGlobalYE3TCouplers, YE3TRotationTarget, YE3TSpec
+    from ye3t.coefficient_benchmarks import _coupler_row
+
+    coupler = CompileGlobalYE3TCouplers(
+        YE3TSpec(
+            content=("a", "b"), target_permutation="young:1,1",
+            target_rotation=YE3TRotationTarget(L_R=1),
+            carrier="external_tensor", coefficient_backend="global_coupler",
+            runtime_status="planned_not_public", metadata={"input_Ls": (1, 1)},
+        )
+    )
+    row = _coupler_row("typed", "global", 0.0, coupler, target_seconds=None)
+    assert row["global_target_partition"] == (1, 1)
+    assert row["factorized_table_kinds"]
 
 
 def test_local_coefficient_materialization_benchmark_can_skip_external_rows():
@@ -188,15 +213,62 @@ def test_coefficient_materialization_benchmark_artifacts_write_raw_outputs(tmp_p
         assert row["elapsed_seconds"] >= 0.0
         assert row["validation_report"]
         assert row["validation_passed"] is True
-        assert row["coefficient_nonzeros"] >= 1
+        if row["benchmark_family"] != "joint_young_e3":
+            assert row["coefficient_nonzeros"] >= 1
         assert row["memory_estimate_bytes"] >= 1
         assert row["coefficient_hash"]
         assert row["convention_hash"]
+        if row["benchmark_family"] == "joint_young_e3":
+            assert row["coefficient_nonzeros"] == row["sparse_nonzeros"]
+            assert row["total_stored_term_count"] == (
+                row["sparse_nonzeros"] + row["factorized_stored_terms"]
+            )
+            assert row["total_stored_term_count"] >= 1
+            assert row["memory_estimate_scope"] == (
+                "serialized_coefficient_json_bytes_not_resident_memory"
+            )
+            assert row["factorized_stored_terms"] >= 0
 
     external_rows = [row for row in rows if row.get("optional_external")]
     assert external_rows
     assert all(row["construction_mode"] == "not_run" for row in external_rows)
     assert all("comparison_policy" in row for row in external_rows)
+
+
+def test_factorized_term_count_includes_young_transport_generators():
+    from ye3t.couplings import compile as compile_coupling, plan
+    from ye3t.coefficient_benchmarks import (
+        _factorized_stored_term_count, _joint_materialization_row,
+    )
+
+    coupler = compile_coupling(plan(
+        content=(1, 2, 3), input_Ls=(1, 1, 1), target_L=1,
+        target_permutation="young:2,1", carrier="Phi",
+    ), subduction_materialization_backend="exact").coupler
+    table = coupler.factorized_coefficient_tables[0]
+    generator_entries = sum(
+        len(diagonal) + len(off_diagonal) + len(partner)
+        for young in table["young_tables"]
+        for diagonal, off_diagonal, partner
+        in young.get("adjacent_generators", ())
+    )
+    assert generator_entries > 0
+    without_generators = dict(table)
+    without_generators["young_tables"] = tuple(
+        {**young, "adjacent_generators": ()}
+        for young in table["young_tables"]
+    )
+    assert (_factorized_stored_term_count(table)
+            - _factorized_stored_term_count(without_generators)
+            == generator_entries)
+    row = _joint_materialization_row(
+        {"name": "young_21", "content": (1, 2, 3),
+         "input_Ls": (1, 1, 1), "target_permutation": "young:2,1",
+         "target_L": 1},
+        "cold", 0.0, coupler,
+    )
+    assert row["multiplicity"] == len(coupler.alpha_labels())
+    assert row["multiplicity"] > len(coupler.labels)
 
 
 def test_coefficient_materialization_benchmark_artifacts_write_plot_when_available(tmp_path):

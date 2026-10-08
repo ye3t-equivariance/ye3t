@@ -13,6 +13,32 @@ def _cosets(table):
     )
 
 
+def test_factorized_angular_tree_keeps_exact_cg_support():
+    from ye3t.core.subtree_dag import cg_exact
+    from ye3t.couplings.factorized_typed import _cg_tree_payload
+
+    for left_L in range(4):
+        for right_L in range(4):
+            for output_L in range(abs(left_L - right_L), left_L + right_L + 1):
+                tree = _cg_tree_payload((
+                    "merge", output_L,
+                    ("leaf", 0, left_L), ("leaf", 1, right_L),
+                ))
+                actual = {
+                    (left_m - left_L, right_m - right_L, output_m - output_L)
+                    for left_m, right_m, output_m, _coefficient in tree["entries"]
+                }
+                expected = {
+                    (left_m, right_m, left_m + right_m)
+                    for left_m in range(-left_L, left_L + 1)
+                    for right_m in range(-right_L, right_L + 1)
+                    if abs(left_m + right_m) <= output_L
+                    and not cg_exact(left_L, left_m, right_L, right_m,
+                                     output_L, left_m + right_m).is_zero()
+                }
+                assert actual == expected
+
+
 def test_precompact_typed_young_table_keeps_saved_factor_results():
     from copy import deepcopy
     from types import SimpleNamespace
@@ -104,6 +130,7 @@ def test_complete_typed_factors_lower_to_serializable_execution_plan():
     "content,input_Ls,target,output_L",
     (
         ((1, 1, 2), (1, 1, 1), "young:2,1", 1),
+        (("x", "x", "y"), (1, 1, 1), "young:2,1", 1),
         ((1, 1, 2), (1, 1, 1), "trivial", 1),
         ((1, 1, 2), (1, 1, 1), "antisymmetric", 1),
         ((1, 1, 1), (2, 2, 2), "young:2,1", 2),
@@ -1500,3 +1527,47 @@ def test_antisymmetric_local_block_transports_through_nontrivial_cosets():
         matrix @ np.kron(tableau_action, np.eye(3)),
         atol=1e-12,
     )
+
+
+def test_symbolic_factor_channels_preserve_typed_count_and_coefficients():
+    import torch
+    from ye3t.couplings import compile as compile_coupling
+    from ye3t.couplings import plan
+
+    common = {
+        "input_Ls": (1, 1, 1),
+        "target_L": 1,
+        "target_permutation": "young:2,1",
+        "carrier": "Phi",
+    }
+    numeric_plan = plan(content=(1, 1, 2), **common)
+    symbolic_plan = plan(content=("x", "x", "y"), **common)
+    assert numeric_plan.report.counts_by_target == symbolic_plan.report.counts_by_target
+    numeric = compile_coupling(
+        numeric_plan, subduction_materialization_backend="exact"
+    )
+    symbolic = compile_coupling(
+        symbolic_plan, subduction_materialization_backend="exact"
+    )
+    assert len(numeric.coupler.alpha_labels()) == len(symbolic.coupler.alpha_labels())
+    factors = torch.tensor(
+        [[0.2 + 0.1j, -0.3 + 0.4j, 0.5 - 0.2j],
+         [0.7 - 0.3j, 0.1 + 0.2j, -0.4 + 0.5j],
+         [-0.2 + 0.6j, 0.8 - 0.1j, 0.3 + 0.2j]],
+        dtype=torch.complex128,
+    )
+    for permutation in ((0, 1, 2), (2, 0, 1)):
+        moved = factors[list(permutation)]
+        numeric_types = tuple(((1, 1), (1, 1), (2, 1))[index]
+                              for index in permutation)
+        symbolic_types = tuple((("x", 1), ("x", 1), ("y", 1))[index]
+                               for index in permutation)
+        torch.testing.assert_close(
+            symbolic.coupler.evaluate_factorized_factors_torch(
+                moved, factor_types=symbolic_types,
+            ),
+            numeric.coupler.evaluate_factorized_factors_torch(
+                moved, factor_types=numeric_types,
+            ),
+            atol=1e-12, rtol=1e-12,
+        )

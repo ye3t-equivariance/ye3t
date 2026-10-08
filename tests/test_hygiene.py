@@ -39,7 +39,8 @@ GENERATED_RESULT_SUFFIXES = {
     ".tar",
     ".zip",
 }
-# Work-package, task-board, and workspace-staging narration that must not appear in tracked text.
+# Work-package and task-board narration that must not appear in tracked text.
+# The documented raw-output directory is intentionally outside this list.
 # The literals are split so that this guard is not itself a hit for the tokens.
 NARRATION_PATTERNS = (
     r"\bWP[0-9]",
@@ -48,7 +49,6 @@ NARRATION_PATTERNS = (
     "handoff " + "section",
     r"\bTask [0-9]{2}\b",
     r"\bMPR-[0-9]",
-    "ye3t-" + "workflows",
     "externalized_" + "repo_material",
 )
 # Unpublished features must not appear anywhere in the public tree.

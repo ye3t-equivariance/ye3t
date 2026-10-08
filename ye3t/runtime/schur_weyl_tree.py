@@ -16,10 +16,12 @@ backend.
 """
 
 from collections import Counter
+from numbers import Integral
 
 import torch
 
 from ye3t._record import recordclass
+from ye3t.spec import _target_partition
 from ye3t.representations import (
     ExactSymbolicProjectorGeneralizedBasisBuilder,
     PermutationIrrep,
@@ -611,12 +613,19 @@ def compile_schur_weyl_guided_tree_product_from_coupler(
     if not coupler.angular_maps:
         raise ValueError("Global coupler must contain an angular map to compile a Schur-Weyl tree backend.")
     angular = coupler.angular_maps[0]
-    target_partition = (
-        tuple(int(part) for part in coupler.subduction_maps[0].target_partition)
-        if coupler.subduction_maps
-        else tuple()
-    )
-    root_subgroup = PermutationSubgroup.from_nl(spec.content, angular.input_Ls)
+    source_input_Ls = tuple(int(value) for value in (
+        coupler.block_maps[0].get("original_input_Ls", angular.input_Ls)
+        if coupler.block_maps else angular.input_Ls
+    ))
+    if len(source_input_Ls) != len(spec.content):
+        raise ValueError("Global coupler must retain one angular input per factor.")
+    target_partition = _target_partition(spec.target_permutation, len(spec.content))
+    if all(isinstance(value, Integral) for value in spec.content):
+        tree_content = tuple(int(value) for value in spec.content)
+    else:
+        channel_ids = {value: index for index, value in enumerate(dict.fromkeys(spec.content), 1)}
+        tree_content = tuple(channel_ids[value] for value in spec.content)
+    root_subgroup = PermutationSubgroup.from_nl(tree_content, source_input_Ls)
     root_subgroup_factor_multiplicities = tuple(int(factor.multiplicity) for factor in root_subgroup.factors)
     root_target_directly_representable = bool(
         target_partition
@@ -630,8 +639,8 @@ def compile_schur_weyl_guided_tree_product_from_coupler(
         else "requires_global_induction_coset_lift"
     )
     product = compile_schur_weyl_guided_tree_product(
-        tuple(int(value) for value in spec.content),
-        tuple(int(value) for value in angular.input_Ls),
+        tree_content,
+        source_input_Ls,
         tree_type="balanced",
         root_target_Ls=(int(angular.output_L),),
         root_target_parity=angular.parity,
@@ -648,10 +657,12 @@ def compile_schur_weyl_guided_tree_product_from_coupler(
             "global_coupler_certificate": coupler.certificate.to_dict(),
             "global_coupler_coefficient_hash": coupler.certificate.coefficient_hash,
             "global_coupler_label_count": int(len(coupler.labels)),
+            "global_coupler_alpha_label_count": int(len(coupler.alpha_labels())),
+            "global_coupler_factor_channels": tuple(str(value) for value in spec.content),
             "global_coupler_target_permutation": str(spec.target_permutation),
             "global_coupler_target_partition": target_partition,
             "root_angular_target": {
-                "input_Ls": tuple(int(value) for value in angular.input_Ls),
+                "input_Ls": source_input_Ls,
                 "L_R": int(angular.output_L),
                 "parity": angular.parity,
             },

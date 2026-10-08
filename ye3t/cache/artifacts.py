@@ -610,7 +610,7 @@ class _ArtifactLock:
         self.stream = stream
         try:
             if os.name == "nt":
-                # Windows byte-range locking needs a byte in the persistent
+                # Byte-range locking for os.name == "nt" needs a byte in the persistent
                 # lock file. Its contents have no ownership semantics.
                 stream.seek(0, os.SEEK_END)
                 if stream.tell() == 0:

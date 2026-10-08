@@ -242,7 +242,7 @@ def _typed_joint_routes(spec, input_Ls, target_partition):
 
     from ye3t.representations.factorized_product_images import _factor_angular_counts
 
-    content = tuple(int(value) for value in spec.content)
+    content = tuple(spec.content)
     input_Ls = tuple(int(value) for value in input_Ls)
     typed = tuple(zip(content, input_Ls))
     block_types = tuple(dict.fromkeys(typed))
@@ -485,17 +485,28 @@ def _balanced_split_from_spec(spec, rank):
 def _support_overlap_report_for_split(
     content,
     split,
+    *,
+    factor_types=None,
 ):
+    factor_types = tuple(content if factor_types is None else factor_types)
+    if len(factor_types) != len(content):
+        raise ValueError("factor_types must match the fixed-content rank")
     child_content = tuple(tuple(content[int(index)] for index in block) for block in split)
-    counts = Counter(content)
+    child_factor_types = tuple(
+        tuple(factor_types[int(index)] for index in block) for block in split
+    )
+    counts = Counter(factor_types)
     repeated_labels = tuple(label for label, count in counts.items() if int(count) > 1)
     labels_crossing_split = tuple(
-        label for label in repeated_labels if sum(1 for block in child_content if label in block) > 1
+        label for label in repeated_labels
+        if sum(1 for block in child_factor_types if label in block) > 1
     )
     return {
         "content": content,
+        "factor_types": factor_types,
         "split": split,
         "child_content": child_content,
+        "child_factor_types": child_factor_types,
         "repeated_labels": repeated_labels,
         "labels_crossing_split": labels_crossing_split,
         "repeated_content_present": bool(repeated_labels),
@@ -516,9 +527,11 @@ def _default_local_binary_split(slot_indices):
 def _balanced_tree_node_ledger(
     *,
     content,
+    factor_types=None,
     root_split,
     root_image_map_materialized,
 ):
+    factor_types = tuple(content if factor_types is None else factor_types)
     records = []
 
     def visit(path, slot_indices, split):
@@ -532,7 +545,10 @@ def _balanced_tree_node_ledger(
             split = tuple(tuple(int(index) for index in block) for block in split)
             split_source = "root_balanced_content_split"
         local_content = tuple(content[int(index)] for index in slot_indices)
-        support = _support_overlap_report_for_split(tuple(content), split)
+        local_factor_types = tuple(factor_types[int(index)] for index in slot_indices)
+        support = _support_overlap_report_for_split(
+            tuple(content), split, factor_types=factor_types,
+        )
         image_required = bool(support["repeated_content_crosses_split"])
         local_image_status = (
             "root_global_image_map_materialized"
@@ -546,9 +562,11 @@ def _balanced_tree_node_ledger(
                 "node_path": path,
                 "slot_indices": slot_indices,
                 "content": local_content,
+                "factor_types": local_factor_types,
                 "split": split,
                 "split_source": split_source,
                 "child_content": support["child_content"],
+                "child_factor_types": support["child_factor_types"],
                 "repeated_labels": support["repeated_labels"],
                 "labels_crossing_split": support["labels_crossing_split"],
                 "repeated_content_present": bool(support["repeated_content_present"]),
@@ -1914,6 +1932,103 @@ def _young_target_count_records(subgroup_partitions):
     }
 
 
+def _ordinary_ace_single_path_angular(spec, input_Ls, *, angular=None):
+    """Admit the bounded ordinary ACE factorization with one angular path.
+
+    Singleton content blocks have no local Schur multiplicity. With a trivial
+    parent and one angular path, the normalized ordinary source placement and
+    Young analysis reduce exactly to the commutative product. This is a
+    narrow native-plan compatibility case, not a general ACE compiler.
+    """
+    spec = spec if isinstance(spec, YE3TSpec) else YE3TSpec.from_dict(spec)
+    content = tuple(spec.content)
+    input_Ls = tuple(int(value) for value in input_Ls)
+    if (spec.carrier != "ACE_density" or not any(input_Ls)
+            or not 1 < len(content) <= 3
+            or len(set(content)) != len(content)
+            or _partition_from_target(spec.target_permutation, len(content))
+            != (len(content),)
+            or _block_partitions_from_spec(spec)
+            != tuple((1,) for _ in content)):
+        return None
+    if angular is None:
+        angular = AngularCGMap.build(
+            input_Ls, int(spec.target_rotation.L_R),
+            parity=spec.target_rotation.parity,
+            group=spec.target_rotation.group,
+            bracketing=spec.tree_schedule,
+            cache_dir=spec.metadata.get("angular_cache_dir", None),
+            maximum_factorized_materialization_bytes=spec.metadata.get(
+                "maximum_factorized_angular_materialization_bytes",
+                _DEFAULT_MAX_FACTORIZED_ANGULAR_MATERIALIZATION_BYTES,
+            ),
+        )
+    if len(angular.factorized_paths) != 1:
+        return None
+
+    # The unique path still has a gauge: its sign/phase is not fixed by an
+    # intertwiner or projector check. Match every magnetic coefficient to the
+    # ordinary compact ACE coordinate before admitting this native plan.
+    from ye3t.couplings import count, compile_ace_coordinate
+
+    report = count(spec)
+    labels = tuple(report.labels_for_target(int(spec.target_rotation.L_R)))
+    if len(labels) != 1 or int(report.counts_by_target[int(spec.target_rotation.L_R)]) != 1:
+        return None
+    label = labels[0]
+    if (set(label.n_tuple) != set(content)
+            or any(int(label.l_tuple[index]) != input_Ls[content.index(channel)]
+                   for index, channel in enumerate(label.n_tuple))):
+        raise ArithmeticError("The compact ACE label changes a distinct factor type.")
+    table = compile_ace_coordinate(label)["coefficient_table"]
+    reference = {}
+    target_L = int(spec.target_rotation.L_R)
+    for component, magnetic_M in enumerate(range(-target_L, target_L + 1)):
+        magnetic_rows, coefficients = table.component_terms(component)
+        for magnetic_row, coefficient in zip(magnetic_rows, coefficients):
+            reference[(tuple(int(value) for value in magnetic_row), magnetic_M)] = complex(coefficient)
+
+    def tree_values(node, magnetic_input):
+        if node["kind"] == "leaf":
+            return {int(magnetic_input[int(node["index"])]): 1.0}
+        left = tree_values(node["left"], magnetic_input)
+        right = tree_values(node["right"], magnetic_input)
+        values = {}
+        for left_M, right_M, output_M, coefficient in node["coefficient_table"]:
+            value = left.get(int(left_M), 0.0) * right.get(int(right_M), 0.0)
+            if value:
+                output_M = int(output_M)
+                values[output_M] = values.get(output_M, 0.0) + value * float(coefficient)
+        return values
+
+    maximum_residual = 0.0
+    for magnetic_input in product(*(range(-ell, ell + 1) for ell in input_Ls)):
+        canonical_input = tuple(magnetic_input[content.index(channel)]
+                                for channel in label.n_tuple)
+        produced = tree_values(angular.factorized_paths[0]["tree"], magnetic_input)
+        for magnetic_M in range(-target_L, target_L + 1):
+            maximum_residual = max(maximum_residual, abs(
+                complex(produced.get(magnetic_M, 0.0))
+                - reference.get((canonical_input, magnetic_M), 0.0)
+            ))
+    if maximum_residual > 1.0e-12:
+        raise ArithmeticError(
+            "The single-path native ACE coefficients disagree with the compact ACE gauge."
+        )
+    compact_payload = [
+        (magnetic_row, magnetic_M, value.real, value.imag)
+        for (magnetic_row, magnetic_M), value in sorted(reference.items())
+    ]
+    return {
+        "angular": angular,
+        "compact_label": label.to_dict(),
+        "compact_coefficient_hash": "sha256:" + hashlib.sha256(
+            json.dumps(compact_payload, separators=(",", ":")).encode("utf-8")
+        ).hexdigest(),
+        "maximum_coefficient_residual": float(maximum_residual),
+    }
+
+
 def AssembleJointYoungE3Coupler(
     spec,
     coupling,
@@ -1936,7 +2051,8 @@ def AssembleJointYoungE3Coupler(
         input_Ls = tuple(0 for _ in content)
     if len(input_Ls) != len(content):
         raise ValueError(f"input_Ls length {len(input_Ls)} must match content rank {len(content)}.")
-    if spec.carrier == "ACE_density" and any(input_Ls):
+    if (spec.carrier == "ACE_density" and any(input_Ls)
+            and not _ordinary_ace_single_path_angular(spec, input_Ls, angular=angular)):
         raise ValueError(
             "Direct assembly of non-scalar ACE factors omits compact angular "
             "paths; use CompileGlobalYE3TCouplers to bind every compact label."
@@ -2843,7 +2959,7 @@ class JointYoungE3Coupler:
         )
 
     # TODO(terminology): Rename this public factor evaluator and its input
-    # names with compatibility aliases; also update action-table schema keys.
+    # names while preserving old method spellings; also update action-table schema keys.
     def evaluate_factorized_slots_torch(self, slot_values, *, table_index = 0, dtype=None, device=None):
         """Evaluate the small, reference-scale all-singleton factor path."""
         return evaluate_joint_ye3t_factorized_slots_torch(
@@ -3211,6 +3327,12 @@ class RepeatedContentImageMap:
         split=None,
         max_dense_intermediate_bytes=_DEFAULT_MAX_DENSE_REPEATED_CONTENT_BYTES,
     ):
+        if any(table.get("kind") == "typed_joint_factorized_v1"
+               for table in coupler.factorized_coefficient_tables):
+            raise NotImplementedError(
+                "RepeatedContentImageMap cannot reduce a complete typed factorized "
+                "coupler through one component Young map."
+            )
         subduction = coupler.subduction_maps[0]
         induction = coupler.induction_couplers[0]
         if split is None:
@@ -4395,7 +4517,10 @@ class GlobalYE3TCouplerFamily:
 
     @property
     def target_partitions(self):
-        return tuple(coupler.subduction_maps[0].target_partition for coupler in self.couplers)
+        return tuple(
+            _target_partition(coupler.spec.target_permutation, len(coupler.spec.content))
+            for coupler in self.couplers
+        )
 
     def evaluate_reference_torch(self, values, *, input_axis = -1, dtype=None, device=None):
         return evaluate_global_coupler_family_reference_torch(
@@ -4594,8 +4719,17 @@ def _compile_typed_joint_orbit(
                 "Explicit block-permutation selection is incompatible with the "
                 "complete typed joint multiplicity space."
             )
+    # FixedContentSpec uses integer class identifiers; the public factor
+    # channels may be symbolic. Only equality classes affect multiplicities.
+    content_classes = {
+        value: index for index, value in enumerate(dict.fromkeys(spec.content), 1)
+    }
     fixed_content = FixedContentModule(
-        FixedContentSpec(spec.content, input_Ls, tree_type=spec.tree_schedule)
+        FixedContentSpec(
+            tuple(content_classes[value] for value in spec.content),
+            input_Ls,
+            tree_type=spec.tree_schedule,
+        )
     ).decompose()
     expected = fixed_content.sector_multiplicity(target_partition, target_L)
     if not fixed_content.validation_report.get("passed", False) or len(routes) != expected:
@@ -5542,14 +5676,19 @@ def CompileGlobalYE3TCouplers(
             subduction_cache_dir=subduction_cache_dir,
             subduction_constraint_backend=subduction_constraint_backend,
         )
+    ordinary_angular = None
     if spec.carrier == "ACE_density" and any(input_Ls):
-        return _compile_ordinary_density_typed_orbit(
-            spec,
-            input_Ls,
-            subduction_materialization_backend=subduction_materialization_backend,
-            subduction_cache_dir=subduction_cache_dir,
-            subduction_constraint_backend=subduction_constraint_backend,
-        )
+        ordinary_proof = (None if dense_reference else
+                          _ordinary_ace_single_path_angular(spec, input_Ls))
+        ordinary_angular = (None if ordinary_proof is None else ordinary_proof["angular"])
+        if ordinary_angular is None:
+            return _compile_ordinary_density_typed_orbit(
+                spec,
+                input_Ls,
+                subduction_materialization_backend=subduction_materialization_backend,
+                subduction_cache_dir=subduction_cache_dir,
+                subduction_constraint_backend=subduction_constraint_backend,
+            )
     _require_content_angular_stabilizer(content, input_Ls)
 
     subgroup_partitions = _block_partitions_from_spec(spec)
@@ -5579,7 +5718,7 @@ def CompileGlobalYE3TCouplers(
         )
     else:
         raise ValueError("subduction_materialization_backend must be 'exact' or 'numeric_cached'.")
-    angular = AngularCGMap.build(
+    angular = ordinary_angular if ordinary_angular is not None else AngularCGMap.build(
         input_Ls,
         int(spec.target_rotation.L_R),
         parity=spec.target_rotation.parity,
@@ -5647,10 +5786,17 @@ def CompileGlobalYE3TCouplerFamily(
     compare_exact_projector=False,
     subduction_exact_reference_max_rank=None,
 ):
-    """Compile all reachable concrete Young target sectors for one content request."""
+    """Compile every reachable joint Young and angular target sector."""
 
     spec = spec if isinstance(spec, YE3TSpec) else YE3TSpec.from_dict(spec)
     rank = len(tuple(spec.content))
+    resolved_input_Ls = tuple(int(value) for value in (
+        spec.metadata.get("input_Ls", ()) if input_Ls is None else input_Ls
+    ))
+    if not resolved_input_Ls:
+        resolved_input_Ls = (0,) * rank
+    if len(resolved_input_Ls) != rank:
+        raise ValueError("input_Ls must contain one angular degree per factor.")
     subgroup_partitions = _block_partitions_from_spec(spec)
     dimension_sum = _young_dimension_sum_report(
         subgroup_partitions,
@@ -5665,11 +5811,13 @@ def CompileGlobalYE3TCouplerFamily(
         if bool(dimension_sum.get("checked", False))
         else _young_target_count_records(subgroup_partitions)
     )
+    from ye3t.couplings import count as count_couplings
+
     couplers = []
-    for record in tuple(target_inventory.get("target_records", ())):
-        if int(record.get("multiplicity", 0)) <= 0:
-            continue
-        partition = tuple(int(part) for part in record["target_partition"])
+    joint_target_records = []
+    skipped_angular_target_partitions = []
+    for candidate in integer_partitions(rank):
+        partition = tuple(int(part) for part in candidate)
         concrete = _spec_with_updates(
             spec,
             target_permutation="young:" + ",".join(str(part) for part in partition),
@@ -5679,10 +5827,25 @@ def CompileGlobalYE3TCouplerFamily(
                 "family_target_partition": partition,
             },
         )
+        joint_count = int(count_couplings(concrete, input_Ls=resolved_input_Ls).counts_by_target[
+            int(concrete.target_rotation.L_R)
+        ])
+        if joint_count and spec.carrier != "ACE_density" and any(resolved_input_Ls):
+            _blocks, routes = _typed_joint_routes(concrete, resolved_input_Ls, partition)
+            if not spec.block_permutation and "subgroup_partitions" not in spec.metadata:
+                if len(routes) != joint_count:
+                    raise ArithmeticError(
+                        "Typed route inventory disagrees with the exact joint multiplicity count."
+                    )
+            joint_count = len(routes)
+        if joint_count == 0:
+            skipped_angular_target_partitions.append(partition)
+            continue
+        joint_target_records.append({"target_partition": partition, "multiplicity": joint_count})
         couplers.append(
             CompileGlobalYE3TCouplers(
                 concrete,
-                input_Ls=input_Ls,
+                input_Ls=resolved_input_Ls,
                 subduction_materialization_backend=subduction_materialization_backend,
                 subduction_cache_dir=subduction_cache_dir,
                 subduction_constraint_backend=subduction_constraint_backend,
@@ -5737,6 +5900,8 @@ def CompileGlobalYE3TCouplerFamily(
         dimension_sum_report={
             **dict(dimension_sum),
             "target_inventory": dict(target_inventory),
+            "joint_target_records": tuple(joint_target_records),
+            "skipped_angular_target_partitions": tuple(skipped_angular_target_partitions),
         },
         certificate=certificate,
     )
@@ -6179,10 +6344,31 @@ def CompileBalancedTree(
         compare_exact_projector=compare_exact_projector,
         subduction_exact_reference_max_rank=subduction_exact_reference_max_rank,
     )
+    resolved_input_Ls = tuple(int(value) for value in (
+        input_Ls if input_Ls is not None else spec.metadata.get("input_Ls", ())
+    ))
+    if not resolved_input_Ls:
+        resolved_input_Ls = tuple(0 for _ in coupler.spec.content)
+    factor_types = tuple(zip(tuple(coupler.spec.content), resolved_input_Ls))
+    typed_factorized = any(
+        table.get("kind") == "typed_joint_factorized_v1"
+        for table in coupler.factorized_coefficient_tables
+    )
+    if typed_factorized and any(
+        count > 1 for count in Counter(factor_types).values()
+    ):
+        raise NotImplementedError(
+            "CompileBalancedTree cannot build repeated-factor image maps from "
+            "the complete factorized Young-E3 coupler yet. The factorized "
+            "coupler itself remains available through CompileGlobalYE3TCouplers."
+        )
     task_readout_report = spec.task_readout_selection_rule()
     rank = len(tuple(coupler.spec.content))
     balanced_split, balanced_split_validation = _balanced_split_from_spec(spec, rank)
-    recoupling_checked = bool(rank <= 5 and coupler.certificate.provenance.get("exact", False))
+    recoupling_checked = bool(
+        rank <= 5 and coupler.subduction_maps
+        and coupler.certificate.provenance.get("exact", False)
+    )
     recoupling_match = False
     recoupling_hashes = {}
     recoupling_overlap_reports = {}
@@ -6216,7 +6402,16 @@ def CompileBalancedTree(
                 comparison_matrix=comparison_matrix,
                 balanced_matrix=balanced_matrix,
             )
-    counts = Counter(tuple(coupler.spec.content))
+    content = tuple(coupler.spec.content)
+    angular_types_by_content = {}
+    for channel, ell in factor_types:
+        angular_types_by_content.setdefault(channel, set()).add(ell)
+    mixed_angular_content = any(
+        len(angular_types) > 1
+        for angular_types in angular_types_by_content.values()
+    )
+    image_factor_types = factor_types if mixed_angular_content else content
+    counts = Counter(image_factor_types)
     repeated_content_count_records = tuple(
         {
             "label": label,
@@ -6232,7 +6427,8 @@ def CompileBalancedTree(
         else tuple()
     )
     balanced_tree_node_ledger = _balanced_tree_node_ledger(
-        content=tuple(coupler.spec.content),
+        content=content,
+        factor_types=image_factor_types,
         root_split=balanced_split,
         root_image_map_materialized=bool(image_maps),
     )
@@ -8258,21 +8454,38 @@ def evaluate_global_coupler_family_reference_torch(
     dtype=None,
     device=None,
 ):
-    """Evaluate every concrete-sector table in a global coupler family."""
+    """Evaluate flat reference tables, using per-sector inputs when needed.
+
+    ``values`` may be one shared tensor or a mapping keyed by target partition.
+    A mapping is needed when sectors have different coefficient input widths.
+    """
 
     family = (
         spec_or_family
         if isinstance(spec_or_family, GlobalYE3TCouplerFamily)
         else CompileGlobalYE3TCouplerFamily(spec_or_family)
     )
+    if any(not coupler.sparse_coefficient_tables for coupler in family.couplers):
+        raise ValueError(
+            "Flat family reference evaluation requires sparse coefficient tables; "
+            "evaluate factorized sectors with each coupler's factorized-factor evaluator."
+        )
+    if isinstance(values, Mapping):
+        missing = tuple(partition for partition in family.target_partitions
+                        if partition not in values)
+        if missing:
+            raise ValueError(f"Missing reference input values for target partitions {missing!r}.")
+        sector_inputs = tuple(values[partition] for partition in family.target_partitions)
+    else:
+        sector_inputs = (values,) * len(family.couplers)
     evaluations = tuple(
         coupler.evaluate_reference_torch(
-            values,
+            sector_values,
             input_axis=input_axis,
             dtype=dtype,
             device=device,
         )
-        for coupler in family.couplers
+        for coupler, sector_values in zip(family.couplers, sector_inputs, strict=True)
     )
     metadata = {
         "runtime_status": "implemented_under_validation",
@@ -8281,6 +8494,7 @@ def evaluate_global_coupler_family_reference_torch(
         "target_partitions": tuple(tuple(int(part) for part in partition) for partition in family.target_partitions),
         "input_axis": int(input_axis),
         "certificate_passed": bool(family.certificate.passed),
+        "input_layout": "partition_mapping" if isinstance(values, Mapping) else "shared_tensor",
         "full_descriptor_contraction_status": "direct_sum_sector_tables_applied_without_family_descriptor_flattening",
     }
     return GlobalCouplerFamilyReferenceEvaluation(

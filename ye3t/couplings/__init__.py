@@ -70,6 +70,7 @@ from ye3t.execution_plan import (
 )
 from ye3t.global_coupler import (
     AngularCGMap,
+    _ordinary_ace_single_path_angular,
     _typed_joint_routes,
     compile_joint_ye3t_slot_permutation_actions,
     compile_ye3t_couplers,
@@ -2773,9 +2774,17 @@ def count(
             "valid_labels_from": "ye3t.couplings.sector_records",
             "rank_product_rule": "rank_additive_induction",
         }
+    count_content = tuple(spec.content)
+    if spec.carrier != "ACE_density":
+        # Only equality classes enter the fixed-content multiplicity. Preserve
+        # symbolic factor channel labels in the public plan and compiler.
+        content_classes = {
+            value: index for index, value in enumerate(dict.fromkeys(count_content), 1)
+        }
+        count_content = tuple(content_classes[value] for value in count_content)
     fixed_content = FixedContentModule(
         FixedContentSpec(
-            spec.content,
+            count_content,
             resolved_input_Ls,
             tree_type=spec.tree_schedule,
         )
@@ -4949,8 +4958,16 @@ def compile(
             f"target_permutation={coupler_plan.spec.target_permutation!r}, L_R={target_L}."
         )
     resolved_input_Ls = _input_Ls_from_spec(coupler_plan.spec, input_Ls=input_Ls)
+    ordinary_single_path = None
+    if (coupler_plan.spec.carrier == "ACE_density"
+            and any(resolved_input_Ls)
+            and int(coupler_plan.report.counts_by_target.get(target_L, 0)) == 1):
+        ordinary_single_path = _ordinary_ace_single_path_angular(
+            coupler_plan.spec, resolved_input_Ls
+        )
     if (any(resolved_input_Ls)
             and coupler_plan.spec.carrier == "ACE_density"
+            and not ordinary_single_path
             and not allow_dense_reference):
         raise ValueError(
             "This full angular typed-orbit compile uses a bounded dense "
@@ -5034,6 +5051,28 @@ def compile(
     elif (
         coupler_plan.spec.carrier == "ACE_density"
         and any(resolved_input_Ls)
+        and ordinary_single_path is not None
+    ):
+        expected_labels = tuple(coupler_plan.report.labels_for_target(target_L))
+        if (
+            len(expected_labels) != 1
+            or tuple(table.get("kind", "") for table in
+                     coupler.sparse_coefficient_tables) != ("young_subduction_matrix",)
+            or len(coupler.factorized_coefficient_tables) != 1
+            or coupler.factorized_coefficient_tables[0].get("kind")
+            != "young_induction_then_subduction_x_angular_cg"
+            or len(coupler.alpha_labels()) != 1
+            or len(coupler.angular_maps[0].factorized_paths) != 1
+            or ordinary_single_path["compact_label"] != expected_labels[0].to_dict()
+            or ordinary_single_path["maximum_coefficient_residual"] > 1.0e-12
+        ):
+            raise ValueError(
+                "Single-path ordinary-density compilation disagrees with its "
+                "compact ACE coordinate or exact count."
+            )
+    elif (
+        coupler_plan.spec.carrier == "ACE_density"
+        and any(resolved_input_Ls)
     ):
         expected_labels = tuple(coupler_plan.report.labels_for_target(target_L))
         tables = tuple(coupler.sparse_coefficient_tables)
@@ -5080,6 +5119,11 @@ def compile(
         "compiled_runtime_status": certificate.runtime_status,
         "compiled_checks": dict(certificate.checks),
         "compiled_residuals": dict(certificate.residuals),
+        "ordinary_single_path_compact_check": (
+            {key: value for key, value in ordinary_single_path.items()
+             if key != "angular"}
+            if ordinary_single_path is not None else None
+        ),
     }
     provenance = {
         **dict(coupler_plan.provenance),
@@ -5906,17 +5950,25 @@ def _ace_coupled_product_plan_worker(result_path, request, result_limit_bytes):
     os.replace(partial_path, result_path)
 
 
-def _linux_process_rss_bytes(process_id):
+def _linux_process_private_bytes(process_id):
+    """Sample private resident pages, excluding inherited shared parent pages."""
+
     try:
         with open(
-            "/proc/" + str(int(process_id)) + "/status",
+            "/proc/" + str(int(process_id)) + "/smaps_rollup",
             "r",
             encoding="utf-8",
         ) as handle:
+            private = 0
+            seen = set()
             for line in handle:
-                if line.startswith("VmRSS:"):
-                    return int(line.split()[1]) * 1024
-    except (FileNotFoundError, ProcessLookupError, ValueError):
+                name = line.split(":", 1)[0]
+                if name in {"Private_Clean", "Private_Dirty"}:
+                    private += int(line.split()[1]) * 1024
+                    seen.add(name)
+            if seen == {"Private_Clean", "Private_Dirty"}:
+                return private
+    except (FileNotFoundError, ProcessLookupError, PermissionError, ValueError):
         return None
     return None
 
@@ -5933,6 +5985,11 @@ def _terminate_compiler_process(process):
 
 
 def _compile_ace_coupled_product_execution_plan(request):
+    """Run the exact compiler with a timeout and sampled private-memory limit.
+
+    The memory monitor reads Linux private resident pages between worker
+    joins. It is not an OS-enforced bound on transient native allocations.
+    """
     import os
     import sys
     import tempfile
@@ -5974,7 +6031,11 @@ def _compile_ace_coupled_product_execution_plan(request):
     ):
         raise RuntimeError(
             "ACE coupled-product exact compilation requires an isolated Linux "
-            "fork/RSS worker; use direct C-tilde on this platform"
+            "fork/private-memory worker; use direct C-tilde on this platform"
+        )
+    if not os.path.isfile("/proc/self/smaps_rollup"):
+        raise RuntimeError(
+            "ACE coupled-product exact compilation requires Linux private-memory accounting"
         )
     context = mp.get_context("fork")
     timeout_seconds = float(timeout_value)
@@ -5987,6 +6048,7 @@ def _compile_ace_coupled_product_execution_plan(request):
         process.start()
         deadline = time.monotonic() + timeout_seconds
         failure = None
+        unreadable_memory_polls = 0
         while process.is_alive():
             remaining = deadline - time.monotonic()
             if remaining <= 0.0:
@@ -5995,13 +6057,21 @@ def _compile_ace_coupled_product_execution_plan(request):
                     + f"{timeout_seconds:.3f} seconds"
                 )
                 break
-            rss_bytes = _linux_process_rss_bytes(process.pid)
-            if (
-                rss_bytes is not None
-                and rss_bytes > int(memory_limit_value)
-            ):
+            private_bytes = _linux_process_private_bytes(process.pid)
+            if private_bytes is None:
+                # The proc entry can vanish just before is_alive observes exit.
+                unreadable_memory_polls += 1
+                if unreadable_memory_polls >= 3 and process.is_alive():
+                    failure = RuntimeError(
+                        "ACE coupled-product compiler worker private memory could not be read"
+                    )
+                    break
+                process.join(timeout=min(0.02, remaining))
+                continue
+            unreadable_memory_polls = 0
+            if private_bytes is not None and private_bytes > int(memory_limit_value):
                 failure = MemoryError(
-                    "ACE coupled-product compiler exceeded its hard RSS limit"
+                    "ACE coupled-product compiler exceeded its monitored private-memory limit"
                 )
                 break
             process.join(timeout=min(0.02, remaining))

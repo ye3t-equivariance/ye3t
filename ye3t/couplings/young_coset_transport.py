@@ -13,6 +13,7 @@ standard Young orthogonal construction discussed by Vershik and Okounkov,
 arXiv:math/0503040.
 """
 
+from collections import Counter
 from functools import lru_cache
 
 
@@ -20,7 +21,8 @@ def canonical_factor_coset(factor_types, canonical_types):
     """Group each factor type in canonical order, preserving order within a block."""
     factor_types = tuple(factor_types)
     canonical_types = tuple(canonical_types)
-    if len(factor_types) != len(canonical_types) or sorted(factor_types) != sorted(canonical_types):
+    if (len(factor_types) != len(canonical_types)
+            or Counter(factor_types) != Counter(canonical_types)):
         raise ValueError("Factor types do not match the fixed-content carrier.")
     return tuple(index for factor_type in dict.fromkeys(canonical_types)
                  for index, candidate in enumerate(factor_types)

@@ -32,20 +32,21 @@ Typical fields include:
 
 .. code-block:: python
 
-   from ye3t.couplings import count, plan, compile
+   from ye3t.couplings import count, compile_ace_coordinate
 
    report = count(content=(1, 1, 1), input_Ls=(0, 1, 1), target_L=0)
    print(report.validation_report["passed"])
    print(report.validation_report["valid_labels_from"])
-   compiled = compile(plan(report))
-   print(compiled.certificate.passed)
+   assert report.counts_by_target[0] == 1
+   coordinate = compile_ace_coordinate(report.labels_for_target(0)[0])
+   magnetic_rows, coefficients = coordinate["coefficient_table"].component_terms(0)
+   print(len(magnetic_rows), len(coefficients))
 
 This case has the same radial/content channel at both ``l=0`` and ``l=1``.
-Compilation checks the full content-and-angular blocks, then binds the
-existing compact ACE coefficient to the counted label. The compiled
-ordinary-density table records its physical projection and every magnetic
-component. A count report alone still does not validate coefficient
-materialization.
+The compact ACE compiler materializes the counted scalar coordinate and its
+magnetic coefficients. The general ``compile(plan(report))`` path handles a
+bounded single-angular-path ordinary-density case with distinct content; use
+``compile_ace_coordinate`` for this repeated-content example.
 
 Common failure modes:
 

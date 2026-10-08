@@ -10,6 +10,7 @@ Thompson, arXiv:2609.31895, Eqs. (7)--(12).  This is an independent
 implementation using the existing YE3T exact local and subduction routines.
 """
 
+from collections import Counter
 from functools import lru_cache
 from itertools import combinations, combinations_with_replacement, product
 import hashlib
@@ -308,11 +309,11 @@ def _cg_tree_payload(tree):
             output_M = left_M + right_M
             if abs(output_M) > output_L:
                 continue
-            value = cg_exact(left["L"], left_M, right["L"], right_M,
-                             output_L, output_M)._sympy_()
-            if value != 0:
+            exact_value = cg_exact(left["L"], left_M, right["L"], right_M,
+                                   output_L, output_M)
+            if not exact_value.is_zero():
                 entries.append((left_M + left["L"], right_M + right["L"],
-                                output_M + output_L, float(value)))
+                                output_M + output_L, float(exact_value)))
     return {"kind": "merge", "L": output_L, "left": left, "right": right,
             "entries": tuple(entries)}
 
@@ -346,7 +347,7 @@ def compile_typed_factorized(
             "of polar spherical factors."
         )
     blocks, routes = _typed_joint_routes(spec, input_Ls, target_partition)
-    input_factor_types = tuple(zip(tuple(int(value) for value in spec.content), input_Ls))
+    input_factor_types = tuple(zip(tuple(spec.content), input_Ls))
     offset = 0
     canonical_blocks = []
     for block in blocks:
@@ -362,8 +363,12 @@ def compile_typed_factorized(
         for index, candidate in enumerate(input_factor_types)
         if candidate == factor_type
     )
+    content_classes = {
+        value: index for index, value in enumerate(dict.fromkeys(spec.content), 1)
+    }
     fixed = FixedContentModule(FixedContentSpec(
-        spec.content, input_Ls, tree_type=spec.tree_schedule
+        tuple(content_classes[value] for value in spec.content),
+        input_Ls, tree_type=spec.tree_schedule
     )).decompose()
     expected = fixed.sector_multiplicity(target_partition, target_L)
     if not fixed.validation_report.get("passed", False) or len(routes) != expected:
@@ -555,7 +560,18 @@ def compile_typed_factorized(
                    tuple(kappa), int(block_L))
             if key in local_index:
                 continue
-            if (tuple(kappa) == (int(block["size"]),)
+            if int(block["size"]) == 1:
+                ell = int(block["type"][1])
+                if tuple(kappa) != (1,) or int(block_L) != ell:
+                    raise ArithmeticError("A singleton factor has only its identity local map.")
+                runtime_entries = tuple(
+                    ((magnetic,), magnetic + ell, 1.0)
+                    for magnetic in range(-ell, ell + 1)
+                )
+                copies = tableau_dim = 1
+                strategy = "general_sparse"
+                local_gauge = "singleton_identity_v1"
+            elif (tuple(kappa) == (int(block["size"]),)
                     and (2 * int(block["type"][1]) + 1) ** int(block["size"]) > 81):
                 runtime_entries, copies = _symmetric_occupation_local_map(
                     int(block["size"]), int(block["type"][1]), int(block_L)
@@ -906,8 +922,9 @@ def evaluate_typed_factorized_torch(coupler, factor_values, *, factor_types=None
     canonical_types = tuple(tuple(row) for row in table["canonical_factor_types"])
     factor_types = (tuple(tuple(row) for row in table["input_factor_types"])
                     if factor_types is None else
-                    tuple((int(row[0]), int(row[1])) for row in factor_types))
-    if len(factor_types) != len(canonical_types) or sorted(factor_types) != sorted(canonical_types):
+                    tuple((row[0], int(row[1])) for row in factor_types))
+    if (len(factor_types) != len(canonical_types)
+            or Counter(factor_types) != Counter(canonical_types)):
         raise ValueError("factor_types must permute the compiled (content,l) word.")
     rep = canonical_factor_coset(factor_types, canonical_types)
     legacy_young = any("values" in young for young in table["young_tables"])

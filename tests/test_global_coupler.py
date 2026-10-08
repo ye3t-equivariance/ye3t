@@ -1145,6 +1145,82 @@ def test_compile_global_coupler_family_expands_full_irrep_request_to_concrete_se
     assert object_evaluated.to_dict()["family_certificate"]["passed"] is True
 
 
+def test_nonzero_angular_family_reports_partitions_and_flat_reference_limit():
+    import torch
+    from ye3t import CompileGlobalYE3TCouplerFamily, YE3TRotationTarget, YE3TSpec
+
+    family = CompileGlobalYE3TCouplerFamily(
+        YE3TSpec(
+            content=("left", "right"),
+            target_permutation="full_irrep_decomposition",
+            target_rotation=YE3TRotationTarget(L_R=0),
+            carrier="external_tensor",
+            coefficient_backend="global_coupler",
+            runtime_status="planned_not_public",
+            metadata={"input_Ls": (1, 1)},
+        ),
+        subduction_materialization_backend="exact",
+    )
+
+    assert set(family.target_partitions) == {(2,), (1, 1)}
+    assert set(family.to_dict()["target_partitions"]) == {(2,), (1, 1)}
+    assert all(coupler.factorized_coefficient_tables for coupler in family.couplers)
+    with pytest.raises(ValueError, match="Flat family reference evaluation"):
+        family.evaluate_reference_torch(torch.ones(9, dtype=torch.float64))
+
+
+def test_family_uses_joint_angular_reachability_for_repeated_factors():
+    from ye3t import CompileGlobalYE3TCouplerFamily, YE3TRotationTarget, YE3TSpec
+
+    family = CompileGlobalYE3TCouplerFamily(
+        YE3TSpec(
+            content=("same", "same"),
+            target_permutation="full_irrep_decomposition",
+            target_rotation=YE3TRotationTarget(L_R=1),
+            carrier="external_tensor",
+            coefficient_backend="global_coupler",
+            runtime_status="planned_not_public",
+            metadata={"input_Ls": (1, 1)},
+        ),
+        subduction_materialization_backend="exact",
+    )
+
+    assert family.certificate.passed
+    assert family.target_partitions == ((1, 1),)
+    assert family.dimension_sum_report["joint_target_records"] == (
+        {"target_partition": (1, 1), "multiplicity": 1},
+    )
+    assert family.dimension_sum_report["skipped_angular_target_partitions"] == ((2,),)
+
+
+def test_family_reference_accepts_sector_inputs_with_different_widths():
+    import torch
+    from ye3t import CompileGlobalYE3TCouplerFamily, YE3TRotationTarget, YE3TSpec
+
+    family = CompileGlobalYE3TCouplerFamily(
+        YE3TSpec(
+            content=(1, 2, 3),
+            target_permutation="full_irrep_decomposition",
+            target_rotation=YE3TRotationTarget(L_R=0),
+            carrier="external_tensor",
+            coefficient_backend="global_coupler",
+            runtime_status="planned_not_public",
+            metadata={"input_Ls": (0, 0, 0)},
+        ),
+        subduction_materialization_backend="exact",
+    )
+    sector_inputs = {
+        partition: torch.ones((2, coupler.sparse_coefficient_tables[0]["shape"][1]),
+                              dtype=torch.float64)
+        for partition, coupler in zip(family.target_partitions, family.couplers, strict=True)
+    }
+
+    evaluated = family.evaluate_reference_torch(sector_inputs)
+    assert evaluated.metadata["input_layout"] == "partition_mapping"
+    assert evaluated.target_partitions == family.target_partitions
+    assert all(result.values.shape[0] == 2 for result in evaluated.sector_evaluations)
+
+
 def test_compile_global_coupler_rejects_unreachable_angular_target():
     from ye3t import CompileGlobalYE3TCouplers, YE3TRotationTarget, YE3TSpec
 
@@ -2050,6 +2126,58 @@ def test_balanced_tree_compilation_has_no_image_map_for_disjoint_content():
         {"label": 2, "count": 1, "repeated": False},
         {"label": 3, "count": 1, "repeated": False},
     )
+
+
+def test_balanced_tree_distinguishes_mixed_angular_factor_types():
+    from ye3t import CompileBalancedTree, YE3TRotationTarget, YE3TSpec
+
+    spec = YE3TSpec(
+        content=(1, 1),
+        target_permutation="trivial",
+        target_rotation=YE3TRotationTarget(L_R=1),
+        carrier="Phi",
+        coefficient_backend="global_coupler",
+        runtime_status="planned_not_public",
+        metadata={"input_Ls": (0, 1)},
+    )
+    compilation = CompileBalancedTree(
+        spec, subduction_materialization_backend="exact"
+    )
+    assert compilation.certificate.passed
+    assert not compilation.repeated_content_image_maps
+    root = compilation.balanced_tree_node_ledger[0]
+    assert root["content"] == (1, 1)
+    assert root["factor_types"] == ((1, 0), (1, 1))
+    assert root["image_reduction_required"] is False
+    assert not compilation.local_repeated_content_image_maps
+
+
+def test_balanced_tree_refuses_incomplete_multiroute_typed_image():
+    from ye3t import (
+        CompileBalancedTree, CompileGlobalYE3TCouplers,
+        YE3TRotationTarget, YE3TSpec,
+    )
+    from ye3t.global_coupler import RepeatedContentImageMap
+
+    spec = YE3TSpec(
+        content=(1, 1, 2),
+        target_permutation="young:2,1",
+        target_rotation=YE3TRotationTarget(L_R=1),
+        carrier="Phi",
+        coefficient_backend="global_coupler",
+        runtime_status="planned_not_public",
+        metadata={"input_Ls": (1, 1, 1)},
+    )
+    coupler = CompileGlobalYE3TCouplers(
+        spec, subduction_materialization_backend="exact"
+    )
+    assert coupler.certificate.passed
+    assert coupler.subduction_maps
+    assert len(coupler.factorized_coefficient_tables[0]["routes"]) > 1
+    with pytest.raises(NotImplementedError, match="repeated-factor image maps"):
+        CompileBalancedTree(spec, subduction_materialization_backend="exact")
+    with pytest.raises(NotImplementedError, match="complete typed factorized"):
+        RepeatedContentImageMap.from_coupler(coupler)
 
 
 def test_global_coupler_slot_evaluator_rejects_heterogeneous_coset_widths():

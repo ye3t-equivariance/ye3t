@@ -143,6 +143,7 @@ def test_schur_weyl_guided_tree_can_compile_from_global_coupler_certificate():
     assert report["backend_role"] == "global_coupler_guided_schur_weyl_tree_backend"
     assert report["provenance"]["consumes_global_coupler_record"] is True
     assert report["provenance"]["global_coupler_coefficient_hash"] == coupler.certificate.coefficient_hash
+    assert report["provenance"]["global_coupler_alpha_label_count"] == len(coupler.alpha_labels())
     assert report["provenance"]["global_coupler_certificate"]["passed"] is True
     assert report["backend_certificate"]["passed"] is True
     assert (
@@ -225,6 +226,32 @@ def test_schur_weyl_guided_tree_reports_multifactor_root_target_limitation():
     assert report["checks"]["root_output_partitions_match_enforced_target"] is True
     assert report["passed"] is False
     assert report["runtime_status"] == "planned_not_public"
+
+
+def test_schur_weyl_guided_tree_accepts_symbolic_factor_channels():
+    from ye3t import CompileGlobalYE3TCouplers, YE3TRotationTarget, YE3TSpec
+
+    coupler = CompileGlobalYE3TCouplers(
+        YE3TSpec(
+            content=("radial_a", "radial_a"),
+            target_permutation="trivial",
+            target_rotation=YE3TRotationTarget(L_R=0),
+            carrier="external_tensor",
+            coefficient_backend="global_coupler",
+            validation_scope="projectors",
+            runtime_status="planned_not_public",
+            metadata={"input_Ls": (1, 1)},
+        )
+    )
+    product = compile_schur_weyl_guided_tree_product_from_coupler(coupler)
+
+    assert product.dim == 1
+    assert product.provenance["global_coupler_factor_channels"] == (
+        "radial_a", "radial_a"
+    )
+    assert product.provenance["global_coupler_alpha_label_count"] == len(coupler.alpha_labels())
+    assert product.provenance["global_coupler_target_partition"] == (2,)
+    assert product.provenance["root_permutation_target_partition_enforced"] == (2,)
 
 
 def test_schur_weyl_guided_tree_materializes_rank3_repeated_slots_as_fused_irreps():

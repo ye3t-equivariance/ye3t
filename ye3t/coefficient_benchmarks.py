@@ -29,7 +29,7 @@ from ye3t.message_passing import (
     evaluate_same_rank_kronecker_intertwiner_reference_torch,
 )
 from ye3t.representations.numeric_subduction import numeric_subduction_nullspace
-from ye3t.spec import BalancedYE3TMessageStateSpec, YE3TReadoutSpec, YE3TRotationTarget, YE3TSpec
+from ye3t.spec import BalancedYE3TMessageStateSpec, YE3TReadoutSpec, YE3TRotationTarget, YE3TSpec, _target_partition
 
 
 DEFAULT_LOCAL_COEFFICIENT_BENCHMARK_TARGET_SECONDS = {
@@ -80,9 +80,37 @@ def _timed_min_seconds(factory, repeat):
     return float(best_seconds), best_value
 
 
+def _factorized_stored_term_count(table):
+    """Count stored factors, not entries of the unassembled joint matrix."""
+    if table.get("kind") != "typed_joint_factorized_v1":
+        return int(table.get("nnz", len(tuple(table.get("entries", ())))))
+
+    def angular_terms(node):
+        if node["kind"] == "leaf":
+            return 0
+        return (len(node["entries"]) + angular_terms(node["left"])
+                + angular_terms(node["right"]))
+
+    local = sum(len(item["entries"]) for item in table["local_tables"])
+    angular = sum(angular_terms(tree) for tree in table["angular_trees"])
+    young = sum(
+        (1 if item.get("analytic_character") else
+         sum(len(row) for row in (item.get("restricted_values") or ())))
+        + sum(len(diagonal) + len(off_diagonal) + len(partner)
+              for diagonal, off_diagonal, partner
+              in item.get("adjacent_generators", ()))
+        for item in table["young_tables"]
+    )
+    return int(local + angular + young)
+
+
 def _coupler_row(name, backend, elapsed_seconds, coupler, *, target_seconds):
     entry_counts = tuple(
         int(table.get("nnz", len(tuple(table.get("entries", ()))))) for table in coupler.sparse_coefficient_tables
+    )
+    factorized_counts = tuple(
+        _factorized_stored_term_count(table)
+        for table in coupler.factorized_coefficient_tables
     )
     within_target = None if target_seconds is None else float(elapsed_seconds) <= float(target_seconds)
     certificate_checks = dict(coupler.certificate.checks)
@@ -91,7 +119,7 @@ def _coupler_row(name, backend, elapsed_seconds, coupler, *, target_seconds):
         int(part)
         for part in metadata.get(
             "global_target_partition",
-            coupler.subduction_maps[0].target_partition if coupler.subduction_maps else tuple(),
+            _target_partition(coupler.spec.target_permutation, len(coupler.spec.content)),
         )
     )
     block_mu_labels = tuple(
@@ -114,11 +142,16 @@ def _coupler_row(name, backend, elapsed_seconds, coupler, *, target_seconds):
         "target_elapsed_seconds": None if target_seconds is None else float(target_seconds),
         "within_target": within_target,
         "target_scope": "conservative local smoke guardrail, not a cross-machine performance claim",
-        "coefficient_table_count": int(len(coupler.sparse_coefficient_tables)),
+        "coefficient_table_count": int(
+            len(coupler.sparse_coefficient_tables)
+            + len(coupler.factorized_coefficient_tables)
+        ),
         "sparse_table_kinds": tuple(str(table.get("kind")) for table in coupler.sparse_coefficient_tables),
         "sparse_table_entry_counts": entry_counts,
         "total_sparse_entry_count": int(sum(entry_counts)),
         "factorized_table_kinds": tuple(str(table.get("kind")) for table in coupler.factorized_coefficient_tables),
+        "factorized_table_entry_counts": factorized_counts,
+        "total_stored_term_count": int(sum(entry_counts) + sum(factorized_counts)),
         "global_young_label": metadata.get("global_young_label"),
         "global_target_partition": global_target_partition,
         "block_mu_labels": block_mu_labels,
@@ -140,7 +173,10 @@ def _coupler_row(name, backend, elapsed_seconds, coupler, *, target_seconds):
         ),
         "certificate_passed": bool(coupler.certificate.passed),
         "certificate_checks": certificate_checks,
-        "angular_coefficient_normalization": bool(certificate_checks.get("angular_coefficient_normalization", False)),
+        "angular_coefficient_normalization": bool(
+            certificate_checks.get("angular_coefficient_normalization", False)
+            or certificate_checks.get("angular_paths_validated", False)
+        ),
         "dimension_sum_checked": bool(certificate_checks.get("dimension_sum_checked", False)),
         "coefficient_hash": coupler.certificate.coefficient_hash,
         "optional_external": False,
@@ -165,6 +201,11 @@ def _balanced_mp_schedule_row(name, elapsed_seconds, schedule, *, target_seconds
         int(table.get("nnz", len(tuple(table.get("entries", ())))))
         for sector in schedule.sector_schedules
         for table in sector.dispatch_coupler.sparse_coefficient_tables
+    )
+    factorized_counts = tuple(
+        _factorized_stored_term_count(table)
+        for sector in schedule.sector_schedules
+        for table in sector.dispatch_coupler.factorized_coefficient_tables
     )
     certificate_checks = dict(schedule.certificate.checks)
     dispatch_checks = tuple(dict(sector.dispatch_coupler.certificate.checks) for sector in schedule.sector_schedules)
@@ -193,11 +234,13 @@ def _balanced_mp_schedule_row(name, elapsed_seconds, schedule, *, target_seconds
         "within_target": within_target,
         "target_scope": "conservative local smoke guardrail, not a cross-machine performance claim",
         "sector_schedule_count": int(len(schedule.sector_schedules)),
-        "coefficient_table_count": int(len(sparse_kinds)),
+        "coefficient_table_count": int(len(sparse_kinds) + len(factorized_kinds)),
         "sparse_table_kinds": sparse_kinds,
         "sparse_table_entry_counts": entry_counts,
         "total_sparse_entry_count": int(sum(entry_counts)),
         "factorized_table_kinds": factorized_kinds,
+        "factorized_table_entry_counts": factorized_counts,
+        "total_stored_term_count": int(sum(entry_counts) + sum(factorized_counts)),
         "coefficient_table_scope": "balanced_message_passing_schedule_coefficient_tables",
         "global_young_label": None,
         "global_target_partition": tuple(),
@@ -211,7 +254,9 @@ def _balanced_mp_schedule_row(name, elapsed_seconds, schedule, *, target_seconds
         "certificate_passed": bool(schedule.certificate.passed),
         "certificate_checks": certificate_checks,
         "angular_coefficient_normalization": all(
-            bool(checks.get("angular_coefficient_normalization", False)) for checks in dispatch_checks
+            bool(checks.get("angular_coefficient_normalization", False)
+                 or checks.get("angular_paths_validated", False))
+            for checks in dispatch_checks
         ),
         "dimension_sum_checked": all(bool(checks.get("dimension_sum_checked", False)) for checks in dispatch_checks),
         "coefficient_hash": coefficient_hash,
@@ -267,7 +312,12 @@ def _same_rank_kronecker_reference_row(
         "sparse_table_kinds": tuple(str(table["kind"]) for table in finite_runtime_tables.sparse_tables),
         "sparse_table_entry_counts": table_entry_counts,
         "total_sparse_entry_count": int(sum(table_entry_counts)),
-        "factorized_table_kinds": ("character_inner_product_counts", "exact_intertwiner_table_bundle"),
+        "factorized_table_kinds": tuple(),
+        "factorized_table_entry_counts": tuple(),
+        "total_stored_term_count": int(sum(table_entry_counts)),
+        "reference_component_kinds": (
+            "character_inner_product_counts", "exact_intertwiner_table_bundle"
+        ),
         "coefficient_table_scope": finite_runtime_metadata["runtime_scope"],
         "global_young_label": None,
         "global_target_partition": tuple(),
@@ -646,7 +696,15 @@ def _permutation_materialization_row(case, mode, elapsed, result):
 
 def _joint_materialization_row(case, mode, elapsed, coupler):
     sparse_tables = tuple(coupler.sparse_coefficient_tables)
-    entry_count = int(sum(int(table.get("nnz", len(tuple(table.get("entries", ()))))) for table in sparse_tables))
+    factorized_tables = tuple(coupler.factorized_coefficient_tables)
+    sparse_count = int(sum(int(table.get("nnz", len(tuple(table.get("entries", ()))))) for table in sparse_tables))
+    factorized_count = int(sum(_factorized_stored_term_count(table)
+                               for table in factorized_tables))
+    entry_count = sparse_count + factorized_count
+    serialized_bytes = len(json.dumps(
+        {"sparse": sparse_tables, "factorized": factorized_tables},
+        sort_keys=True, separators=(",", ":"), allow_nan=False,
+    ).encode("utf-8"))
     checks = dict(coupler.certificate.checks)
     residuals = dict(coupler.certificate.residuals)
     subduction_map = coupler.subduction_maps[0] if coupler.subduction_maps else None
@@ -660,10 +718,15 @@ def _joint_materialization_row(case, mode, elapsed, coupler):
         "content": tuple(int(value) for value in case["content"]),
         "input_Ls": tuple(int(value) for value in case["input_Ls"]),
         "target": {"permutation": str(case["target_permutation"]), "L_R": int(case["target_L"])},
-        "multiplicity": int(len(coupler.labels)),
+        "multiplicity": int(len(coupler.alpha_labels())),
         "basis_dimension": None if subduction_map is None else int(subduction_map.coefficient_shape[0]),
-        "coefficient_nonzeros": entry_count,
-        "memory_estimate_bytes": int(entry_count * 4 * 8),
+        "coefficient_nonzeros": sparse_count,
+        "coefficient_storage": "sparse_matrix_nonzeros_only",
+        "sparse_nonzeros": sparse_count,
+        "factorized_stored_terms": factorized_count,
+        "total_stored_term_count": entry_count,
+        "memory_estimate_bytes": int(serialized_bytes),
+        "memory_estimate_scope": "serialized_coefficient_json_bytes_not_resident_memory",
         "cache_status": "hit_or_reused" if str(mode) == "cached" else "cold_or_miss",
         "validation_report": {
             "passed": bool(coupler.certificate.passed),

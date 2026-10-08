@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from _legacy_algebraic_plan import algebraic_young_angular_plan
 
 from ye3t.couplings import (
     YE3TSourceAssemblyPlan,
@@ -135,174 +136,49 @@ def _case(complex_coefficients):
 
 
 def _rank3_factorized_plan():
-    compiled = compile_coupler(
-        coupling_plan(
-            content=(1, 2, 3),
-            input_Ls=(1, 2, 1),
-            target_L=2,
-        ),
-        subduction_materialization_backend="exact",
-    )
-    return execution_plan_from_compiled_coupler(compiled)
+    return algebraic_young_angular_plan(
+        (1, 2, 3), (1, 2, 1), 2,
+    )[1]
 
 
 def _rank3_factorized_role_plan(target_L=2):
     target_L = int(target_L)
-    compiled = compile_coupler(
-        coupling_plan(
-            content=(1, 2, 3),
-            input_Ls=(1, 2, 1),
-            target_L=target_L,
-            carrier="A_s",
-            target_permutation="young:2,1",
-            carrier_options={
-                "role_coordinate_policy": "role_resolved",
-                "slot_count": 3,
-                "permuted_slot_count": 3,
-            },
-        ),
-        subduction_materialization_backend="exact",
-    )
-    source = YE3TSourceRealization(
-        kind="lifted_density_roles",
-        rank=3,
-        content=(1, 2, 3),
+    return algebraic_young_angular_plan(
+        (1, 2, 3), (1, 2, 1), target_L,
+        target_partition=(2, 1),
         role_labels=("role_0", "role_1", "role_2"),
-        retain_role_order=True,
-    )
-    assembly = source_assembly_from_induction(
-        compiled.coupler.induction_couplers[0],
-        source,
-        assembly_id=f"rank3_roles_L{target_L}",
-    )
-    return execution_plan_from_compiled_coupler(
-        compiled,
-        source_realization=source,
-        source_assembly=assembly,
-    )
+    )[1]
 
 
 def _rank5_factorized_plan(target_L=2):
-    compiled = compile_coupler(
-        coupling_plan(
-            content=(1, 2, 3, 4, 5),
-            input_Ls=(1, 1, 1, 1, 1),
-            target_L=int(target_L),
-        ),
-        subduction_materialization_backend="exact",
-    )
-    return execution_plan_from_compiled_coupler(compiled)
+    return algebraic_young_angular_plan(
+        (1, 2, 3, 4, 5), (1, 1, 1, 1, 1), int(target_L),
+    )[1]
 
 
 def _rank4_homogeneous_factorized_role_plan(target_L):
     target_L = int(target_L)
-    compiled = compile_coupler(
-        coupling_plan(
-            content=(1, 1, 1, 1),
-            input_Ls=(1, 1, 1, 1),
-            target_L=target_L,
-            carrier="A_s",
-            target_permutation="young:4",
-            carrier_options={
-                "role_coordinate_policy": "role_resolved",
-                "slot_count": 4,
-                "permuted_slot_count": 4,
-            },
-        ),
-        subduction_materialization_backend="exact",
-    )
-    source = YE3TSourceRealization(
-        kind="lifted_density_roles",
-        rank=4,
-        content=(1, 1, 1, 1),
+    return algebraic_young_angular_plan(
+        (1, 1, 1, 1), (1, 1, 1, 1), target_L,
         role_labels=("role_0",) * 4,
-        retain_role_order=True,
-    )
-    assembly = source_assembly_from_induction(
-        compiled.coupler.induction_couplers[0],
-        source,
-        assembly_id=(
-            "test_homogeneous_rank4_L" + str(target_L)
-        ),
-    )
-    return execution_plan_from_compiled_coupler(
-        compiled,
-        source_realization=source,
-        source_assembly=assembly,
-    )
+    )[1]
 
 
 def _rank4_two_block_factorized_role_plan(target_L):
     target_L = int(target_L)
-    compiled = compile_coupler(
-        coupling_plan(
-            content=(1, 1, 2, 2),
-            input_Ls=(1, 1, 1, 1),
-            target_L=target_L,
-            carrier="A_s",
-            target_permutation="young:3,1",
-            carrier_options={
-                "role_coordinate_policy": "role_resolved",
-                "slot_count": 4,
-                "permuted_slot_count": 4,
-            },
-            metadata={"subgroup_partitions": ((2,), (2,))},
-        ),
-        subduction_materialization_backend="exact",
-    )
-    source = YE3TSourceRealization(
-        kind="lifted_density_roles",
-        rank=4,
-        content=(1, 1, 2, 2),
+    return algebraic_young_angular_plan(
+        (1, 1, 2, 2), (1, 1, 1, 1), target_L,
+        target_partition=(3, 1), subgroup_partitions=((2,), (2,)),
         role_labels=("role_0", "role_0", "role_1", "role_1"),
-        retain_role_order=True,
-    )
-    assembly = source_assembly_from_induction(
-        compiled.coupler.induction_couplers[0],
-        source,
-        assembly_id="test_two_block_rank4_L" + str(target_L),
-    )
-    return execution_plan_from_compiled_coupler(
-        compiled,
-        source_realization=source,
-        source_assembly=assembly,
-    )
+    )[1]
 
 
 def _rank3_nontrivial_child_tableau_plan():
-    compiled = compile_coupler(
-        coupling_plan(
-            content=(1, 1, 1),
-            input_Ls=(1, 1, 1),
-            target_L=2,
-            carrier="A_s",
-            target_permutation="young:2,1",
-            carrier_options={
-                "role_coordinate_policy": "role_resolved",
-                "slot_count": 3,
-                "permuted_slot_count": 3,
-            },
-            metadata={"subgroup_partitions": ((2, 1),)},
-        ),
-        subduction_materialization_backend="exact",
-    )
-    source = YE3TSourceRealization(
-        kind="lifted_density_roles",
-        rank=3,
-        content=(1, 1, 1),
+    return algebraic_young_angular_plan(
+        (1, 1, 1), (1, 1, 1), 2,
+        target_partition=(2, 1), subgroup_partitions=((2, 1),),
         role_labels=("role_0", "role_1", "role_2"),
-        retain_role_order=True,
-    )
-    assembly = source_assembly_from_induction(
-        compiled.coupler.induction_couplers[0],
-        source,
-        assembly_id="rank3_nontrivial_child_tableau_native",
-    )
-    return execution_plan_from_compiled_coupler(
-        compiled,
-        source_realization=source,
-        source_assembly=assembly,
-    )
+    )[1]
 
 
 def test_native_extension_reports_factorized_abi():

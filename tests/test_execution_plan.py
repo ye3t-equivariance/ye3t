@@ -2607,6 +2607,9 @@ def test_rank2_non_scalar_compiled_coupler_lowers_young_x_angular_synthesis():
         ),
         subduction_materialization_backend="exact",
     )
+    compact_check = compiled.validation_report["ordinary_single_path_compact_check"]
+    assert compact_check["compact_coefficient_hash"].startswith("sha256:")
+    assert compact_check["maximum_coefficient_residual"] < 1e-12
     execution_plan = execution_plan_from_compiled_coupler(compiled)
     source = torch.arange(1.0, 10.0, dtype=torch.float64).reshape(1, 9)
     actual = apply_source_analysis_reference(
@@ -2636,6 +2639,59 @@ def test_rank2_non_scalar_compiled_coupler_lowers_young_x_angular_synthesis():
         "tableau_t",
         "magnetic_M",
     )
+
+
+@pytest.mark.parametrize(
+    "content,input_Ls",
+    (
+        ((1, 2, 3), (0, 1, 1)),
+        ((2, 1, 3), (1, 0, 1)),
+    ),
+)
+def test_rank3_ordinary_single_path_matches_compact_ace_value(content, input_Ls):
+    from ye3t.couplings import compile as compile_coupler
+    from ye3t.couplings import compile_ace_coordinate, plan
+
+    request = plan(content=content, input_Ls=input_Ls, target_L=0)
+    assert request.report.counts_by_target[0] == 1
+    compiled = compile_coupler(
+        request, subduction_materialization_backend="exact"
+    )
+    compact_check = compiled.validation_report["ordinary_single_path_compact_check"]
+    assert compact_check["maximum_coefficient_residual"] < 1e-12
+    execution_plan = execution_plan_from_compiled_coupler(compiled)
+    factors = tuple(
+        (torch.arange(1.0, 2 * ell + 2, dtype=torch.float64)
+         .reshape(1, -1) + index) / 7.0
+        for index, ell in enumerate(input_Ls)
+    )
+    actual = apply_factorized_angular_analysis_reference(factors, execution_plan)
+
+    label = request.report.labels_for_target(0)[0]
+    table = compile_ace_coordinate(label)["coefficient_table"]
+    rows, coefficients = table.component_terms(0)
+    expected = torch.zeros((), dtype=torch.float64)
+    for row, coefficient in zip(rows, coefficients):
+        input_m = tuple(row[label.n_tuple.index(channel)] for channel in content)
+        product_value = torch.ones((), dtype=torch.float64)
+        for factor, magnetic, ell in zip(factors, input_m, input_Ls):
+            product_value = product_value * factor[0, magnetic + ell]
+        coefficient = complex(coefficient)
+        assert abs(coefficient.imag) < 1e-12
+        expected = expected + product_value * coefficient.real
+    torch.testing.assert_close(actual.reshape(()), expected, rtol=0.0, atol=1e-12)
+
+
+def test_ordinary_ace_multipath_does_not_enter_single_path_native_lowering():
+    from ye3t.couplings import compile as compile_coupler
+    from ye3t.couplings import plan
+
+    request = plan(
+        content=(1, 2, 3), input_Ls=(1, 2, 1), target_L=2,
+    )
+    assert request.report.counts_by_target[2] == 3
+    with pytest.raises(ValueError, match="bounded dense reference matrix"):
+        compile_coupler(request, subduction_materialization_backend="exact")
 
 
 def test_o3_compiled_coupler_lowers_with_exact_natural_parity():
@@ -2675,22 +2731,15 @@ def test_o3_compiled_coupler_lowers_with_exact_natural_parity():
 
 
 def test_rank3_factorized_angular_tree_lowers_to_shared_plan_and_matches_reference():
-    from ye3t.couplings import compile as compile_coupler
-    from ye3t.couplings import plan
+    from _legacy_algebraic_plan import algebraic_young_angular_plan
     from ye3t.global_coupler import (
         _evaluate_angular_tree_reference_loop_torch,
         torch_dense_from_sparse_coefficient_table,
     )
 
-    compiled = compile_coupler(
-        plan(
-            content=(1, 2, 3),
-            input_Ls=(1, 2, 1),
-            target_L=2,
-        ),
-        subduction_materialization_backend="exact",
+    compiled, execution_plan = algebraic_young_angular_plan(
+        content=(1, 2, 3), input_Ls=(1, 2, 1), target_L=2,
     )
-    execution_plan = execution_plan_from_compiled_coupler(compiled)
     restored = execution_plan.from_json(execution_plan.to_json())
     angular_plan = restored.factorized_angular_plans[0]
     assert restored.instructions[0].metadata["input_content"] == [1, 2, 3]
@@ -2782,42 +2831,14 @@ def test_rank3_factorized_angular_tree_lowers_to_shared_plan_and_matches_referen
 
 
 def test_rank3_factorized_lowering_retains_nontrivial_child_tableau_rows():
-    from ye3t.couplings import compile as compile_coupler
-    from ye3t.couplings import plan
+    from _legacy_algebraic_plan import algebraic_young_angular_plan
 
-    compiled = compile_coupler(
-        plan(
-            content=(1, 1, 1),
-            input_Ls=(1, 1, 1),
-            target_L=2,
-            carrier="A_s",
-            target_permutation="young:2,1",
-            carrier_options={
-                "role_coordinate_policy": "role_resolved",
-                "slot_count": 3,
-                "permuted_slot_count": 3,
-            },
-            metadata={"subgroup_partitions": ((2, 1),)},
-        ),
-        subduction_materialization_backend="exact",
-    )
-    source = YE3TSourceRealization(
-        kind="lifted_density_roles",
-        rank=3,
-        content=(1, 1, 1),
+    compiled, execution_plan = algebraic_young_angular_plan(
+        content=(1, 1, 1), input_Ls=(1, 1, 1), target_L=2,
+        target_partition=(2, 1), subgroup_partitions=((2, 1),),
         role_labels=("role_0", "role_1", "role_2"),
-        retain_role_order=True,
     )
-    assembly = source_assembly_from_induction(
-        compiled.coupler.induction_couplers[0],
-        source,
-        assembly_id="rank3_nontrivial_child_tableau",
-    )
-    execution_plan = execution_plan_from_compiled_coupler(
-        compiled,
-        source_realization=source,
-        source_assembly=assembly,
-    )
+    assembly = execution_plan.source_assemblies[0]
     angular_plan = execution_plan.factorized_angular_plans[0]
     records = tuple(assembly.provenance["source_coordinate_records"])
 
@@ -2869,18 +2890,11 @@ def test_rank3_factorized_lowering_retains_nontrivial_child_tableau_rows():
 
 
 def test_factorized_subtree_identity_tracks_exact_physical_leaf_bindings():
-    from ye3t.couplings import compile as compile_coupler
-    from ye3t.couplings import plan
+    from _legacy_algebraic_plan import algebraic_young_angular_plan
 
-    compiled = compile_coupler(
-        plan(
-            content=(1, 2, 3),
-            input_Ls=(1, 2, 1),
-            target_L=2,
-        ),
-        subduction_materialization_backend="exact",
+    compiled, execution_plan = algebraic_young_angular_plan(
+        content=(1, 2, 3), input_Ls=(1, 2, 1), target_L=2,
     )
-    execution_plan = execution_plan_from_compiled_coupler(compiled)
     restored = execution_plan.from_json(execution_plan.to_json())
     angular_plan = execution_plan.factorized_angular_plans[0]
     restored_angular_plan = restored.factorized_angular_plans[0]

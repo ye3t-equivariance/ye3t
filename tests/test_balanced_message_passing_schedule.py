@@ -256,9 +256,10 @@ assert schedule.certificate.provenance["subduction_materialization_backend"] == 
 assert schedule.certificate.provenance["compare_exact_projector"] is False
 assert schedule.certificate.provenance["subduction_exact_reference_max_rank"] is None
 for sector in schedule.sector_schedules:
-    table = sector.dispatch_coupler.sparse_coefficient_tables[0]
-    assert table["entry_format"] == "numeric_real"
-    assert sector.dispatch_coupler.validate_sparse_coefficient_tables()[0]["passed"] is True
+    table = sector.dispatch_coupler.factorized_coefficient_tables[0]
+    assert table["kind"] == "typed_joint_factorized_v1"
+    assert len(table["routes"]) == 1
+    assert sector.dispatch_coupler.certificate.checks["dense_typed_matrix_not_materialized"]
 assert "sympy" not in sys.modules
 '''
     result = subprocess.run(
@@ -270,6 +271,66 @@ assert "sympy" not in sys.modules
         check=False,
     )
     assert result.returncode == 0, result.stderr + result.stdout
+
+
+def test_typed_balanced_plan_keeps_complete_coupler_and_rejects_scalar_reference_values():
+    import pytest
+    import torch
+
+    from ye3t import (
+        BalancedYE3TMessageStateSpec,
+        CompileBalancedYE3TMessagePassingSchedule,
+        YE3TRotationTarget,
+    )
+
+    state = BalancedYE3TMessageStateSpec(
+        hidden_content_schedule=((1, 2),),
+        hidden_permutation_sectors=("trivial",),
+        hidden_rotation_sectors=(YE3TRotationTarget(L_R=0),),
+        layer_count=1,
+        coefficient_backend="global_coupler",
+        input_Ls_by_content={(1, 2): (1, 1)},
+        runtime_status="planned_not_public",
+    )
+    schedule = CompileBalancedYE3TMessagePassingSchedule(state)
+    sector = schedule.sector_schedules[0]
+    assert schedule.certificate.checks["finite_reference_tensor_runtime"] is False
+    table = sector.dispatch_coupler.factorized_coefficient_tables[0]
+    assert table["kind"] == "typed_joint_factorized_v1"
+    assert not sector.dispatch_coupler.sparse_coefficient_tables
+    value_spec = sector.input_value_spec()
+    assert value_spec["expected_input_axis_width"] is None
+    assert value_spec["coefficient_table_kind"] == table["kind"]
+    assert sector.to_dict()["alpha_labels"] == tuple(
+        sector.dispatch_coupler.alpha_labels()
+    )
+    assert sector.to_dict()["global_label_groups"] == tuple(
+        label.to_dict() for label in sector.dispatch_coupler.labels
+    )
+    with pytest.raises(NotImplementedError, match="ordered tensor factors"):
+        sector.evaluate_reference_torch(torch.ones(1, 1, dtype=torch.float64))
+
+
+def test_balanced_repeated_typed_image_map_fails_with_explicit_scope():
+    import pytest
+
+    from ye3t import (
+        BalancedYE3TMessageStateSpec,
+        CompileBalancedYE3TMessagePassingSchedule,
+        YE3TRotationTarget,
+    )
+
+    state = BalancedYE3TMessageStateSpec(
+        hidden_content_schedule=((1, 1),),
+        hidden_permutation_sectors=("trivial",),
+        hidden_rotation_sectors=(YE3TRotationTarget(L_R=0),),
+        layer_count=1,
+        coefficient_backend="global_coupler",
+        input_Ls_by_content={(1, 1): (1, 1)},
+        runtime_status="planned_not_public",
+    )
+    with pytest.raises(NotImplementedError, match="repeated-factor image maps"):
+        CompileBalancedYE3TMessagePassingSchedule(state)
 
 
 def test_default_repeated_content_message_schedule_uses_numeric_image_maps_without_sympy():
@@ -917,7 +978,8 @@ def test_balanced_pair_product_merge_projects_selected_sectors():
         hidden_rotation_sectors=(YE3TRotationTarget(L_R=0),),
         layer_count=1,
         coefficient_backend="global_coupler",
-        input_Ls_by_content={(1, 1): (1, 1)},
+        # The inputs below are scalar hidden features, so each factor has L=0.
+        input_Ls_by_content={(1, 1): (0, 0)},
         runtime_status="planned_not_public",
     )
     schedule = CompileBalancedYE3TMessagePassingSchedule(state)

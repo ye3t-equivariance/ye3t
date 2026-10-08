@@ -39,6 +39,7 @@ from ye3t.spec import (
     YE3TReadoutSpec,
     YE3TRotationTarget,
     YE3TSpec,
+    _target_partition,
 )
 from ye3t.representations.generalized_irreps import Partition
 from ye3t.representations.projectors import (
@@ -1685,10 +1686,31 @@ class BalancedYE3TMessageSectorSchedule:
             for table in reversed(self.dispatch_coupler.sparse_coefficient_tables):
                 if str(table.get("kind")) == "exterior_power_sign_vector":
                     return dict(table)
-        return dict(self.dispatch_coupler.sparse_coefficient_tables[0])
+        if self.dispatch_coupler.sparse_coefficient_tables:
+            return dict(self.dispatch_coupler.sparse_coefficient_tables[0])
+        return None
 
     def input_value_spec(self):
         table = self._runtime_input_table()
+        if table is None:
+            factorized = self.dispatch_coupler.factorized_coefficient_tables
+            return {
+                "layer_index": int(self.layer_index),
+                "content": tuple(self.content),
+                "target_permutation": str(self.target_permutation),
+                "target_partition": tuple(_target_partition(
+                    self.dispatch_coupler.spec.target_permutation, len(self.content)
+                )),
+                "target_L_R": int(self.target_rotation.L_R),
+                "target_rotation_group": str(self.target_rotation.group),
+                "target_rotation_parity": self.target_rotation.parity,
+                "expected_input_axis_width": None,
+                "expected_output_axis_width": None,
+                "coefficient_table_kind": str(factorized[0].get("kind")) if factorized else None,
+                "coefficient_table_hash": factorized[0].get("hash") if factorized else None,
+                "backend": self.dispatch_coupler.backend_plan.selected_backend,
+                "reference_tensor_evaluation": "requires_scalar_factor_reference_table",
+            }
         if str(table.get("kind")) == "exterior_power_sign_vector":
             expected_input_width = int(table["basis_size"])
             expected_output_width = 1
@@ -1699,9 +1721,9 @@ class BalancedYE3TMessageSectorSchedule:
             "layer_index": int(self.layer_index),
             "content": tuple(self.content),
             "target_permutation": str(self.target_permutation),
-            "target_partition": tuple(
-                int(part) for part in self.dispatch_coupler.subduction_maps[0].target_partition
-            ),
+            "target_partition": tuple(_target_partition(
+                self.dispatch_coupler.spec.target_permutation, len(self.content)
+            )),
             "target_L_R": int(self.target_rotation.L_R),
             "target_rotation_group": str(self.target_rotation.group),
             "target_rotation_parity": self.target_rotation.parity,
@@ -1716,6 +1738,13 @@ class BalancedYE3TMessageSectorSchedule:
         """Apply this sector's dispatch coefficient table to caller-supplied values."""
 
         import torch
+
+        if self._runtime_input_table() is None:
+            raise NotImplementedError(
+                "Balanced scalar hidden-state reference evaluation requires a "
+                "sparse permutation table. This sector has complete factorized "
+                "Young-E3 coefficients, which require ordered tensor factors."
+            )
 
         tensor = torch.as_tensor(values, dtype=dtype, device=device)
         axis = int(input_axis)
@@ -1757,9 +1786,9 @@ class BalancedYE3TMessageSectorSchedule:
                 "layer_index": int(self.layer_index),
                 "content": tuple(self.content),
                 "target_permutation": str(self.target_permutation),
-                "target_partition": tuple(
-                    int(part) for part in self.dispatch_coupler.subduction_maps[0].target_partition
-                ),
+                "target_partition": tuple(_target_partition(
+                    self.dispatch_coupler.spec.target_permutation, len(self.content)
+                )),
                 "message_update_status": "coefficient_table_applied_without_message_aggregation",
                 "readout_status": "not_applied",
                 "input_value_spec": input_spec,
@@ -1797,7 +1826,9 @@ class BalancedYE3TMessageSectorSchedule:
             "layer_index": int(self.layer_index),
             "content": list(self.content),
             "target_permutation": str(self.target_permutation),
-            "target_partition": tuple(int(part) for part in self.dispatch_coupler.subduction_maps[0].target_partition),
+            "target_partition": tuple(_target_partition(
+                self.dispatch_coupler.spec.target_permutation, len(self.content)
+            )),
             "family_source_target_permutation": self.dispatch_coupler.spec.metadata.get(
                 "family_source_target_permutation"
             ),
@@ -1854,10 +1885,11 @@ class BalancedYE3TMessageSectorSchedule:
             "factorized_table_kinds": tuple(
                 str(table.get("kind")) for table in self.balanced_tree.coupler.factorized_coefficient_tables
             ),
-            "alpha_labels": tuple(
+            "global_label_groups": tuple(
                 label.to_dict() if hasattr(label, "to_dict") else label
-                for label in self.balanced_tree.coupler.labels
+                for label in self.dispatch_coupler.labels
             ),
+            "alpha_labels": tuple(self.dispatch_coupler.alpha_labels()),
             "input_value_spec": self.input_value_spec(),
             "task_validation": task_metadata,
         }
@@ -2664,9 +2696,10 @@ def ApplyBalancedYE3TPairProductMerge(
         device=left_values.device,
     )
     output_width = int(projected.values.shape[-1])
-    target_partition = tuple(
-        int(part) for part in output_sector_schedule.dispatch_coupler.subduction_maps[0].target_partition
-    )
+    target_partition = tuple(_target_partition(
+        output_sector_schedule.dispatch_coupler.spec.target_permutation,
+        len(output_sector_schedule.content),
+    ))
     sector_slice = {
         "sector_index": 0,
         "start": 0,
@@ -5262,9 +5295,10 @@ def PackageBalancedYE3TMessagePassingReferenceState(
                 "layer_index": int(schedule.layer_index),
                 "content": tuple(schedule.content),
                 "target_permutation": str(schedule.target_permutation),
-                "target_partition": tuple(
-                    int(part) for part in schedule.dispatch_coupler.subduction_maps[0].target_partition
-                ),
+                "target_partition": tuple(_target_partition(
+                    schedule.dispatch_coupler.spec.target_permutation,
+                    len(schedule.content),
+                )),
                 "target_L_R": int(schedule.target_rotation.L_R),
                 "start": int(start),
                 "stop": int(stop),
@@ -5536,10 +5570,36 @@ def CompileBalancedYE3TMessagePassingSchedule(
             for schedule in schedules
         ),
         "all_trivial_induction_orbit_sums_verified": all(
-            bool(
-                (not schedule.dispatch_coupler.induction_couplers[0].validation.get("trivial_target_checked", False))
-                or schedule.dispatch_coupler.induction_couplers[0].validation.get(
-                    "trivial_target_uniform_orbit_sum", False
+            (
+                bool(
+                    (not schedule.dispatch_coupler.induction_couplers[0].validation.get(
+                        "trivial_target_checked", False
+                    ))
+                    or schedule.dispatch_coupler.induction_couplers[0].validation.get(
+                        "trivial_target_uniform_orbit_sum", False
+                    )
+                )
+                if schedule.dispatch_coupler.induction_couplers else
+                (
+                    _target_partition(
+                        schedule.dispatch_coupler.spec.target_permutation,
+                        len(schedule.dispatch_coupler.spec.content),
+                    ) != (len(schedule.dispatch_coupler.spec.content),)
+                    or (
+                        schedule.dispatch_coupler.certificate.provenance.get(
+                            "young_character_path"
+                        ) == "symmetric"
+                        and len(schedule.dispatch_coupler.factorized_coefficient_tables) == 1
+                        and bool(schedule.dispatch_coupler.factorized_coefficient_tables[0].get(
+                            "young_tables", ()
+                        ))
+                        and all(
+                            table.get("analytic_character") == "symmetric"
+                            for table in schedule.dispatch_coupler.factorized_coefficient_tables[0].get(
+                                "young_tables", ()
+                            )
+                        )
+                    )
                 )
             )
             for schedule in schedules
@@ -5569,7 +5629,9 @@ def CompileBalancedYE3TMessagePassingSchedule(
             for schedule in schedules
         ),
         "implemented_tensor_runtime": False,
-        "finite_reference_tensor_runtime": True,
+        "finite_reference_tensor_runtime": all(
+            schedule._runtime_input_table() is not None for schedule in schedules
+        ),
         "full_task_model_runtime": False,
         "rank_coupling_mode_is_rank_additive_induction": state_spec.rank_coupling_mode
         == "rank_additive_induction",
@@ -5605,7 +5667,10 @@ def CompileBalancedYE3TMessagePassingSchedule(
             "rank_coupling_scope": "rank_additive_induction_LR_pair_product_schedule",
             "rank_coupling_policy": BalancedYE3TRankCouplingPolicy(state_spec.rank_coupling_mode),
             "runtime_validation_status": task_metadata["runtime_validation_status"],
-            "finite_reference_tensor_runtime_status": "implemented_under_validation",
+            "finite_reference_tensor_runtime_status": (
+                "implemented_under_validation"
+                if checks["finite_reference_tensor_runtime"] else "planned_not_public"
+            ),
             "full_task_model_runtime_status": "planned_not_public",
             "coefficient_compile_source": "CompileYE3TCouplers",
             "subduction_materialization_backend": str(subduction_materialization_backend),
@@ -5615,7 +5680,7 @@ def CompileBalancedYE3TMessagePassingSchedule(
             "subduction_exact_reference_max_rank": subduction_exact_reference_max_rank,
         },
         limitations=(
-            "This is a backend-neutral schedule and finite reference tensor layer, not a full task model runtime.",
+            "This is a backend-neutral schedule; finite scalar reference tensor evaluation requires sparse permutation tables.",
             "The compiled schedule is rank-additive through induction/LR pair products; same-rank Kronecker products are not implemented here.",
             "Energy/force and fermion/operator readout validation remain required before public runtime support.",
             "High-rank coefficient materialization should use the numeric_cached subduction backend with an explicit cache directory.",

@@ -113,7 +113,6 @@ def test_p_shell_sectors_agree_with_central_global_young_coupler():
     from ye3t import CompileYE3TCouplers, YE3TRotationTarget, YE3TSpec
     from ye3t.couplings import compile_algebraic_curvature_output, compile_algebraic_curvature_synthesis
     from ye3t.core.tesseral import complex_multiplet_to_real_tesseral, real_tesseral_to_complex_multiplet
-    from ye3t.global_coupler import evaluate_joint_ye3t_factorized_slots_torch
 
     compiled = compile_algebraic_curvature_synthesis(
         ({"block_id": "p", "L": 1, "parity": "odd", "component_indices": (0, 1, 2)},)
@@ -138,32 +137,41 @@ def test_p_shell_sectors_agree_with_central_global_young_coupler():
         rows = []
         for indices in itertools.product(range(3), repeat=4):
             slots = tuple(real_tesseral_to_complex_multiplet(eye[index], 1) for index in indices)
-            values = evaluate_joint_ye3t_factorized_slots_torch(coupler, slots).values
+            values = coupler.evaluate_factorized_factors_torch(slots)
             values = complex_multiplet_to_real_tesseral(
                 values,
                 target_L,
                 tuple(range(-target_L, target_L + 1)),
             )
-            rows.append(values.detach().numpy().reshape(-1))
+            rows.append(values.detach().numpy())
         tensor_columns = np.stack(rows, axis=0)
-        compact_columns = []
-        for column in range(tensor_columns.shape[1]):
-            tensor = tensor_columns[:, column].reshape(3, 3, 3, 3)
-            wedge = np.empty((3, 3), dtype=np.float64)
-            for left, (i, j) in enumerate(pairs):
-                for right, (k, l) in enumerate(pairs):
-                    wedge[left, right] = tensor[i, j, k, l]
-            from ye3t.couplings import pack_algebraic_curvature_numpy
-
-            compact_columns.append(pack_algebraic_curvature_numpy(wedge, output))
-        candidate = np.stack(compact_columns, axis=1)
-        left_vectors, singular, _ = np.linalg.svd(candidate, full_matrices=False)
-        rank = int(np.sum(singular > 1.0e-10))
-        reference_projector = left_vectors[:, :rank] @ left_vectors[:, :rank].T
         fixed = _dense_sector_basis(compiled, target_L, "even").reshape(6, -1)
         fixed_projector = fixed @ fixed.T
-        assert rank == 2 * target_L + 1
-        np.testing.assert_allclose(fixed_projector, reference_projector, atol=3.0e-13)
+        from ye3t.couplings import pack_algebraic_curvature_numpy
+
+        matching_coordinates = []
+        for a in range(tensor_columns.shape[1]):
+            for t in range(tensor_columns.shape[2]):
+                compact_columns = []
+                for magnetic in range(2 * target_L + 1):
+                    tensor = tensor_columns[:, a, t, magnetic].reshape(3, 3, 3, 3)
+                    wedge = np.empty((3, 3), dtype=np.float64)
+                    for left, (i, j) in enumerate(pairs):
+                        for right, (k, l) in enumerate(pairs):
+                            wedge[left, right] = tensor[i, j, k, l]
+                    compact_columns.append(pack_algebraic_curvature_numpy(wedge, output))
+                candidate = np.stack(compact_columns, axis=1)
+                left_vectors, singular, _ = np.linalg.svd(candidate, full_matrices=False)
+                rank = int(np.sum(singular > 1.0e-10))
+                if rank == 2 * target_L + 1 and np.allclose(
+                    fixed_projector, left_vectors[:, :rank] @ left_vectors[:, :rank].T,
+                    atol=3.0e-13, rtol=0.0,
+                ):
+                    matching_coordinates.append((a, t))
+        assert matching_coordinates, (
+            "No coupled multiplicity/tableau coordinate spans the expected "
+            "algebraic-curvature rotation sector."
+        )
 
 
 @pytest.mark.fast

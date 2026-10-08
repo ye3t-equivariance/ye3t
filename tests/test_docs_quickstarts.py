@@ -1,6 +1,7 @@
 import doctest
 from pathlib import Path
 import re
+import textwrap
 
 import pytest
 
@@ -16,7 +17,7 @@ REQUIRED_PAGES = {
     "quickstart_pure_permutation.rst": ("Status: stable", "Requires:", "Expected output", "Validation link"),
     "quickstart_fixed_content_couplers.rst": ("Status: stable", "ye3t.couplings.count", "count -> plan -> compile"),
     "validation_reports.rst": ("Status: stable", "valid_labels_from", "convention_hash"),
-    "backend_capability_table.rst": ("Status: stable", "Package boundary", "ye3t-ace"),
+    "backend_capability_table.rst": ("Status: stable", "Package boundary", "ye3t-methods"),
     "feature_inventory.rst": ("Status: preservation inventory", "Migration records", "Notes:"),
     "representation_snippets.rst": ("Status: stable", "Count Basis Labels", "Schedule Metadata"),
 }
@@ -82,3 +83,16 @@ def test_representation_snippets_doctest():
         optionflags=doctest.ELLIPSIS | doctest.NORMALIZE_WHITESPACE,
     )
     assert result.failed == 0
+
+
+def test_validation_report_example_compiles_its_ordinary_ace_coordinate():
+    text = (DOCS / "validation_reports.rst").read_text(encoding="utf-8")
+    block = re.search(
+        r"(?m)^\.\. code-block:: python\n\n((?:^   .*\n|^\n)+)", text,
+    )
+    assert block is not None
+    namespace = {}
+    exec(compile(textwrap.dedent(block.group(1)), "validation_reports.rst", "exec"),
+         namespace)
+    assert namespace["report"].validation_report["passed"]
+    assert len(namespace["coefficients"]) > 0

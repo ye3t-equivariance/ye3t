@@ -28,6 +28,12 @@ def _slow_coupled_product_compiler(request):
     time.sleep(5.0)
 
 
+def _delayed_non_memory_compiler(request):
+    del request
+    time.sleep(0.2)
+    raise ValueError("worker reached compiler")
+
+
 class _OversizedPlan:
     def to_dict(self):
         return {"padding": "x" * 4096}
@@ -402,7 +408,7 @@ def test_exact_compiler_hard_timeout_terminates_its_worker(monkeypatch):
     assert {child.pid for child in mp.active_children()} <= children_before
 
 
-def test_exact_compiler_hard_rss_limit_terminates_its_worker(monkeypatch):
+def test_exact_compiler_monitored_private_memory_limit_terminates_its_worker(monkeypatch):
     if "fork" not in mp.get_all_start_methods():
         pytest.skip("requires the fail-closed fork compiler backend")
     monkeypatch.setattr(
@@ -417,10 +423,31 @@ def test_exact_compiler_hard_rss_limit_terminates_its_worker(monkeypatch):
     }
     children_before = {child.pid for child in mp.active_children()}
 
-    with pytest.raises(MemoryError, match="hard RSS limit"):
+    with pytest.raises(MemoryError, match="monitored private-memory limit"):
         compile_execution_plan(ace_coupled_product_request=request)
 
     assert {child.pid for child in mp.active_children()} <= children_before
+
+
+def test_forked_compiler_does_not_charge_shared_parent_pages(monkeypatch):
+    if "fork" not in mp.get_all_start_methods():
+        pytest.skip("requires the fail-closed fork compiler backend")
+    monkeypatch.setattr(
+        coupling_namespace,
+        "_compile_ace_coupled_product_execution_plan_unbounded",
+        _delayed_non_memory_compiler,
+    )
+    inherited = bytearray(96 * 1024 * 1024)
+    for index in range(0, len(inherited), 4096):
+        inherited[index] = 1
+    request = _rank4_request()
+    request["resource_limits"] = {
+        "max_compile_seconds": 1.0,
+        "max_compile_peak_bytes": 64 * 1024 * 1024,
+    }
+    with pytest.raises(ValueError, match="worker reached compiler"):
+        compile_execution_plan(ace_coupled_product_request=request)
+    assert inherited[0] == inherited[-4096]
 
 
 def test_exact_compiler_hard_serialized_result_limit(monkeypatch):
