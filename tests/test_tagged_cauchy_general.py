@@ -8,7 +8,7 @@ import sympy as sp
 
 from ye3t.couplings import compile, count, plan, tagged_cauchy_image_request
 from ye3t.couplings.tagged_cauchy_general import (
-    _content_records, _exact_pivot_image, _physical_source_product,
+    _content_records, _exact_pivot_image, _physical_source_product, _ExactImagePivots,
 )
 from ye3t.couplings.orthogonal_shifted_jacobi import (
     ORTHOGONAL_SHIFTED_JACOBI_SOURCE_FAMILY as FAMILY,
@@ -85,6 +85,75 @@ def test_sparse_pivots_keep_original_coordinates_and_exact_span():
     assert selected == (0, 3)
     assert not reconstruction[2]
     assert reconstruction[1][0] == 2
+
+
+def test_incremental_image_matches_independent_exact_matrix_pivots_at_every_prefix():
+    from ye3t.exact_scalars import exact_scalar
+
+    matrix = sp.Matrix([
+        [0, 0, 0, 0], [1 + sp.sqrt(2), sp.sqrt(3), 0, 0],
+        [2 + 2*sp.sqrt(2), 2*sp.sqrt(3), 0, 0],
+        [0, 1, sp.sqrt(5), 0], [1, 0, 1, 0],
+        [3, 1, 3 + sp.sqrt(5), 0], [0, 0, 0, 7],
+    ])
+    rows = [{(j,): exact_scalar(matrix[i, j]) for j in range(matrix.cols)
+             if matrix[i, j]} for i in range(matrix.rows)]
+    image = _ExactImagePivots()
+    for index, row in enumerate(rows):
+        previous = tuple(dict(values) for values in image.reconstructions)
+        image.append(row)
+        prefix = matrix[:index + 1, :]
+        expected = prefix.T.rref(simplify=True)[1]
+        assert tuple(image.selected) == expected
+        assert tuple(image.reconstructions[:-1]) == previous
+        for raw_index, reconstruction in enumerate(image.reconstructions):
+            rebuilt = sp.zeros(1, matrix.cols)
+            for feature, coefficient in reconstruction.items():
+                rebuilt += coefficient._sympy_() * matrix[image.selected[feature], :]
+            assert all(sp.simplify(value) == 0 for value in rebuilt - matrix[raw_index, :])
+    assert _exact_pivot_image(rows) == (tuple(image.selected), tuple(image.reconstructions))
+
+
+def test_incremental_image_checks_its_reconstruction():
+    from ye3t.exact_scalars import exact_scalar
+
+    image = _ExactImagePivots()
+    image.append({("a",): 1})
+    image.echelon[("a",)][1][0] = exact_scalar(2)
+    with pytest.raises(RuntimeError, match="reconstruction failed"):
+        image.append({("a",): 3})
+
+
+@pytest.mark.parametrize("denominator", [sp.sqrt(2) + sp.sqrt(3),
+    1 + sp.sqrt(2) + sp.sqrt(3), sum(sp.sqrt(p) for p in (2, 3, 5, 7, 11))])
+def test_exact_pivot_division_rationalizes_multiple_radicals(denominator):
+    from ye3t.couplings.tagged_cauchy_general import _divide_exact
+    from ye3t.exact_scalars import exact_scalar
+
+    numerator = exact_scalar(sp.sqrt(7) - 2)
+    denominator = exact_scalar(denominator)
+    quotient = _divide_exact(numerator, denominator)
+    assert quotient * denominator == numerator
+    assert sp.simplify(quotient._sympy_() * denominator._sympy_() - numerator._sympy_()) == 0
+
+
+def test_general_compile_reduces_each_candidate_once(monkeypatch):
+    import ye3t.couplings.tagged_cauchy_general as general
+
+    calls = []
+    original = general._ExactImagePivots.append
+    def append(image, row):
+        calls.append(len(image.reconstructions))
+        return original(image, row)
+    monkeypatch.setattr(general._ExactImagePivots, "append", append)
+    request = tagged_cauchy_image_request(species=["H"], catalogue={
+        "nmax_per_rank": {1: 2, 2: 2}, "lmax_per_rank": {1: 0, 2: 0},
+        "source_block_partitions_by_rank": {1: [[1]], 2: [[2]]},
+        "tag_counts_by_rank": {1: [0], 2: [1]},
+        "max_features_per_rank": 4, "max_records_per_rank": 4,
+    })
+    compiled = compile(plan(count(request)))
+    assert calls == list(range(len(compiled.payload["raw_rows"])))
 
 
 def test_general_public_compiler_round_trip():

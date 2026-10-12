@@ -110,3 +110,29 @@ def test_representation_parses_SO3_and_explicit_intermediate_policies():
     assert rep.block_rotation == ("explicit", ((2, (0, 2)),))
     with pytest.raises(ValueError, match="restricted"):
         rep.count_fixed_content((1, 2), (0, 0))
+
+
+@pytest.mark.parametrize("carrier", ["ACE_density", "external_tensor"])
+@pytest.mark.parametrize("target_L", [0, 2])
+def test_symmetric_parent_has_only_symmetric_block_intermediates(carrier, target_L):
+    from ye3t import YE3TRepresentation
+
+    config = _config()
+    config["parent"]["L"] = target_L
+    full = YE3TRepresentation.from_config(config).count_fixed_content((1, 1), (1, 1), carrier=carrier)
+    config["intermediates"]["young_kappa"] = "symmetric_only"
+    representation = YE3TRepresentation.from_config(config)
+    symmetric = representation.count_fixed_content((1, 1), (1, 1), carrier=carrier)
+    assert symmetric.to_dict() == full.to_dict()
+    assert symmetric.counts_by_target == {target_L: 1}
+    assert representation == YE3TRepresentation.from_config(representation.to_dict())
+
+
+@pytest.mark.parametrize("parent,carrier", [("(1,1)", "external_tensor"), ("(N)", "A_s")])
+def test_symmetric_intermediates_are_not_silently_ignored(parent, carrier):
+    from ye3t import YE3TRepresentation
+
+    config = _config({2: [1, 1], 3: [2, 1]} if parent != "(N)" else parent)
+    config["intermediates"]["young_kappa"] = "symmetric_only"
+    with pytest.raises(ValueError, match="restricted"):
+        YE3TRepresentation.from_config(config).count_fixed_content((1, 1), (1, 1), carrier=carrier)

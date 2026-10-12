@@ -15,6 +15,61 @@ from ye3t.workflows import (
 )
 
 
+def _coupling_cases_representation():
+    from ye3t import YE3TRepresentation
+    return YE3TRepresentation.from_config({
+        "group": "O3", "ranks": [4],
+        "parent": {"young_lambda": "(N)", "L": 0, "parity": "even"},
+        "factorization": "cauchy", "subspace": "full",
+        "uncoupled_factor_inputs": {
+            "eta_count_per_rank": {4: 2}, "l_max_per_rank": {4: 2}},
+        "intermediates": {"young_kappa": "all_valid",
+                          "block_rotation": {"policy": "all_valid"}},
+    })
+
+
+def test_coupling_cases_repeated_density_blocks_match_explicit_coefficients():
+    import numpy as np
+    from ye3t import couplings
+    from ye3t.workflows import (
+        count_coupling_cases, compile_coupling_cases, evaluate_coupling_cases,
+        compare_symmetric_count_formulas,
+    )
+    cases = count_coupling_cases(_coupling_cases_representation(), {
+        "carrier": "ACE_density", "cases_by_rank": {
+            4: [{"content": [1, 1, 2, 2], "input_Ls": [1, 1, 2, 2]}]},
+    })
+    assert compare_symmetric_count_formulas(cases)[4, 0][0] == 2
+    compiled = compile_coupling_cases(cases)
+    rng = np.random.default_rng(315)
+    inputs = {ell: rng.normal(size=(2, 2 * ell + 1)).astype(complex) for ell in (1, 2)}
+    actual = evaluate_coupling_cases(compiled, inputs)[4, 0].numpy()[:, 0]
+    expected = []
+    for label in cases[4, 0]["report"].labels_for_target(0):
+        table = couplings.compile_ace_coordinate(label)["coefficient_table"]
+        rows, coefficients = table.component_terms(0)
+        expected.append(sum(complex(coefficient) * np.prod([
+            inputs[ell][channel - 1, magnetic + ell]
+            for channel, ell, magnetic in zip(label.n_tuple, label.l_tuple, row)
+        ]) for row, coefficient in zip(rows, coefficients)))
+    np.testing.assert_allclose(actual, expected, atol=1e-12, rtol=1e-12)
+
+
+def test_coupling_case_validation_rejects_missing_ranks_and_incomplete_multiplets():
+    import pytest
+    from ye3t.workflows import count_coupling_cases, compile_coupling_cases, evaluate_coupling_cases
+    representation = _coupling_cases_representation()
+    with pytest.raises(ValueError, match="exactly representation.ranks"):
+        count_coupling_cases(representation, {"carrier": "ACE_density", "cases_by_rank": {}})
+    with pytest.raises(ValueError, match="match its rank key"):
+        count_coupling_cases(representation, {"carrier": "ACE_density", "cases_by_rank": {
+            4: [{"content": [1, 1], "input_Ls": [1, 1]}]}})
+    cases = count_coupling_cases(representation, {"carrier": "ACE_density", "cases_by_rank": {
+        4: [{"content": [1, 1, 1, 1], "input_Ls": [1, 1, 1, 1]}]}})
+    with pytest.raises(ValueError, match="complete 2\\*l\\+1 multiplet"):
+        evaluate_coupling_cases(compile_coupling_cases(cases), {1: [[1., 2.]]})
+
+
 def test_ye3t_workflow_config_factories_are_nonempty():
     factories = (
         basis_label_count_config,

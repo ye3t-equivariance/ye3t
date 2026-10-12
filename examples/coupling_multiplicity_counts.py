@@ -1,44 +1,54 @@
-"""Inspect compiler-valid multiplicities for one fixed-content ACE sector."""
+"""Count independent scalar ACE couplings across ranks 1–8.
+
+Edit the complete input contents and angular degrees below. Each case retains
+every independent coupling for its selected parent. Rank two includes two
+different angular contents; higher-rank cases include multiple coupling paths.
+Requires the installed ye3t package and its numerical dependencies.
+"""
 
 from ye3t import YE3TRepresentation
+from ye3t.workflows import count_coupling_cases
 
 
 cfg_ye3t = {
-    "metadata": {"schema": "ye3t_config_v1",
-                 "name": "fixed_content_count", "status": "stable",
-                 "label_preview": 2},
+    "metadata": {"schema": "ye3t_config_v1", "name": "coupling_multiplicity_counts", "status": "stable"},
     "representation": {
-        "group": "O3", "ranks": [4],
+        "group": "O3", "ranks": [1, 2, 3, 4, 5, 6, 7, 8],
         "parent": {"young_lambda": "(N)", "L": 0, "parity": "even"},
         "factorization": "cauchy", "subspace": "full",
         "uncoupled_factor_inputs": {
-            "eta_count_per_rank": {4: 2}, "l_max_per_rank": {4: 2},
+            "eta_count_per_rank": {1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8},
+            "l_max_per_rank": {1: 2, 2: 2, 3: 2, 4: 2, 5: 2, 6: 2, 7: 2, 8: 2},
         },
         "intermediates": {
             "young_kappa": "all_valid", "block_rotation": {"policy": "all_valid"},
         },
     },
     "basis": {
-        "fixed_content": [1, 1, 2, 2],
-        "input_Ls": [1, 1, 2, 2],
         "carrier": "ACE_density",
+        "cases_by_rank": {
+            1: [{"content": [1], "input_Ls": [0]},
+                {"content": [2], "input_Ls": [0]}],
+            2: [{"content": [1, 2], "input_Ls": [1, 1]},
+                {"content": [1, 2], "input_Ls": [2, 2]}],
+            3: [{"content": [1, 2, 3], "input_Ls": [1, 1, 2]}],
+            4: [{"content": [1, 2, 3, 4], "input_Ls": [1, 1, 2, 2]},
+                {"content": [1, 1, 2, 2], "input_Ls": [1, 1, 2, 2]}],
+            5: [{"content": [1, 2, 3, 4, 5], "input_Ls": [1, 1, 1, 1, 2]}],
+            6: [{"content": [1, 2, 3, 4, 5, 6], "input_Ls": [1, 1, 1, 1, 1, 1]}],
+            7: [{"content": [1, 2, 3, 4, 5, 6, 7], "input_Ls": [1, 1, 1, 1, 1, 1, 2]}],
+            8: [{"content": [1, 2, 3, 4, 5, 6, 7, 8], "input_Ls": [1, 1, 1, 1, 1, 1, 1, 1]}],
+        },
     },
-    "runtime": {}, "model": {}, "targets": {}, "validation": {},
+    "runtime": {"count_only": True},
+    "model": {}, "targets": {},
+    "validation": {"checks": ["exact_counts"]},
 }
 
+
 representation = YE3TRepresentation.from_config(cfg_ye3t["representation"])
-report = representation.count_fixed_content(
-    cfg_ye3t["basis"]["fixed_content"], cfg_ye3t["basis"]["input_Ls"],
-    carrier=cfg_ye3t["basis"]["carrier"],
-)
-labels = report.labels_for_target(representation.L)
+cases = count_coupling_cases(representation, cfg_ye3t["basis"])
+print("multiplicity counts (rank, case):",
+      {key: case["multiplicity_count"] for key, case in cases.items()})
 print("coupling count source: ye3t.couplings.count")
-print("representation:", representation)
-print("content:", tuple(report.content))
-print("carrier:", report.carrier)
-print("target:", report.target)
-print("counts by target:", dict(report.counts_by_target))
-print("total labels for target:", len(labels))
-print("validation passed:", bool(report.validation_report.get("passed", False)))
-for index, label in enumerate(labels[:cfg_ye3t["metadata"]["label_preview"]]):
-    print("label", index, label)
+print("rank-eight labels:", cases[8, 0]["report"].labels_for_target(0)[:3])

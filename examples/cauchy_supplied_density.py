@@ -1,64 +1,75 @@
-"""Count and apply a Cauchy coupling to user-supplied role densities.
+"""Evaluate Cauchy role-density multiplets across ranks 2–8.
 
-The two rows of ``basis.role_density`` are separate role channels of one
-complete l=1 multiplet. This rank-two example selects the nontrivial local
-Young path kappa=(1,1), whose angular output is an L=1 axial vector. The
-global parent remains permutation invariant. Replace these rows with your
-own role-resolved density values in YE3T's real tesseral order:
-cosine components l,...,1, then m=0, then sine components 1,...,l.
+The inputs have two role channels and complete real tesseral multiplets.
+All valid local Young paths are retained for each content. SO(3) allows both
+parities in the rank catalogue; each count report records the natural O(3)
+parity. Edit the input channels, role densities, and parent.L together.
+Vector triples combine with scalar-density powers at ranks four through eight;
+the second rank-two case uses quadrupole inputs.
+Requires NumPy, SymPy, and PyTorch. This is an experimental supplied-density workflow.
 """
 
-import numpy as np
-
-from ye3t import couplings
+from ye3t import YE3TRepresentation
+from ye3t.workflows import count_coupling_cases, compile_coupling_cases, evaluate_coupling_cases
 
 
 cfg_ye3t = {
-    "metadata": {
-        "schema": "ye3t_config_v1", "name": "cauchy_supplied_density",
-        "status": "experimental",
-    },
+    "metadata": {"schema": "ye3t_config_v1", "name": "cauchy_supplied_density", "status": "experimental"},
     "representation": {
-        "group": "O3", "ranks": [2],
-        "parent": {"young_lambda": "(N)", "L": 1, "parity": "even"},
+        "group": "SO3", "ranks": [2, 3, 4, 5, 6, 7, 8],
+        "parent": {"young_lambda": "(N)", "L": 1, "parity": None},
         "factorization": "cauchy", "subspace": "full",
-        "intermediates": {"young_kappa": "all"},
+        "uncoupled_factor_inputs": {
+            "eta_count_per_rank": {2: 2, 3: 2, 4: 2, 5: 2, 6: 2, 7: 2, 8: 2},
+            "l_max_per_rank": {2: 2, 3: 2, 4: 2, 5: 2, 6: 2, 7: 2, 8: 2},
+        },
+        "intermediates": {
+            "young_kappa": "all_valid", "block_rotation": {"policy": "all_valid"},
+        },
     },
     "basis": {
-        "tensor_product": {"kind": "role_density", "role_dimension": 2},
-        "channel": {
-            "neighbor_species": "X", "radial_channel": 0, "l": 1,
-            "source_family_id": "user_supplied",
+        "carrier": "A_s", "role_dimension": 2, "role_kappa_policy": "all",
+        "channels": [
+            {"neighbor_species": "X", "radial_channel": 0, "l": 1,
+             "source_family_id": "user_supplied"},
+            {"neighbor_species": "X", "radial_channel": 1, "l": 0,
+             "source_family_id": "user_supplied"},
+            {"neighbor_species": "X", "radial_channel": 0, "l": 2,
+             "source_family_id": "user_supplied"},
+        ],
+        "cases_by_rank": {
+            2: [{"channel_indices": [0], "block_sizes": [2]},
+                {"channel_indices": [2], "block_sizes": [2]}],
+            3: [{"channel_indices": [0], "block_sizes": [3]}],
+            4: [{"channel_indices": [0, 1], "block_sizes": [3, 1]}],
+            5: [{"channel_indices": [0, 1], "block_sizes": [3, 2]}],
+            6: [{"channel_indices": [0, 1], "block_sizes": [3, 3]}],
+            7: [{"channel_indices": [0, 1], "block_sizes": [3, 4]}],
+            8: [{"channel_indices": [0, 1], "block_sizes": [3, 5]}],
         },
-        "block_size": 2,
-        "role_density": [[0.2, 0.5, -0.3], [-0.7, 0.1, 0.4]],
+        # Tesseral order: cosine l,...,1, then m=0, then sine 1,...,l.
+        "role_densities": {
+            0: [[0.2, 0.5, -0.3], [-0.7, 0.1, 0.4]],
+            1: [[0.6], [-0.4]],
+            2: [[0.2, 0.4, -0.1, 0.6, -0.3], [0.7, -0.2, 0.5, -0.4, 0.1]],
+        },
     },
-    "runtime": {"dtype": "float64"},
+    "runtime": {"dtype": "float64", "device": "cpu"},
     "model": {}, "targets": {},
-    "validation": {"checks": ["coefficient_certificate", "finite_values"]},
+    "validation": {"checks": ["exact_count", "finite_values"]},
 }
 
 
-request = couplings.covariant_cauchy_request(
-    (cfg_ye3t["basis"]["channel"],),
-    (cfg_ye3t["basis"]["block_size"],),
-    target_L=cfg_ye3t["representation"]["parent"]["L"],
-    target_parity=1 if cfg_ye3t["representation"]["parent"]["parity"] == "even" else -1,
-    role_dimension=cfg_ye3t["basis"]["tensor_product"]["role_dimension"],
-    kappa_policy=cfg_ye3t["representation"]["intermediates"]["young_kappa"],
+representation = YE3TRepresentation.from_config(cfg_ye3t["representation"])
+cases = count_coupling_cases(representation, cfg_ye3t["basis"])
+print("multiplicity counts (rank, case):",
+      {key: case["multiplicity_count"] for key, case in cases.items()})
+compiled_cases = compile_coupling_cases(cases)
+values = evaluate_coupling_cases(
+    compiled_cases, cfg_ye3t["basis"]["role_densities"],
+    dtype=cfg_ye3t["runtime"]["dtype"], device=cfg_ye3t["runtime"]["device"],
 )
-count = couplings.count(request)
-compiled = couplings.compile(request)
-role_density = np.asarray(
-    cfg_ye3t["basis"]["role_density"], dtype=cfg_ye3t["runtime"]["dtype"]
-)
-values, _ = couplings.evaluate_covariant_cauchy(compiled, {0: role_density})
-
-assert compiled["validation_report"]["passed"]
-assert np.isfinite(values).all()
-assert all(label["block_kappas"] == ((1, 1),) for label in count["labels"])
-
-print("Cauchy count", count["multiplet_count"])
-print("local Young path", count["labels"][0]["block_kappas"])
-print("output shape", values.shape)
-print("compiled coefficients valid", compiled["validation_report"]["passed"])
+print("Cauchy output shapes (a, M):", {key: value.shape for key, value in values.items()})
+print("rank-eight local Young paths:",
+      sorted({label["block_kappas"] for label in cases[8, 0]["report"]["labels"]}))
+print("rank-eight first three multiplets:", values[8, 0][:3])

@@ -7,9 +7,8 @@ focused on workflow composition while exposing the same durable building blocks
 to users.
 
 ``ye3t.workflows``
-   Recursive config merging, runtime-irrep builders, reusable construction
-   helpers for joint Young/``SO(3)`` products, and utility defaults used by
-   tests.
+   Rank-indexed counting, compilation, and evaluation of configured tensor
+   contents, plus runtime-irrep builders and joint Young/``SO(3)`` products.
 
 ``ye3t.utils.printing``
    Stable summaries for basis labels, exact sector enumeration, primitive
@@ -24,9 +23,58 @@ to users.
    schedules and render their actual instructions, segments, dimensions,
    supports, and materialization decisions.
 
-Example modules expose a visible editable ``cfg_ye3t`` dictionary plus one
-purpose-named ``run_*`` function. Presentation logic comes from
-``ye3t.utils``.
+Example modules expose a visible editable ``cfg_ye3t`` dictionary. Core
+examples construct public objects and call their operations directly.
+Specialized catalogues and benchmarks use a purpose-named ``run_*`` function.
+
+Coupling Several Ranks
+----------------------
+
+The core examples use this sequence:
+
+.. code-block:: python
+
+   from ye3t import YE3TRepresentation
+   from ye3t.workflows import (
+       count_coupling_cases, compile_coupling_cases, evaluate_coupling_cases,
+   )
+
+   representation = YE3TRepresentation.from_config(cfg_ye3t["representation"])
+   cases = count_coupling_cases(representation, cfg_ye3t["basis"])
+   compiled_cases = compile_coupling_cases(cases)
+   values = evaluate_coupling_cases(
+       compiled_cases, cfg_ye3t["basis"]["multiplets"],
+       dtype=cfg_ye3t["runtime"]["dtype"], device=cfg_ye3t["runtime"]["device"],
+   )
+
+``basis.cases_by_rank`` maps every selected rank to a list of fixed contents.
+For ``ACE_density`` and ``external_tensor``, each entry supplies ``content``
+and ``input_Ls``. Cauchy entries supply ``channel_indices`` into
+``basis.channels`` and matching ``block_sizes``; ``role_dimension`` and
+``role_kappa_policy`` belong in ``basis``. Counts, compiled objects, and
+values are keyed by ``(rank, case_index)``. Zero-dimensional sectors remain
+visible in the count result and raise an error if selected for compilation.
+
+For ordinary density or external factors with parent ``(N)``,
+``representation.intermediates.young_kappa="symmetric_only"`` explicitly
+selects symmetric repeated-content blocks. Restricting the trivial parent
+to those subgroups already gives only trivial Young types, so this setting
+preserves the full multiplicity space. Role-resolved Cauchy carriers have
+additional role representations and retain their separate intermediate policy.
+
+For density inputs, ``multiplets[l][..., n-1, :]`` supplies channel ``(n,l)``.
+For external inputs, ``multiplets[l][..., f, :]`` supplies factor ``f``.
+The index ``f`` is its position in the complete ordered factor sequence,
+including when different positions have different angular momenta.
+Both use complete complex magnetic multiplets in ``m=-l,...,l`` order.
+Ordered Cauchy inputs add a role axis: ``(..., factor, role, magnetic)``.
+Their outputs preserve ``(..., a, t, M)``. Ordinary density outputs use
+``(..., a, M)``. Torch evaluation preserves batch axes and derivatives.
+
+The ``A_s`` Cauchy example supplies ``basis.role_densities`` as the second
+evaluation argument: a mapping from configured channel index to a real
+tesseral ``(role, magnetic)`` array. This evaluator uses CPU float64.
+See :doc:`basic_examples` for complete configurations and expected counts.
 
 Config Dictionary Conventions
 -----------------------------
@@ -35,7 +83,8 @@ The public examples keep user-editable knobs in the module-level
 ``cfg_ye3t`` dictionary. This is intentionally similar to the source comments
 in the example files:
 
-- ``cases`` is the usual list of sectors or diagnostic cases.
+- ``cases_by_rank`` contains the core fixed-content coupling requests.
+- ``cases`` is used for specialized catalogues or diagnostic cases.
 - ``name`` is only for printed output.
 - ``rank`` is the feature/product rank ``N``.
 - ``nin`` and ``lin`` define a concrete sector and must have matching length.
@@ -51,4 +100,4 @@ in the example files:
 
 Utility functions may still provide reusable defaults for tests and advanced
 users, but the examples are meant to be readable recipes: edit ``cfg_ye3t``,
-then call the single ``run_*`` workflow or run the file directly.
+then run the file directly or call its public construction and evaluation steps.

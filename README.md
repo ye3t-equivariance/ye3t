@@ -201,12 +201,13 @@ examples read top-to-bottom through `YE3TRepresentation.from_config(...)`,
 full.
 
 - `coupling_multiplicity_counts.py`: use the public representation object to
-  count valid fixed-content coupling labels through `ye3t.couplings.count`.
+  count valid fixed-content coupling labels across ranks 1–8 through
+  `ye3t.couplings.count`.
 - `coupling_coefficient_materialization.py`: plan and compile coupling
   coefficients through `ye3t.couplings.plan` and
   `ye3t.couplings.compile_ace_factorized_schedules_by_L`.
 - `symmetric_count_formula.py`: compare the symmetric GE-PI count formula
-  with all-output-`L` YE3T compiler counts for one fixed content.
+  with all-output-`L` YE3T compiler counts for each configured rank 1–8 content.
 - `symmetric_density_factors.py`: apply a symmetric scalar coupler to supplied
   density multiplets, independent of their radial basis.
 - `user_supplied_factors.py`: couple supplied ordered tensor factors in a
@@ -215,14 +216,15 @@ full.
 - `symmetric_external_factors.py` and `antisymmetric_external_factors.py`:
   evaluate arbitrary-`L` one-dimensional Young sectors using repeated-block
   occupation and exterior contractions.
-- `cauchy_supplied_density.py`: compile and apply a nontrivial local Cauchy
-  path to role-resolved densities.
+- `cauchy_supplied_density.py`: compile and apply every local Cauchy path
+  for configured role-resolved densities across ranks 2–8.
 - `ordered_role_cauchy_factors.py`: compile and evaluate every role-resolved
   Cauchy coordinate with a nontrivial global Young parent.
 - `tagged_cauchy_linear_coordinates.py`: compile the scalar tagged-Cauchy
   physical coordinates matched to the `ye3t-methods` rank-four linear fit.
-- `compile_scalar_ace_lammps_plans.py`: compile scalar ACE coordinates and
-  execution plans for `ye3t-lammps`.
+- `compile_scalar_ace_lammps_plans.py`: export all 20 scalar ACE coordinates
+  in the selected rank 1–8 contents, plus a rank-16 coordinate, as execution
+  plans for model binding in `ye3t-methods` and use in `ye3t-lammps`.
 - `exact_full_primitive_catalog.py`: compare exact Young/rotation primitive
   quotients at ranks 4, 6, and 16 through a saved `YE3TFixedContentBasis`
   object. It prints representation and basis summaries, plus a compact
@@ -230,9 +232,10 @@ full.
   object.
 - `symbolic_young_partition_catalogue.py`: expand symbolic Young partition
   templates by rank and count the valid O(3) sectors.
-- `tagged_cauchy_image_catalogue.py`: build the shifted-Jacobi source
-  product algebra for a chosen source set and count, plan, and optionally
-  compile the tagged-Cauchy physical image.
+- `tagged_cauchy_image_catalogue.py`: count and plan a shifted-Jacobi tagged
+  catalogue across ranks 1–8, with optional exact physical-image compilation.
+- `extras/tagged_cauchy_rank4_product_algebra.py`: inspect the specialized
+  rank-four source-product algebra and its exact dimension formula.
 
 `examples/benchmarks/` holds bounded timing and validation benchmarks for
 permutation subduction, coefficient materialization, primitive caches, and

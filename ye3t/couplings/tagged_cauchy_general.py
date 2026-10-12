@@ -141,22 +141,37 @@ def _divide_exact(left, right):
         # General algebraic pivots can contain more than one independent root.
         # This is exact field division, never floating rank selection.
         import sympy as sp
-        return exact_scalar(sp.cancel(left._sympy_() / right._sympy_()))
+        # SymPy's radsimp rationalizes numeric radical denominators; cancel
+        # alone can leave an inverse of a sum that ExactRadical cannot parse.
+        # https://docs.sympy.org/latest/modules/simplify/simplify.html#sympy.simplify.radsimp.radsimp
+        expression = sp.radsimp(left._sympy_() / right._sympy_(),
+                                symbolic=False, max_terms=len(right.terms))
+        quotient = exact_scalar(sp.expand(expression))
+        if quotient * right != left:
+            raise ArithmeticError("Exact radical pivot division failed.")
+        return quotient
 
 
-def _exact_pivot_image(raw_rows):
-    """Select original rows by sparse exact elimination and certify their span.
+class _ExactImagePivots:
+    """Append physical rows while preserving exact elimination witnesses.
 
-    Echelon rows are internal witnesses only. Returned feature rows remain the
-    original nonorthogonal compiler coordinates. No inner product is used.
+    Each new row is reduced once against earlier pivots. Feature rows remain
+    the original compiler coordinates, with the same first-independent-row
+    ordering as batch elimination. Reconstruction is checked on every append.
+    This state belongs to one compilation; it is never shared across requests.
     """
-    echelon = {}
-    selected = []
-    reconstructions = []
-    for raw_index, raw in enumerate(raw_rows):
-        remainder = {key: exact_scalar(value) for key, value in raw.items() if value}
+
+    def __init__(self):
+        self.echelon = {}
+        self.selected = []
+        self.reconstructions = []
+        self.feature_rows = []
+
+    def append(self, raw):
+        original = {key: exact_scalar(value) for key, value in raw.items() if value}
+        remainder = dict(original)
         reconstruction = {}
-        for pivot, (row, row_coordinates) in echelon.items():
+        for pivot, (row, row_coordinates) in self.echelon.items():
             if pivot not in remainder:
                 continue
             factor = remainder[pivot]
@@ -165,8 +180,9 @@ def _exact_pivot_image(raw_rows):
             for key, value in row_coordinates.items():
                 _add_exact(reconstruction, key, factor * value)
         if remainder:
-            feature_index = len(selected)
-            selected.append(raw_index)
+            feature_index = len(self.selected)
+            self.selected.append(len(self.reconstructions))
+            self.feature_rows.append(original)
             pivot = min(remainder)
             scale = remainder[pivot]
             row_coordinates = {
@@ -174,20 +190,26 @@ def _exact_pivot_image(raw_rows):
                 for key, value in reconstruction.items()
             }
             row_coordinates[feature_index] = _divide_exact(ExactRadical.rational(1), scale)
-            echelon[pivot] = (
+            self.echelon[pivot] = (
                 {key: _divide_exact(value, scale) for key, value in remainder.items()},
                 row_coordinates,
             )
             reconstruction = {feature_index: ExactRadical.rational(1)}
-        reconstructions.append(reconstruction)
-    for raw, coordinates in zip(raw_rows, reconstructions, strict=True):
-        difference = {key: exact_scalar(value) for key, value in raw.items() if value}
-        for feature_index, coefficient in coordinates.items():
-            for key, value in raw_rows[selected[feature_index]].items():
+        difference = dict(original)
+        for feature_index, coefficient in reconstruction.items():
+            for key, value in self.feature_rows[feature_index].items():
                 _add_exact(difference, key, -coefficient * value)
         if difference:
             raise RuntimeError("Exact physical-image reconstruction failed.")
-    return tuple(selected), tuple(reconstructions)
+        self.reconstructions.append(reconstruction)
+
+
+def _exact_pivot_image(raw_rows):
+    """Return original independent rows and their exact reconstruction map."""
+    image = _ExactImagePivots()
+    for row in raw_rows:
+        image.append(row)
+    return tuple(image.selected), tuple(image.reconstructions)
 
 
 def _physical_image_rows(compiled, role_bindings):
@@ -433,7 +455,9 @@ def _general_compile(plan):
     from ye3t.couplings.tagged_cauchy_image import CompiledTaggedCauchyImage
     report = plan.report
     catalogue = report.request["catalogue"]
-    raw_rows, raw_labels, selected = [], [], []
+    raw_rows, raw_labels = [], []
+    image = _ExactImagePivots()
+    selected = image.selected
     parent_artifacts = {}
     available = list(report.labels)
     named = {int(rank): tuple(values) for rank, values in
@@ -485,7 +509,7 @@ def _general_compile(plan):
                 raw_rows.append(rows[0])
                 raw_labels.append({**record, "parent_artifact_hash": compiled.self_hash})
                 parent_artifacts[compiled.self_hash] = compiled.to_dict()
-                selected, reconstruction = _exact_pivot_image(raw_rows)
+                image.append(rows[0])
                 if len(selected)-rank_start >= cap:
                     break
         if rank in named:
@@ -498,7 +522,8 @@ def _general_compile(plan):
         logging.getLogger(__name__).info("Tensor order %s retained %s exact physical pivots", rank, len(selected)-rank_start)
     if not selected:
         raise ValueError("The tagged catalogue has no physical coordinates.")
-    payload = _general_payload(raw_rows, raw_labels, selected, reconstruction, parent_artifacts)
+    payload = _general_payload(raw_rows, raw_labels, tuple(selected),
+                               tuple(image.reconstructions), parent_artifacts)
     validation = {"passed": True, "scope": "general_exact_physical_pivots",
                   "exact_image_dimension": len(selected)}
     provenance = {"api": "ye3t.couplings.compile", "coefficient_compiler": "tagged_cauchy_general"}

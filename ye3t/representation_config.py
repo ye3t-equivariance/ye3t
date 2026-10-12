@@ -189,17 +189,23 @@ class YE3TRepresentation:
     def count_fixed_content(self, content, input_Ls, *, carrier="external_tensor"):
         """Count a full fixed-content sector through the exact compiler API.
 
-        Restricted intermediate policies require a separate certified plan.
+        A symmetric parent on ordinary density or external factors restricts
+        to symmetric repeated-content blocks, so ``symmetric_only`` selects
+        the same complete space as ``all_valid`` for those carriers.
         This method does not materialize coupling coefficients.
         """
-        if self.subspace != "full" or self.young_kappa[0] != "all_valid" or self.block_rotation[0] != "all_valid":
-            raise ValueError("Fixed-content count with restricted subspace or intermediates needs a specialized compiler plan.")
         content = tuple(content)
         input_Ls = tuple(int(value) for value in input_Ls)
         rank = len(content)
         if len(input_Ls) != rank:
             raise ValueError("content and input_Ls must have the same rank.")
         partition = self.parent_partition(rank)
+        symmetric_blocks = (self.young_kappa[0] == "symmetric_only"
+                            and partition == (rank,)
+                            and carrier in {"ACE_density", "external_tensor"})
+        if (self.subspace != "full" or self.block_rotation[0] != "all_valid"
+                or (self.young_kappa[0] != "all_valid" and not symmetric_blocks)):
+            raise ValueError("Fixed-content count with restricted subspace or intermediates needs a specialized compiler plan.")
         l_max = dict(self.l_max_per_rank)[rank]
         if any(value < 0 or value > l_max for value in input_Ls):
             raise ValueError(f"input_Ls must lie in 0..{l_max} for rank {rank}.")

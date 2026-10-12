@@ -236,6 +236,255 @@ def build_joint_young_cg_product_from_config(config):
     )
 
 
+def count_coupling_cases(representation, basis):
+    """Count configured fixed-content cases at each selected tensor rank.
+
+    ``basis.cases_by_rank`` maps each rank to a sequence of input contents.
+    Ordinary and external cases contain ``content`` and ``input_Ls``. Cauchy
+    cases contain ``channel_indices`` and ``block_sizes`` into ``channels``.
+    Results are keyed by ``(rank, case_index)`` and retain the public compiler
+    report and request. Every label comes from ``ye3t.couplings.count``.
+    No coefficients are constructed by this operation.
+    """
+    from ye3t import couplings
+    from ye3t.representation_config import _integer_key_map
+
+    selected = _integer_key_map(basis["cases_by_rank"], "basis.cases_by_rank")
+    if set(selected) != set(representation.ranks):
+        raise ValueError("cases_by_rank must cover exactly representation.ranks.")
+    carrier = basis["carrier"]
+    symmetric_blocks = (representation.young_kappa[0] == "symmetric_only"
+                        and carrier in {"ACE_density", "external_tensor"}
+                        and all(representation.parent_partition(rank) == (rank,)
+                                for rank in representation.ranks))
+    if (representation.subspace != "full"
+            or (representation.young_kappa[0] != "all_valid" and not symmetric_blocks)
+            or representation.block_rotation[0] != "all_valid"):
+        raise ValueError("Coupling cases require the full space and all valid intermediates.")
+    if carrier not in {"ACE_density", "external_tensor", "A_s", "ordered_role"}:
+        raise ValueError("Unsupported coupling-case carrier: " + str(carrier))
+    result = {}
+    for rank in representation.ranks:
+        if not selected[rank]:
+            raise ValueError("Each selected rank needs at least one input case.")
+        for index, case in enumerate(selected[rank]):
+            if carrier in {"ACE_density", "external_tensor"}:
+                content, angular = tuple(case["content"]), tuple(case["input_Ls"])
+                if len(content) != rank or len(angular) != rank:
+                    raise ValueError("Case content and input_Ls must match its rank key.")
+                report = representation.count_fixed_content(content, angular, carrier=carrier)
+                request = report.spec
+                count = report.counts_by_target[representation.L]
+            else:
+                indices = tuple(case["channel_indices"])
+                if (len(set(indices)) != len(indices)
+                        or any(not isinstance(i, int) or i < 0 or i >= len(basis["channels"])
+                               for i in indices)):
+                    raise ValueError("channel_indices must select distinct configured channels.")
+                channels = tuple(basis["channels"][i] for i in indices)
+                sizes = tuple(case["block_sizes"])
+                if sum(sizes) != rank:
+                    raise ValueError("Cauchy block_sizes must sum to the rank key.")
+                if any(channel["l"] > dict(representation.l_max_per_rank)[rank]
+                       for channel in channels):
+                    raise ValueError("Cauchy channel exceeds the configured angular cap.")
+                parent = representation.parent_partition(rank)
+                request = couplings.covariant_cauchy_request(
+                    channels, sizes, target_L=representation.L,
+                    target_parity=(None if representation.group == "SO3" else
+                                   1 if representation.parity == "even" else -1),
+                    target_permutation="young:" + ",".join(map(str, parent)),
+                    role_dimension=basis["role_dimension"],
+                    kappa_policy=basis.get("role_kappa_policy", "all"),
+                    carrier=carrier,
+                )
+                report = couplings.count(request)
+                count = report["multiplet_count"]
+            result[rank, index] = {
+                "rank": rank, "case_index": index, "carrier": carrier,
+                "inputs": dict(case), "request": request, "report": report,
+                "target_L": representation.L, "multiplicity_count": int(count),
+            }
+    return result
+
+
+def compare_symmetric_count_formulas(cases):
+    """Compare every ACE case against the independent GE-PI count formula.
+
+    Compare all allowed angular outputs, then check the selected scalar or
+    covariant count. Return the complete formula counts for inspection.
+    """
+    from ye3t import couplings, dusson_barthelemy_trivial_sector_counts
+
+    result = {}
+    for key, case in cases.items():
+        if case["carrier"] != "ACE_density":
+            raise ValueError("The symmetric count formula requires ACE_density.")
+        content = case["inputs"]["content"]
+        angular = case["inputs"]["input_Ls"]
+        formula = dusson_barthelemy_trivial_sector_counts(content, angular)
+        records = couplings.sector_records(tuple(content), tuple(angular), "O3")
+        symmetric = [record for record in records
+                     if record["permutation_representation"] == "trivial"]
+        if len(symmetric) != 1:
+            raise ArithmeticError("Expected one globally symmetric sector.")
+        exact = {int(ell): count for ell, count in symmetric[0]["counts_by_L"].items()}
+        if formula != exact or exact.get(case["target_L"], 0) != case["multiplicity_count"]:
+            raise ArithmeticError(f"Symmetric count formulas disagree for case {key}.")
+        result[key] = formula
+    return result
+
+
+def compile_coupling_cases(cases, *, constructor_backend="auto",
+                           subduction_backend="exact"):
+    """Compile every configured case through its production factorized path.
+
+    ACE cases use block-adapted schedules. External and ordered-role cases
+    keep their complete factorized Young/rotation maps. Role densities use
+    the Cauchy compiler. Zero-dimensional requests remain visible in counts
+    and are rejected here so an example cannot silently omit a selected case.
+    """
+    from ye3t import couplings
+
+    result = {}
+    for key, case in cases.items():
+        if case["multiplicity_count"] == 0:
+            raise ValueError(f"Coupling case {key} has zero multiplicity.")
+        item = dict(case)
+        report = case["report"]
+        item["plan"] = couplings.plan(report)
+        if case["carrier"] == "ACE_density":
+            compiled = couplings.compile_ace_factorized_schedules_by_L(
+                content=report.content, input_Ls=case["inputs"]["input_Ls"],
+                constructor_backend=constructor_backend,
+            )
+            schedule = compiled.schedules_by_L[case["target_L"]]
+            if schedule.basis_count != case["multiplicity_count"]:
+                raise ArithmeticError("ACE schedule size disagrees with the exact count.")
+            block_plans = {}
+            for blocks in schedule.block_specs:
+                for block in blocks:
+                    if block["kind"] != "sym":
+                        continue
+                    block_key = (block["n"], block["l"], block["k_b"],
+                                 block["Lambda"], block["multiplicity_index"])
+                    if block_key in block_plans:
+                        continue
+                    ell, output_L = block["l"], block["Lambda"]
+                    block_plans[block_key] = couplings.symmetric_power_product_plan(
+                        [{"descriptor_index": m, "power": block["k_b"],
+                          "input_L": ell, "output_L": output_L,
+                          "multiplicity_index": block["multiplicity_index"],
+                          "component_index": m, "channel_indices": tuple(range(2 * ell + 1))}
+                         for m in range(2 * output_L + 1)],
+                        descriptor_count=2 * output_L + 1, channel_count=2 * ell + 1,
+                        basis_convention="complex_magnetic",
+                    )
+            item["block_plans"] = block_plans
+        else:
+            compiled = couplings.compile(
+                item["plan"],
+                subduction_materialization_backend=subduction_backend,
+            )
+            if case["carrier"] == "external_tensor":
+                if compiled.coupler.sparse_coefficient_tables:
+                    raise ValueError("External factor examples require the factorized evaluator.")
+                item["execution_plan"] = couplings.execution_plan_from_compiled_coupler(compiled)
+            elif case["carrier"] == "ordered_role":
+                item["execution_plan"] = couplings.lower_ordered_role_cauchy_execution_plan(compiled)
+        item["compiled"] = compiled
+        result[key] = item
+    return result
+
+
+def evaluate_coupling_cases(cases, multiplets, *, dtype="complex128", device="cpu",
+                            backend="auto"):
+    """Apply compiled cases to supplied multiplets and preserve their rank keys.
+
+    For ACE density, ``multiplets[l][..., n-1, :]`` supplies channel ``(n,l)``.
+    For external factors, ``multiplets[l][..., f, :]`` supplies factor ``f``.
+    Ordered Cauchy factors add a role axis before the magnetic axis. Role
+    density inputs instead map each configured channel index to its role by
+    magnetic array. External outputs retain all ``(...,a,t,M)`` components;
+    density outputs have ``(...,a,M)``. Torch paths preserve autograd.
+    """
+    import numpy as np
+    import torch
+    from ye3t import couplings
+    from ye3t.runtime.symmetric_power import symmetric_power_product_plan_contraction
+
+    result = {}
+    torch_dtype = getattr(torch, dtype)
+    for key, case in cases.items():
+        compiled = case["compiled"]
+        carrier = case["carrier"]
+        if carrier == "A_s":
+            if str(device) != "cpu":
+                raise ValueError("Role-density Cauchy evaluation currently requires CPU.")
+            if dtype != "float64":
+                raise ValueError("Role-density Cauchy evaluation requires real float64 multiplets.")
+            channels = case["inputs"]["channel_indices"]
+            if any(np.iscomplexobj(multiplets[channel]) for channel in channels):
+                raise ValueError("Role-density inputs must use real tesseral coordinates.")
+            values, _ = couplings.evaluate_covariant_cauchy(
+                compiled, {i: np.asarray(multiplets[channel], dtype=np.float64)
+                           for i, channel in enumerate(channels)},
+            )
+        elif carrier == "ordered_role":
+            channels = case["request"]["channels"]
+            angular = tuple(channel["l"] for channel, size in zip(
+                channels, case["request"]["block_sizes"], strict=True) for _ in range(size))
+            factors = tuple(torch.as_tensor(multiplets[ell], dtype=torch_dtype, device=device)
+                            [..., f, :, :] for f, ell in enumerate(angular))
+            runtime = couplings.bind_ordered_role_execution_plan_torch(
+                case["execution_plan"], dtype=torch_dtype, device=device,
+                basis="complex_condon_shortley",
+            )
+            values, _ = runtime.evaluate(factors)
+        elif carrier == "external_tensor":
+            factors = tuple(torch.as_tensor(multiplets[ell], dtype=torch_dtype, device=device)
+                            [..., f, :] for f, ell in enumerate(case["inputs"]["input_Ls"]))
+            runtime = couplings.bind_typed_factorized_execution_plan_torch(
+                case["execution_plan"], dtype=torch_dtype, device=device,
+            )
+            values = runtime.evaluate(factors)
+        else:
+            schedule = compiled.schedules_by_L[case["target_L"]]
+            magnetic_width = 2 * int(schedule.block_L_by_label().max()) + 1
+            rows, prepared = [], {}
+            for blocks in schedule.block_specs:
+                row = []
+                for block in blocks:
+                    block_key = (block["n"], block["l"], block.get("k_b"),
+                                 block.get("Lambda"), block.get("multiplicity_index"))
+                    if block_key not in prepared:
+                        source = torch.as_tensor(multiplets[block["l"]],
+                                                 dtype=torch_dtype, device=device)[..., block["n"] - 1, :]
+                        if source.shape[-1] != 2 * block["l"] + 1:
+                            raise ValueError("Each density input needs a complete 2*l+1 multiplet.")
+                        if block["kind"] == "sym":
+                            source = symmetric_power_product_plan_contraction(
+                                source, case["block_plans"][block_key], backend=backend)
+                        prepared[block_key] = torch.nn.functional.pad(
+                            source, (0, magnetic_width - source.shape[-1]))
+                    row.append(prepared[block_key])
+                rows.append(torch.stack(row, dim=-2))
+            blocks = torch.stack(rows, dim=-3)
+            batch_shape = blocks.shape[:-3]
+            values = compiled.evaluate(
+                blocks.reshape(-1, *blocks.shape[-3:]), target_L=case["target_L"], backend=backend,
+            ).reshape(*batch_shape, case["multiplicity_count"], 2 * case["target_L"] + 1)
+        multiplicity_axis = -3 if carrier in {"external_tensor", "ordered_role"} else -2
+        if (values.shape[multiplicity_axis] != case["multiplicity_count"]
+                or values.shape[-1] != 2 * case["target_L"] + 1):
+            raise ArithmeticError(f"Output size disagrees with the exact count for case {key}.")
+        finite = torch.isfinite(values).all() if isinstance(values, torch.Tensor) else np.isfinite(values).all()
+        if not bool(finite):
+            raise ArithmeticError(f"Nonfinite coupled values for case {key}.")
+        result[key] = values
+    return result
+
+
 __all__ = [
     "basis_label_count_config",
     "basis_sector_enumeration_config",
@@ -244,4 +493,8 @@ __all__ = [
     "merge_workflow_config",
     "primitive_catalog_config",
     "symmetric_power_kernel_config",
+    "count_coupling_cases",
+    "compile_coupling_cases",
+    "evaluate_coupling_cases",
+    "compare_symmetric_count_formulas",
 ]

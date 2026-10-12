@@ -6835,7 +6835,11 @@ class YE3TExecutionPlan:
                             )
                             or not isinstance(record.get("angular_key"), str)
                             or not str(record.get("angular_key", ""))
-                            or not tuple(record.get("internal_Ls", ()))
+                            # A rank-one coupling tree is a leaf; its canonical
+                            # label has no internal angular-momentum entries.
+                            or "internal_Ls" not in record
+                            or bool(tuple(record["internal_Ls"]))
+                            != (int(instruction.output_carrier.rank) > 1)
                         ):
                             raise ValueError(
                                 "factorized hierarchical compiler-label provenance is inconsistent"

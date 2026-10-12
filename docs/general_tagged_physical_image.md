@@ -20,9 +20,43 @@ Density contexts remain inclusive.
 
 Sparse moment polynomials are reduced by exact pivots. Survivors remain original
 compiler coordinates. Every discarded attempted row has an exact reconstruction.
-Selection in ascending tensor order eliminates cross-rank dependencies. Named
-coordinates must survive that policy. Feature caps bound the selected subspace
+The compiler processes each candidate once, retaining its sparse echelon rows
+and reconstruction coefficients for the next candidate. All arithmetic and
+zero decisions are exact. Named coordinates must survive that selection.
+Feature caps bound the selected subspace
 and do not assert the complete uncapped mathematical image dimension.
+
+## Multiplicity coordinates and physical source functions
+
+The [YE3T paper, Eqs. (9)–(12)](https://arxiv.org/html/2609.31895#S2.SS3)
+constructs independent multiplicity coordinates at fixed tensor rank and
+channel content. This count belongs to the abstract representation carrier.
+The tagged source subsequently assigns physical neighbor factors to its roles
+and sums distinct tag occurrences. Write this linear map as
+`T_N : H_N -> F`, where `H_N` is the selected rank-N Cauchy coordinate space
+and `F` is the space of physical moment polynomials. Its independent physical
+feature count is `dim T_N(H_N)`. Role identification and tag summation can give
+`T_N` a kernel.
+
+For example, exchanging two summed tag names gives the exact identity
+`sum_(j!=k) f(j)^2 g(k) = sum_(j!=k) g(j) f(k)^2`.
+The two assignments can correspond to different abstract role coordinates
+before the tag sum. This equality concerns the physical source realization;
+the fixed-content representation multiplicities remain the compiler's exact
+counts. The physical-image compiler accounts for these identities internally.
+
+The rank 1–8 example contains 551 formal Cauchy coordinates, of which 370
+satisfy its tag-support selection. Their physical image has 155 independent
+coordinates, with counts `1,1,3,14,15,26,39,56` by rank. Separate-rank and
+joint compilation select exactly the same coordinates in this example,
+including the 14 rank-four fitting coordinates. Regression tests check this
+equality and the exact reconstruction; running those checks is a developer
+responsibility.
+
+The serialized source-image policy compares rows across the configured ranks
+in a common moment algebra. This policy is specific to physical-function
+independence. Abstract representation spaces retain their separate rank
+grading and fixed-content multiplicities.
 
 Physical independence follows because the finite one-body species/Jacobi/Racah
 functions are linearly independent: choose `d` points with invertible evaluation

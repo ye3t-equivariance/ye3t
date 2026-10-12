@@ -4,6 +4,8 @@ This uses the same rank-four, two-tag catalogue as the fitted Ta example in
 ``ye3t-methods/examples/quickstart/tagged_fit.py``. YE3T owns the independent
 coordinate labels and exact physical image; ye3t-methods turns the matched
 catalogue into ASE energy, force, and stress rows for fitting.
+For a rank 1–8 catalogue with optional full coefficient compilation, see
+``tagged_cauchy_image_catalogue.py``.
 """
 
 from ye3t import YE3TRepresentation, couplings

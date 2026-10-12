@@ -3068,6 +3068,29 @@ class JointYoungE3Coupler:
         subduction_payloads = tuple(item.to_dict() for item in self.subduction_maps)
         induction_payloads = tuple(item.to_dict() for item in self.induction_couplers)
         angular_payloads = tuple(item.to_dict() for item in self.angular_maps)
+        # Exact typed compilation stores Young restriction and transport inside
+        # the factorized tables. Separate full-orbit maps are low-rank checks.
+        typed_tables = tuple(table for table in self.factorized_coefficient_tables
+                             if table.get("kind") == "typed_joint_factorized_v1")
+        compact_young_present = bool(
+            typed_tables and self.certificate.passed
+            and self.certificate.checks.get("young_subduction_validated", False)
+            and all(table.get("young_tables") and all(
+                young.get("analytic_character") in {"symmetric", "antisymmetric"}
+                or (young.get("storage") == "identity_coset_plus_sparse_adjacent_generators_v1"
+                    and young.get("transport_validation") == "exact_subgroup_generators_and_reduced_gram"
+                    and young.get("target_partition") and young.get("adjacent_generators")
+                    and young.get("local_tableau_dim", 0) > 0
+                    and young.get("target_tableau_dim", 0) > 0
+                    and young.get("gamma_count", 0) > 0
+                    and ((young.get("restricted_kind") == "matrix_units"
+                          and young.get("restricted_scale", 0) > 0)
+                         or (len(young.get("restricted_values", ())) == young["local_tableau_dim"]
+                             and all(len(row) == young["gamma_count"] * young["target_tableau_dim"]
+                                     for row in young["restricted_values"]))))
+                for young in table["young_tables"])
+                for table in typed_tables)
+        )
         return {
             "label_count": int(len(self.labels)),
             "alpha_label_count": int(len(alpha_labels)),
@@ -3158,6 +3181,7 @@ class JointYoungE3Coupler:
                 self.labels
                 and self.block_maps
                 and ((self.subduction_maps and self.induction_couplers)
+                     or compact_young_present
                      or (self.factorized_coefficient_tables
                          and self.factorized_coefficient_tables[0].get("analytic_young")
                          in {"symmetric", "antisymmetric"}))
@@ -3173,6 +3197,7 @@ class JointYoungE3Coupler:
                     )
                 )
             ),
+            "all_compact_young_maps_present": compact_young_present,
         }
 
     def component_map_sequence(self):

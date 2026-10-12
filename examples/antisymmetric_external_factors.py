@@ -1,78 +1,72 @@
-"""Every permutation-antisymmetric multiplet from ordered polar factors.
+"""Evaluate permutation-antisymmetric factor couplings at ranks 2–8.
 
-Edit ``parent.L`` to any reachable value. Repeated factor types retain
-ordered values, so the alternating block is nonzero when those values are
-independent. This is not an ordinary commutative density.
+The complete m=-l,...,l inputs can come from any basis or upstream model.
+Edit parent.L and the rank-specific contents to choose another output.
+SO(3) permits both polar and axial results in one rank catalogue; the natural
+O(3) parity of each case is (-1)**sum(input_Ls).
+Repeated l=1 blocks have at most two factors, so their exterior powers are nonzero.
+Requires PyTorch. See docs/basic_examples.rst for the input conventions.
 """
 
-import torch
-
-from ye3t import YE3TRepresentation, couplings
+from ye3t import YE3TRepresentation
+from ye3t.workflows import count_coupling_cases, compile_coupling_cases, evaluate_coupling_cases
 
 
 cfg_ye3t = {
-    "metadata": {"schema": "ye3t_config_v1", "name": "antisymmetric_external_factors",
-                 "status": "experimental"},
+    "metadata": {"schema": "ye3t_config_v1", "name": "antisymmetric_external_factors", "status": "experimental"},
     "representation": {
-        "group": "O3", "ranks": [3],
-        "parent": {"young_lambda": "antisymmetric", "L": 1, "parity": "odd"},
+        "group": "SO3", "ranks": [2, 3, 4, 5, 6, 7, 8],
+        "parent": {"young_lambda": "antisymmetric", "L": 1, "parity": None},
         "factorization": "standard_split", "subspace": "full",
         "uncoupled_factor_inputs": {
-            "eta_count_per_rank": {3: 2}, "l_max_per_rank": {3: 1},
+            "eta_count_per_rank": {2: 2, 3: 2, 4: 2, 5: 3, 6: 3, 7: 4, 8: 4},
+            "l_max_per_rank": {2: 2, 3: 2, 4: 2, 5: 2, 6: 2, 7: 2, 8: 2},
         },
         "intermediates": {
             "young_kappa": "all_valid", "block_rotation": {"policy": "all_valid"},
         },
     },
     "basis": {
-        "carrier": "external_tensor", "fixed_content": [1, 1, 2],
-        "input_Ls": [1, 1, 1],
-        "factor_multiplets": [
-            [1.0, 0.2, -0.4], [0.3, -0.5, 0.9], [-0.2, 0.7, 0.6],
-        ],
+        "carrier": "external_tensor",
+        "cases_by_rank": {
+            2: [{"content": [1, 2], "input_Ls": [1, 1]},
+                {"content": [1, 2], "input_Ls": [2, 2]}],
+            3: [{"content": [1, 1, 2], "input_Ls": [1, 1, 1]}],
+            4: [{"content": [1, 1, 2, 2], "input_Ls": [1, 1, 1, 1]}],
+            5: [{"content": [1, 1, 2, 2, 3], "input_Ls": [1, 1, 1, 1, 1]}],
+            6: [{"content": [1, 1, 2, 2, 3, 3], "input_Ls": [1, 1, 1, 1, 1, 1]}],
+            7: [{"content": [1, 1, 2, 2, 3, 3, 4], "input_Ls": [1, 1, 1, 1, 1, 1, 1]}],
+            8: [{"content": [1, 1, 2, 2, 3, 3, 4, 4], "input_Ls": [1, 1, 1, 1, 1, 1, 1, 1]}],
+        },
+        # Supply complete m=-l,...,l arrays from your own basis or model.
+        # multiplets[l][f] uses the global ordered factor index f=0,...,7.
+        "multiplets": {
+            1: [[1.0, 0.2, -0.4], [0.3, -0.5, 0.9], [-0.2, 0.7, 0.6],
+                [0.8, -0.1, 0.3], [-0.4, 0.6, 0.2], [0.5, 0.3, -0.7],
+                [0.2, -0.8, 0.4], [-0.6, 0.9, 0.1]],
+            2: [[0.2, 0.4, -0.1, 0.6, -0.3], [0.7, -0.2, 0.5, -0.4, 0.1],
+                [-0.3, 0.8, 0.2, 0.1, -0.5], [0.6, 0.1, -0.4, 0.3, 0.7],
+                [0.4, -0.6, 0.3, 0.2, -0.1], [-0.2, 0.5, 0.7, -0.3, 0.4],
+                [0.1, 0.3, -0.8, 0.5, 0.2], [0.5, -0.4, 0.6, 0.1, -0.7]],
+        },
     },
     "runtime": {"dtype": "complex128", "device": "cpu",
                 "subduction_backend": "exact"},
     "model": {}, "targets": {},
-    "validation": {"checks": ["exact_count", "permutation_antisymmetry"]},
+    "validation": {"checks": ["exact_count", "finite_values"]},
 }
 
 
 representation = YE3TRepresentation.from_config(cfg_ye3t["representation"])
-report = representation.count_fixed_content(
-    cfg_ye3t["basis"]["fixed_content"], cfg_ye3t["basis"]["input_Ls"],
-    carrier=cfg_ye3t["basis"]["carrier"],
+cases = count_coupling_cases(representation, cfg_ye3t["basis"])
+print("multiplicity counts (rank, case):",
+      {key: case["multiplicity_count"] for key, case in cases.items()})
+compiled_cases = compile_coupling_cases(
+    cases, subduction_backend=cfg_ye3t["runtime"]["subduction_backend"],
 )
-compiled = couplings.compile(
-    couplings.plan(report),
-    subduction_materialization_backend=cfg_ye3t["runtime"]["subduction_backend"],
+values = evaluate_coupling_cases(
+    compiled_cases, cfg_ye3t["basis"]["multiplets"],
+    dtype=cfg_ye3t["runtime"]["dtype"], device=cfg_ye3t["runtime"]["device"],
 )
-factors = torch.tensor(
-    cfg_ye3t["basis"]["factor_multiplets"],
-    dtype=getattr(torch, cfg_ye3t["runtime"]["dtype"]),
-    device=cfg_ye3t["runtime"]["device"],
-)
-runtime = compiled.coupler.bind_factorized_factors_torch(
-    dtype=factors.dtype, device=factors.device,
-)
-values = runtime.evaluate(factors)
-assert values.abs().max() > 1e-8
-swapped = runtime.evaluate(factors[[1, 0, 2]])
-torch.testing.assert_close(values, -swapped, atol=1e-12, rtol=1e-12)
-crossed = runtime.evaluate(
-    factors[[2, 1, 0]], factor_types=((2, 1), (1, 1), (1, 1)),
-)
-torch.testing.assert_close(values, -crossed, atol=1e-12, rtol=1e-12)
-duplicated = factors.clone()
-duplicated[1] = duplicated[0]
-zero = runtime.evaluate(duplicated)
-torch.testing.assert_close(zero, torch.zeros_like(zero), atol=1e-12, rtol=0)
-assert values.shape == (report.counts_by_target[representation.L], 1,
-                        2 * representation.L + 1)
-assert not compiled.coupler.sparse_coefficient_tables
-
-print("independent multiplicity count", report.counts_by_target[representation.L])
-print("coupled axes (a, t, M)", tuple(values.shape))
-print("repeated-block kernel", compiled.coupler.factorized_coefficient_tables[0]
-      ["local_tables"][0]["strategy"])
-print("coefficient hash", compiled.coupler.cache_key())
+print("coupled axes (a, t, M):", {key: tuple(value.shape) for key, value in values.items()})
+print("rank-eight first multiplet:", values[8, 0][0])

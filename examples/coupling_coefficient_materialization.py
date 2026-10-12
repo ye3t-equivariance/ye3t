@@ -1,59 +1,62 @@
-"""Count a symmetric ACE sector and compile its factorized coefficients.
+"""Compile complete scalar ACE coefficient schedules across ranks 1–8.
 
-Edit the representation and fixed-content inputs below for another sector.
-The schedule couples already adapted repeated blocks and is the practical
-ACE coefficient route. The bounded full typed-orbit matrix is a test reference.
+Edit the complete input contents and angular degrees below. Each case retains
+every independent coupling for its selected parent. Rank two includes two
+different angular contents; higher-rank cases include multiple coupling paths.
+Requires the installed ye3t package and its numerical dependencies.
 """
 
-from ye3t import YE3TRepresentation, couplings
+from ye3t import YE3TRepresentation
+from ye3t.workflows import count_coupling_cases, compile_coupling_cases
 
 
 cfg_ye3t = {
-    "metadata": {"schema": "ye3t_config_v1", "name": "fixed_content_compile",
-                 "status": "stable"},
+    "metadata": {"schema": "ye3t_config_v1", "name": "coupling_coefficient_materialization", "status": "stable"},
     "representation": {
-        "group": "O3", "ranks": [4],
+        "group": "O3", "ranks": [1, 2, 3, 4, 5, 6, 7, 8],
         "parent": {"young_lambda": "(N)", "L": 0, "parity": "even"},
         "factorization": "cauchy", "subspace": "full",
         "uncoupled_factor_inputs": {
-            "eta_count_per_rank": {4: 2}, "l_max_per_rank": {4: 2},
+            "eta_count_per_rank": {1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8},
+            "l_max_per_rank": {1: 2, 2: 2, 3: 2, 4: 2, 5: 2, 6: 2, 7: 2, 8: 2},
         },
         "intermediates": {
             "young_kappa": "all_valid", "block_rotation": {"policy": "all_valid"},
         },
     },
     "basis": {
-        "fixed_content": [1, 1, 2, 2],
-        "input_Ls": [1, 1, 2, 2],
         "carrier": "ACE_density",
+        "cases_by_rank": {
+            1: [{"content": [1], "input_Ls": [0]},
+                {"content": [2], "input_Ls": [0]}],
+            2: [{"content": [1, 2], "input_Ls": [1, 1]},
+                {"content": [1, 2], "input_Ls": [2, 2]}],
+            3: [{"content": [1, 2, 3], "input_Ls": [1, 1, 2]}],
+            4: [{"content": [1, 2, 3, 4], "input_Ls": [1, 1, 2, 2]},
+                {"content": [1, 1, 2, 2], "input_Ls": [1, 1, 2, 2]}],
+            5: [{"content": [1, 2, 3, 4, 5], "input_Ls": [1, 1, 1, 1, 2]}],
+            6: [{"content": [1, 2, 3, 4, 5, 6], "input_Ls": [1, 1, 1, 1, 1, 1]}],
+            7: [{"content": [1, 2, 3, 4, 5, 6, 7], "input_Ls": [1, 1, 1, 1, 1, 1, 2]}],
+            8: [{"content": [1, 2, 3, 4, 5, 6, 7, 8], "input_Ls": [1, 1, 1, 1, 1, 1, 1, 1]}],
+        },
     },
-    "runtime": {"constructor_backend": "auto"},
-    "model": {}, "targets": {}, "validation": {},
+    "runtime": {"constructor_backend": "auto", "dtype": "complex128",
+                "device": "cpu", "backend": "auto"},
+    "model": {}, "targets": {},
+    "validation": {"checks": ["exact_count_matches_schedule"]},
 }
 
+
 representation = YE3TRepresentation.from_config(cfg_ye3t["representation"])
-report = representation.count_fixed_content(
-    cfg_ye3t["basis"]["fixed_content"], cfg_ye3t["basis"]["input_Ls"],
-    carrier=cfg_ye3t["basis"]["carrier"],
+cases = count_coupling_cases(representation, cfg_ye3t["basis"])
+print("multiplicity counts (rank, case):",
+      {key: case["multiplicity_count"] for key, case in cases.items()})
+compiled_cases = compile_coupling_cases(
+    cases, constructor_backend=cfg_ye3t["runtime"]["constructor_backend"],
 )
-compiler_plan = couplings.plan(report)
-compiled = couplings.compile_ace_factorized_schedules_by_L(
-    content=report.content,
-    input_Ls=cfg_ye3t["basis"]["input_Ls"],
-    constructor_backend=cfg_ye3t["runtime"]["constructor_backend"],
-)
-schedule = compiled.schedules_by_L[representation.L]
-assert schedule.basis_count == report.counts_by_target[representation.L]
-print("coupling count source: ye3t.couplings.count")
-print("coupling plan source: ye3t.couplings.plan")
-print("coefficient source: ye3t.couplings.compile_ace_factorized_schedules_by_L")
-print("representation:", representation)
-print("content:", tuple(compiled.content))
-print("target:", compiled.target)
-print("exact count:", report.counts_by_target[representation.L])
-print("planned backend:", compiler_plan.backend)
-print("compiled backend:", compiled.backend)
-print("factorized basis count:", schedule.basis_count)
-print("factorized term count:", schedule.term_count)
-print("convention hash:", compiled.convention_hash)
-print("validation passed:", bool(compiled.validation_report.get("passed", False)))
+print("factorized basis counts:",
+      {key: case["compiled"].schedules_by_L[0].basis_count
+       for key, case in compiled_cases.items()})
+print("factorized term counts:",
+      {key: case["compiled"].schedules_by_L[0].term_count
+       for key, case in compiled_cases.items()})

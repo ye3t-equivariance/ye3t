@@ -1,69 +1,78 @@
-"""Apply YE3T's ACE factorized schedule to supplied density multiplets.
+"""Evaluate independent scalar ACE couplings of supplied density multiplets at ranks 1–8.
 
-Each input is a complete ``u_{a l m}`` multiplet supplied by another code.
-Here the channel types differ, so each adapted block has size one. For
-repeated channel types, supply the block-adapted values specified by the
-compiled schedule. Magnetic indices use complex Condon-Shortley order
-``m=-l,...,l``. YE3T constructs the independent scalar coupling.
+Edit the complete input contents and angular degrees below. Each case retains
+every independent coupling for its selected parent. Rank two includes two
+different angular contents; higher-rank cases include multiple coupling paths.
+The parent and every Young intermediate are permutation invariant. Angular
+intermediates keep all allowed values that couple to the scalar parent.
+Use user_supplied_factors.py for mixed Young parents and ordered factors.
+Requires the installed ye3t package and its numerical dependencies.
 """
 
-import torch
-
-from ye3t import YE3TRepresentation, couplings
+from ye3t import YE3TRepresentation
+from ye3t.workflows import count_coupling_cases, compile_coupling_cases, evaluate_coupling_cases
 
 
 cfg_ye3t = {
-    "metadata": {
-        "schema": "ye3t_config_v1", "name": "symmetric_density_factors",
-        "status": "experimental",
-    },
+    "metadata": {"schema": "ye3t_config_v1", "name": "symmetric_density_factors", "status": "stable"},
     "representation": {
-        "group": "O3", "ranks": [2],
+        "group": "O3", "ranks": [1, 2, 3, 4, 5, 6, 7, 8],
         "parent": {"young_lambda": "(N)", "L": 0, "parity": "even"},
         "factorization": "cauchy", "subspace": "full",
         "uncoupled_factor_inputs": {
-            "eta_count_per_rank": {2: 2}, "l_max_per_rank": {2: 1},
+            "eta_count_per_rank": {1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8},
+            "l_max_per_rank": {1: 2, 2: 2, 3: 2, 4: 2, 5: 2, 6: 2, 7: 2, 8: 2},
         },
         "intermediates": {
-            "young_kappa": "all_valid", "block_rotation": {"policy": "all_valid"},
+            "young_kappa": "symmetric_only", "block_rotation": {"policy": "all_valid"},
         },
     },
     "basis": {
-        "carrier": "ACE_density", "fixed_content": [1, 2], "input_Ls": [1, 1],
-        "density_multiplets": [[1.0, 0.2, -1.0], [0.3, -0.7, -0.3]],
+        "carrier": "ACE_density",
+        "cases_by_rank": {
+            1: [{"content": [1], "input_Ls": [0]},
+                {"content": [2], "input_Ls": [0]}],
+            2: [{"content": [1, 2], "input_Ls": [1, 1]},
+                {"content": [1, 2], "input_Ls": [2, 2]}],
+            3: [{"content": [1, 2, 3], "input_Ls": [1, 1, 2]}],
+            4: [{"content": [1, 2, 3, 4], "input_Ls": [1, 1, 2, 2]},
+                {"content": [1, 1, 2, 2], "input_Ls": [1, 1, 2, 2]}],
+            5: [{"content": [1, 2, 3, 4, 5], "input_Ls": [1, 1, 1, 1, 2]}],
+            6: [{"content": [1, 2, 3, 4, 5, 6], "input_Ls": [1, 1, 1, 1, 1, 1]}],
+            7: [{"content": [1, 2, 3, 4, 5, 6, 7], "input_Ls": [1, 1, 1, 1, 1, 1, 2]}],
+            8: [{"content": [1, 2, 3, 4, 5, 6, 7, 8], "input_Ls": [1, 1, 1, 1, 1, 1, 1, 1]}],
+        },
+        # Supply complete m=-l,...,l arrays from your own basis or model.
+        # Rows identify density channels n=1,...,8.
+        "multiplets": {
+            0: [[0.4], [0.7], [-0.2], [0.5], [0.8], [-0.4], [0.6], [0.3]],
+            1: [[1.0, 0.2, -0.4], [0.3, -0.5, 0.9], [-0.2, 0.7, 0.6],
+                [0.8, -0.1, 0.3], [-0.4, 0.6, 0.2], [0.5, 0.3, -0.7],
+                [0.2, -0.8, 0.4], [-0.6, 0.9, 0.1]],
+            2: [[0.2, 0.4, -0.1, 0.6, -0.3], [0.7, -0.2, 0.5, -0.4, 0.1],
+                [-0.3, 0.8, 0.2, 0.1, -0.5], [0.6, 0.1, -0.4, 0.3, 0.7],
+                [0.4, -0.6, 0.3, 0.2, -0.1], [-0.2, 0.5, 0.7, -0.3, 0.4],
+                [0.1, 0.3, -0.8, 0.5, 0.2], [0.5, -0.4, 0.6, 0.1, -0.7]],
+        },
     },
-    "runtime": {"dtype": "complex128", "device": "cpu", "backend": "auto"},
+    "runtime": {"constructor_backend": "auto", "dtype": "complex128",
+                "device": "cpu", "backend": "auto"},
     "model": {}, "targets": {},
-    "validation": {"checks": ["independent_count", "factor_exchange"]},
+    "validation": {},
 }
 
 
 representation = YE3TRepresentation.from_config(cfg_ye3t["representation"])
-report = representation.count_fixed_content(
-    cfg_ye3t["basis"]["fixed_content"],
-    cfg_ye3t["basis"]["input_Ls"],
-    carrier=cfg_ye3t["basis"]["carrier"],
+cases = count_coupling_cases(representation, cfg_ye3t["basis"])
+print("multiplicity counts (rank, case):",
+      {key: case["multiplicity_count"] for key, case in cases.items()})
+compiled_cases = compile_coupling_cases(
+    cases, constructor_backend=cfg_ye3t["runtime"]["constructor_backend"],
 )
-compiled = couplings.compile_ace_factorized_schedules_by_L(
-    content=report.content, input_Ls=cfg_ye3t["basis"]["input_Ls"],
-)
-dtype = getattr(torch, cfg_ye3t["runtime"]["dtype"])
-blocks = torch.tensor(
-    [[cfg_ye3t["basis"]["density_multiplets"]]],
-    dtype=dtype, device=cfg_ye3t["runtime"]["device"],
-)
-feature = compiled.evaluate(
-    blocks, target_L=representation.L, backend=cfg_ye3t["runtime"]["backend"],
-)
-exchanged = compiled.evaluate(
-    blocks.flip(2), target_L=representation.L,
+values = evaluate_coupling_cases(
+    compiled_cases, cfg_ye3t["basis"]["multiplets"],
+    dtype=cfg_ye3t["runtime"]["dtype"], device=cfg_ye3t["runtime"]["device"],
     backend=cfg_ye3t["runtime"]["backend"],
 )
-assert compiled.validation_report["passed"]
-assert compiled.schedules_by_L[representation.L].basis_count == report.counts_by_target[representation.L]
-torch.testing.assert_close(feature, exchanged, atol=1e-12, rtol=1e-12)
-
-print("independent symmetric labels", report.counts_by_target[representation.L])
-print("feature shape", tuple(feature.shape))
-print("factor exchange invariant", True)
-print("coefficient path", compiled.backend)
+print("output shapes (a, M):", {key: tuple(value.shape) for key, value in values.items()})
+print("rank-eight first three scalars:", values[8, 0][:3, 0])

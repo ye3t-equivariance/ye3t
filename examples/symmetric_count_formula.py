@@ -1,24 +1,24 @@
-"""Compare a symmetric fixed-content count with the GE-PI count formula.
+"""Compare the GE-PI formula with scalar ACE compiler counts at ranks 1–8.
 
-Only multiplicities are calculated. No coupling coefficients or atomistic
-descriptors are materialized. Edit the repeated channel and angular degrees
-to compare another permutation-invariant sector.
+Edit the complete input contents and angular degrees below. Each case retains
+every independent coupling for its selected parent. Rank two includes two
+different angular contents; higher ranks have multiple coupling paths.
+Requires the installed ye3t package and its numerical dependencies.
 """
 
-from ye3t import YE3TRepresentation, couplings, dusson_barthelemy_trivial_sector_counts
+from ye3t import YE3TRepresentation
+from ye3t.workflows import count_coupling_cases, compare_symmetric_count_formulas
 
 
 cfg_ye3t = {
-    "metadata": {
-        "schema": "ye3t_config_v1", "name": "symmetric_count_formula",
-        "status": "stable",
-    },
+    "metadata": {"schema": "ye3t_config_v1", "name": "symmetric_count_formula", "status": "stable"},
     "representation": {
-        "group": "O3", "ranks": [4],
+        "group": "O3", "ranks": [1, 2, 3, 4, 5, 6, 7, 8],
         "parent": {"young_lambda": "(N)", "L": 0, "parity": "even"},
         "factorization": "cauchy", "subspace": "full",
         "uncoupled_factor_inputs": {
-            "eta_count_per_rank": {4: 1}, "l_max_per_rank": {4: 1},
+            "eta_count_per_rank": {1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8},
+            "l_max_per_rank": {1: 2, 2: 2, 3: 2, 4: 2, 5: 2, 6: 2, 7: 2, 8: 2},
         },
         "intermediates": {
             "young_kappa": "all_valid", "block_rotation": {"policy": "all_valid"},
@@ -26,31 +26,30 @@ cfg_ye3t = {
     },
     "basis": {
         "carrier": "ACE_density",
-        "fixed_content": [1, 1, 1, 1],
-        "input_Ls": [1, 1, 1, 1],
+        "cases_by_rank": {
+            1: [{"content": [1], "input_Ls": [0]},
+                {"content": [2], "input_Ls": [0]}],
+            2: [{"content": [1, 2], "input_Ls": [1, 1]},
+                {"content": [1, 2], "input_Ls": [2, 2]}],
+            3: [{"content": [1, 2, 3], "input_Ls": [1, 1, 2]}],
+            4: [{"content": [1, 2, 3, 4], "input_Ls": [1, 1, 2, 2]},
+                {"content": [1, 1, 2, 2], "input_Ls": [1, 1, 2, 2]}],
+            5: [{"content": [1, 2, 3, 4, 5], "input_Ls": [1, 1, 1, 1, 2]}],
+            6: [{"content": [1, 2, 3, 4, 5, 6], "input_Ls": [1, 1, 1, 1, 1, 1]}],
+            7: [{"content": [1, 2, 3, 4, 5, 6, 7], "input_Ls": [1, 1, 1, 1, 1, 1, 2]}],
+            8: [{"content": [1, 2, 3, 4, 5, 6, 7, 8], "input_Ls": [1, 1, 1, 1, 1, 1, 1, 1]}],
+        },
     },
     "runtime": {"count_only": True},
     "model": {}, "targets": {},
-    "validation": {"checks": ["formula_matches_compiler"]},
+    "validation": {"checks": ["exact_counts"]},
 }
 
 
 representation = YE3TRepresentation.from_config(cfg_ye3t["representation"])
-content = cfg_ye3t["basis"]["fixed_content"]
-input_Ls = cfg_ye3t["basis"]["input_Ls"]
-formula_counts = dusson_barthelemy_trivial_sector_counts(content, input_Ls)
-compiler_counts = couplings.counts_for_partitions(
-    content, input_Ls, (representation.parent_partition(4),),
-    spatial_symmetry="O3",
-)
-report = representation.count_fixed_content(
-    content, input_Ls, carrier=cfg_ye3t["basis"]["carrier"],
-)
-target_L = representation.L
-assert formula_counts == compiler_counts
-assert compiler_counts.get(target_L, 0) == report.counts_by_target[target_L]
-
-print("formula counts by L", formula_counts)
-print("compiler counts by L", compiler_counts)
-print("compiler count at L", target_L, report.counts_by_target[target_L])
+cases = count_coupling_cases(representation, cfg_ye3t["basis"])
+print("multiplicity counts (rank, case):",
+      {key: case["multiplicity_count"] for key, case in cases.items()})
+formula_counts = compare_symmetric_count_formulas(cases)
+print("formula counts by L:", formula_counts)
 print("formula matches compiler", True)

@@ -18,7 +18,7 @@ For rank ``N``, YE3T couples ordered tensor factors into a parent sector
 The multiplicity count identifies independent coupling paths; each path has
 Young-carrier and magnetic components. The complete config and runnable
 factor-array example are in ``examples/user_supplied_factors.py``. Change its
-``representation.parent`` and ``basis.fixed_content`` to select a different
+``representation.parent`` and ``basis.cases_by_rank`` to select a different
 Young type, angular momentum, and factor content. The symmetric and
 antisymmetric factor examples cover their respective parent types for any
 reachable output ``L``.
@@ -50,7 +50,7 @@ small vocabulary:
    A fixed-content coupling request: the non-angular channel content, the
    factor angular momenta, and target ``L``. The
    ``examples/coupling_multiplicity_counts.py`` config places the target under
-   ``representation.parent.L`` and the first two values under ``basis``;
+   ``representation.parent.L`` and the first two values in each ``basis.cases_by_rank`` entry;
    ``coupling_coefficient_materialization.py`` uses the same seven-section shape.
 
 ``rank``
@@ -103,16 +103,16 @@ exact change-of-group tensor products, structured basis coordinates, and
 schedule metadata.
 
 ``examples/coupling_multiplicity_counts.py``
-   Counts valid labels for one fixed-content ACE sector through
-   ``ye3t.couplings.count``. The example prints the content, carrier, target,
-   counts by target, a small label preview, and the validation status. This is
+   Counts 162 scalar labels across ranks 1–8 through
+   ``ye3t.couplings.count``. The example prints counts keyed by ``(rank, case)``
+   and a small label preview. This is
    the canonical script for basis-size and label-validity checks.
 
 ``examples/coupling_coefficient_materialization.py``
    Builds the matching ``ye3t.couplings.plan`` and the ACE factorized
    coefficient schedule, then compares its independent basis count with the
-   exact multiplicity. It prints the factorized term count, convention hash,
-   and validation status before downstream runtimes consume the schedule.
+   exact multiplicity. It prints the independent label and
+   nonzero term counts for each rank 1–8 case.
 
 ``examples/symmetric_count_formula.py``
    Compares the independent symmetric fixed-content count formula used for a
@@ -121,29 +121,44 @@ schedule metadata.
 
 ``examples/symmetric_density_factors.py``
    Applies a globally symmetric scalar coupler to supplied complete density
-   multiplets. The single-factor radial basis can come from another package.
+   multiplets across ranks 1–8, including 91 rank-eight coordinates. The
+   single-factor radial basis can come from another package. It sets
+   ``young_kappa="symmetric_only"`` and parent ``young_lambda="(N)"``:
+   every permutation intermediate and the parent are symmetric. Angular
+   intermediates keep every allowed value that couples to ``L=0``. This is
+   the ACE-sector counterpart to ``user_supplied_factors.py``.
 
 ``examples/user_supplied_factors.py``
-   Evaluates all three valid multiplicity coordinates for a nontrivial
-   ``(2,1)`` Young and ``L=1`` coupler on user-supplied complex Condon–Shortley
-   multiplets. Its shape is ``(a,t,M)=(3,2,3)``. Tests check a general
-   rotation and nontrivial factor permutations. The full typed-orbit matrix
-   remains a bounded reference that requires explicit opt-in.
+   Evaluates all valid ``(N-1,1)``, ``L=1`` coordinates across ranks 2–8
+   on supplied complex Condon–Shortley multiplets. At rank eight its shape
+   is ``(a,t,M)=(12,7,3)``. A batch of 16 inputs preserves Torch gradients.
+   Tests check general rotations, inversion, adjacent factor permutations,
+   and three-cycle orientation throughout the rank range.
 
 ``examples/symmetric_external_factors.py``
    Evaluates every ``(N)`` multiplet for an editable output ``L``. A repeated
-   factor block uses occupation contraction, and the example checks factor
-   permutation invariance.
+   factor block uses occupation contraction; its ``symmetric_only`` Young
+   intermediates are permutation invariant. The rank 2–8 test checks factor
+   permutation invariance, rotation covariance, and natural parity.
 
 ``examples/antisymmetric_external_factors.py``
    Evaluates every ``(1^N)`` multiplet for an editable output ``L``. A repeated
-   factor block uses a wedge contraction; the example checks sign changes and
-   annihilation when its two ordered factor values become identical.
+   factor block uses a wedge contraction. The rank 2–8 test checks sign
+   changes, rotation covariance, parity, and annihilation when two factors
+   of the same type have identical values.
 
 ``examples/cauchy_supplied_density.py``
-   Counts and applies a nontrivial local ``κ=(1,1)`` Cauchy path to a pair of
-   role-resolved real tesseral densities. The output is an axial ``L=1``
-   multiplet with globally symmetric factor symmetry.
+   Counts and applies every local Cauchy path to role-resolved real tesseral
+   densities across ranks 2–8. The parent is globally symmetric with ``L=1``;
+   the output parity follows the input factors. Vector triples combine with
+   scalar-density powers, giving 36 independent multiplets at rank eight.
+   A second rank-two case uses quadrupole inputs.
+
+``examples/ordered_role_cauchy_factors.py``
+   Evaluates all Cauchy coordinates for parents ``(N-1,1)``, ``L=1`` across
+   ranks 2–8. Each factor supplies a role-by-magnetic array. The rank-eight
+   result has shape ``(108,7,3)``. Tests cover rotations, inversion, and
+   permutations across equal and different channel blocks.
 
 ``examples/tagged_cauchy_linear_coordinates.py``
    Counts and compiles the scalar tagged-Cauchy physical coordinates for the
@@ -152,13 +167,14 @@ schedule metadata.
    coordinate count and the independent physical-image count.
 
 ``examples/compile_scalar_ace_lammps_plans.py``
-   Compiles four representative Ta scalar ACE coordinates (rank 3,
-   homogeneous rank 4, the ``[4,4]`` rank-8 block pair, and homogeneous rank
-   16) into exact coefficient tables and repeated-angular-block execution
-   plans, adds a rank-3 coupled-product plan candidate, and writes them with a
-   manifest under ``runtime.output_dir``. The directory must be new or empty.
-   Edit ``CASES`` to change the coordinates and ``runtime`` to change the
-   resource caps or output location.
+   Exports all 20 scalar coordinates in the configured rank 1–8 contents,
+   including three paths for the rank-eight ``[4,4]`` block pair. It also
+   exports a homogeneous rank-16 coordinate and a rank-three coupled-product
+   plan candidate. Edit ``basis.cases_by_rank`` to choose contents and
+   ``basis.additional_coordinates`` for constructive high-rank coordinates.
+   ``runtime.output_dir`` must be new or empty. The manifest records compiler
+   labels, exact counts, coordinate validation, and execution-plan hashes.
+   Physical source bindings and fitted weights are supplied by ye3t-methods.
 
 ``examples/exact_full_primitive_catalog.py``
    Shows the saved-object workflow: configure ``YE3TFixedContentBasis`` with
@@ -182,16 +198,24 @@ schedule metadata.
    entry point for choosing parent partitions before compiling a catalogue.
 
 ``examples/tagged_cauchy_image_catalogue.py``
-   Builds the exact product algebra of a user-chosen shifted-Jacobi source set
-   through ``ye3t.couplings.build_radial_species_product_record``, binds it to
-   the Racah angular product plan from ``ye3t.couplings.racah_harmonic_product_plan``,
-   and runs ``ye3t.couplings.count`` and ``plan`` on the resulting
-   ``tagged_cauchy_image_request``. The report gives the raw label count and
-   the exact physical-image dimension without materializing coefficients;
-   ``runtime.materialize_coefficients`` additionally compiles the hash-bound
-   artifact. Edit ``basis.single_factors.sources`` and
-   ``basis.tensor_product.selected_raw_tag_counts`` for another source set. The public rung
-   is bounded to tensor order 4 with two unit tags and l=1 primitive sources.
+   Counts and compiles the scalar tagged physical image across ranks 1–8.
+   Edit the radial/angular caps, source-block partitions, angular patterns,
+   and tag counts in the visible config. The raw counts are
+   ``2, 6, 18, 81, 60, 90, 126, 168``. Exact physical-image dimension is
+   obtained during coefficient compilation: ``1, 1, 3, 14, 15, 26, 39, 56``
+   by rank, totaling 155 coordinates. Higher ranks combine scalar
+   powers with vector pairs; rank four includes two radial channels.
+   Counts and planning run by default. Set
+   ``runtime.materialize_coefficients=True`` to compile the full physical image.
+   Each rank selects the same physical coordinates when compiled separately
+   or together in this catalogue; rank four keeps the fitting example's
+   14 coordinates.
+
+``examples/extras/tagged_cauchy_rank4_product_algebra.py``
+   Builds and inspects the exact shifted-Jacobi source-product record and
+   Racah angular plan. This specialized rank-four calculation has six raw
+   labels and a four-dimensional physical image. Coefficient compilation is
+   optional in its config.
 
 Benchmarks
 ~~~~~~~~~~
