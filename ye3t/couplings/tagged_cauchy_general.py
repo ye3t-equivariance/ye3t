@@ -27,6 +27,7 @@ from ye3t.couplings.orthogonal_shifted_jacobi import (
     shifted_jacobi_expansion, shifted_jacobi_normalization_squared,
     shifted_jacobi_power_coefficients,
 )
+from ye3t.couplings.chebyshev_c2 import CHEBYSHEV_C2_SOURCE_FAMILY, chebyshev_c2_radial_product
 from ye3t.couplings.tagged_cauchy import (
     _free_moment_descriptor_row, normalize_role_bindings, tag_support_report,
 )
@@ -100,15 +101,20 @@ def _physical_source_product(sources):
         raise ValueError("A generalized moment must contain at least one source.")
     if len({source[0] for source in sources}) > 1:
         return {}
-    if any(source[3] != ORTHOGONAL_SHIFTED_JACOBI_SOURCE_FAMILY for source in sources):
-        raise ValueError("Physical image requires the declared shifted-Jacobi source family.")
+    families = {source[3] for source in sources}
+    if len(families) != 1 or not families <= {
+        ORTHOGONAL_SHIFTED_JACOBI_SOURCE_FAMILY, CHEBYSHEV_C2_SOURCE_FAMILY,
+    }:
+        raise ValueError("Physical products require one supported radial family on each occurrence")
     angular = tuple((int(source[2]), int(source[4])-int(source[2])) for source in sources)
     radial = tuple((int(source[1]), int(source[2])) for source in sources)
     species = sources[0][0]
     family = sources[0][3]
     result = {}
     for (angular_l, magnetic), angular_coefficient in _harmonic_product(angular).items():
-        for degree, radial_coefficient in _radial_product(radial, angular_l):
+        radial_expansion = (chebyshev_c2_radial_product(radial, angular_l)
+                            if family == CHEBYSHEV_C2_SOURCE_FAMILY else _radial_product(radial, angular_l))
+        for degree, radial_coefficient in radial_expansion:
             key = (species, family, "pair_normalized_cutoff_v1", degree, angular_l, magnetic)
             _add_exact(result, key, angular_coefficient * radial_coefficient)
     return result
@@ -420,19 +426,9 @@ def _general_plan(report):
 
 @lru_cache(maxsize=256)
 def _role_copy_content(role_dimension, size, partition):
-    from ye3t.couplings.lifted_cauchy_scalar import _role_schur_vectors
-    states, vectors, _units = _role_schur_vectors(role_dimension, size, partition)
-    result = {}
-    for (copy, tableau), vector in vectors.items():
-        contents = {tuple(Counter(states[index]).get(role, 0) for role in range(role_dimension))
-                    for index, value in enumerate(vector) if value != 0}
-        if len(contents) != 1:
-            raise RuntimeError("Cauchy role copy is not a single content weight.")
-        content = next(iter(contents))
-        if copy in result and result[copy] != content:
-            raise RuntimeError("Cauchy role tableaux disagree on the copy's content weight.")
-        result[copy] = content
-    return result
+    from ye3t.couplings.lifted_cauchy_scalar import _role_schur_pivot_metadata
+    return {copy: content for copy, (_word, content) in enumerate(
+        _role_schur_pivot_metadata(role_dimension, size, partition))}
 
 
 def _supported_label(record):

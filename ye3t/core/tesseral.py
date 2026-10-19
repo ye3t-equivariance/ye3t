@@ -70,12 +70,16 @@ def real_tesseral_to_complex_multiplet(values, L):
         return values.unsqueeze(-1).to(dtype=torch.complex128 if values.dtype == torch.float64 else torch.complex64)
     if values.shape[-1] != 2 * L + 1:
         raise ValueError(f"Expected last dimension {2 * L + 1} for L={L}, got {values.shape[-1]}.")
-    matrix = _real_to_complex_matrix(
-        L,
-        values.dtype,
-        values.device,
-    )
-    return values.to(dtype=matrix.dtype) @ matrix
+    # Each +/-m pair has exactly two nonzero coefficients in the unitary
+    # tesseral map. Apply these pairs directly, preserving the matrix's
+    # Condon--Shortley phases and all derivative orders.
+    dtype = torch.complex128 if values.dtype == torch.float64 else torch.complex64
+    values = values.to(dtype=dtype)
+    cosine, sine = values[..., :L], values[..., L+1:].flip(-1)
+    negative = (cosine + 1j*sine) * (2.0 ** -0.5)
+    positive = (cosine - 1j*sine).flip(-1) * (2.0 ** -0.5)
+    signs = 1 - 2*(torch.arange(1, L+1, device=values.device) % 2)
+    return torch.cat((negative, values[..., L:L+1], positive*signs), -1)
 
 
 __all__ = ['complex_multiplet_to_real_tesseral', 'real_tesseral_to_complex_multiplet']

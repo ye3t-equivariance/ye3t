@@ -16,7 +16,7 @@ from collections import Counter, OrderedDict, defaultdict
 from collections.abc import Mapping
 from dataclasses import field
 from functools import lru_cache
-from itertools import product
+from itertools import combinations_with_replacement, product
 import hashlib
 import json
 from math import factorial, isfinite, prod
@@ -38,6 +38,9 @@ from ye3t.representations.coset_units import (
     adjacent_transposition_generators as coset_adjacent_transposition_generators,
     class_stabilizer_sum as coset_class_stabilizer_sum,
     class_word_table as coset_class_word_table,
+    class_pivot_indices as coset_class_pivot_indices,
+    class_projected_row as coset_class_projected_row,
+    selected_unit_column as coset_selected_unit_column,
     stream_class_pivots as coset_stream_class_pivots,
 )
 from ye3t.representations.projectors import (
@@ -3983,6 +3986,9 @@ def _raw_permutation_matrix(states, permutation):
 
 def _restricted_carrier_actions(states, vectors, factor_count):
     sp = _sympy()
+    states = tuple(tuple(int(value) for value in state) for state in states)
+    state_index = {state: index for index, state in enumerate(states)}
+    factors = tuple(range(int(factor_count)))
     basis = sp.Matrix.hstack(*tuple(sp.Matrix(vector) for vector in vectors))
     _reduced, pivot_rows = basis.T.rref()
     if len(pivot_rows) != basis.cols:
@@ -3999,8 +4005,12 @@ def _restricted_carrier_actions(states, vectors, factor_count):
             permutation[adjacent + 1],
             permutation[adjacent],
         )
-        raw_action = _raw_permutation_matrix(states, tuple(permutation))
-        transformed = raw_action * basis
+        # Adjacent transpositions are their own inverses. Gather the rows of
+        # P*basis directly, avoiding a square raw-space permutation matrix.
+        # Sparse/dense symbolic multiplication can densify that matrix.
+        rows = tuple(state_index[permute_state_slots(state, factors, tuple(permutation))]
+                     for state in states)
+        transformed = basis.extract(rows, columns)
         action = sp.simplify(
             pivot_inverse * transformed.extract(pivot_rows, columns)
         )
@@ -4707,6 +4717,75 @@ def _incremental_pivot_columns(matrix):
     return kept_indices, kept
 
 
+@lru_cache(maxsize=128)
+def _role_schur_pivot_metadata(role_dimension, size, partition):
+    """Original global copy order and content, without building role vectors.
+
+    Each content class has disjoint support. Its compact exact pivot test
+    chooses the same words as E00.columnspace(); sorting all pivot words
+    reproduces the original whole-state lexicographic copy order.
+    """
+    from ye3t.couplings.tagged_cauchy import kostka_number
+    from sympy.utilities.iterables import multiset_permutations
+
+    role_dimension, size = int(role_dimension), int(size)
+    partition = tuple(int(value) for value in partition)
+    dimension = int(Partition(partition).dimension)
+    generators = coset_adjacent_transposition_generators(partition, size)
+    pivots = []
+    for word in combinations_with_replacement(range(role_dimension), size):
+        content = _role_content_vector(word, role_dimension)
+        count = int(kostka_number(partition, content))
+        if count == 0:
+            continue
+        stabilizer = coset_class_stabilizer_sum(word, dimension, generators)
+        words = tuple(tuple(value) for value in multiset_permutations(word))
+        indices = coset_class_pivot_indices(dimension, words, None, stabilizer, count,
+            row_for_word=lambda current: coset_class_projected_row(
+                word, current, dimension, generators, stabilizer))
+        pivots.extend((words[index], content) for index in indices)
+    pivots.sort(key=lambda item: item[0])
+    if len(pivots) != _hook_content_dimension(partition, role_dimension):
+        raise RuntimeError("Role-Schur copy count disagrees with the hook-content dimension.")
+    return tuple(pivots)
+
+
+@lru_cache(maxsize=128)
+def _selected_role_schur_vectors(role_dimension, size, partition, role_copy):
+    """One original copy on its closed content class, with all tableaux.
+
+    Removing rows outside that class removes only exact zeros. The pivot
+    word and the first nonzero entry used for normalization are unchanged.
+    """
+    from sympy.utilities.iterables import multiset_permutations
+
+    sp = _sympy()
+    metadata = _role_schur_pivot_metadata(role_dimension, size, partition)
+    role_copy = int(role_copy)
+    if role_copy < 0 or role_copy >= len(metadata):
+        raise ValueError("Requested role copy is unavailable.")
+    pivot_word, _content = metadata[role_copy]
+    word = tuple(sorted(pivot_word))
+    dimension = int(Partition(partition).dimension)
+    generators = coset_adjacent_transposition_generators(partition, size)
+    stabilizer = coset_class_stabilizer_sum(word, dimension, generators)
+    states = tuple(tuple(value) for value in multiset_permutations(word))
+    full = coset_selected_unit_column(dimension, size, states, word, pivot_word,
+                                     generators, stabilizer)
+    if not full[0]:
+        raise RuntimeError("Selected role-Schur pivot has zero support.")
+    pivot_scalar = full[0][min(full[0])]
+    vectors = {}
+    for tableau in range(dimension):
+        if not full[tableau]:
+            raise RuntimeError("Role-Schur matrix unit produced a zero carrier vector.")
+        vector = sp.zeros(len(states), 1)
+        for row, value in full[tableau].items():
+            vector[row, 0] = sp.simplify(value / pivot_scalar)
+        vectors[(role_copy, tableau)] = vector
+    return states, vectors, {}
+
+
 def _role_schur_vectors_native_reference(role_dimension, size, partition):
     """Build the role-Schur copy vectors class by class.
 
@@ -4995,11 +5074,14 @@ def _coalesce_terms(terms):
     out = defaultdict(lambda: sp.Integer(0))
     for coordinates, coefficient in terms.items():
         out[tuple(sorted(coordinates))] += coefficient
-    return {
-        coordinates: sp.simplify(coefficient)
-        for coordinates, coefficient in out.items()
-        if sp.simplify(coefficient) != 0
-    }
+    simplified_values, result = {}, {}
+    for coordinates, coefficient in out.items():
+        if coefficient not in simplified_values:
+            simplified_values[coefficient] = sp.simplify(coefficient)
+        value = simplified_values[coefficient]
+        if value != 0:
+            result[coordinates] = value
+    return result
 
 
 def _metric_dual_analysis(synthesis):
@@ -5059,6 +5141,7 @@ def _joint_synthesis_columns(
         return joint_state_cache[key]
 
     synthesis_columns = []
+    simplified_values = {}
     for role_copy, angular_copy, M in coordinate_labels:
         accumulated = defaultdict(lambda: sp.Integer(0))
         pairing = pairings[(role_copy, angular_copy)]
@@ -5077,13 +5160,16 @@ def _joint_synthesis_columns(
                         accumulated[joint_state(role_index, magnetic_index)] += (
                             scaled_role * angular_value
                         )
-        synthesis_columns.append(
-            {
-                state: sp.simplify(value)
-                for state, value in accumulated.items()
-                if sp.simplify(value) != 0
-            }
-        )
+        column = {}
+        for state, value in accumulated.items():
+            # Symmetry repeats exact expressions across many words. Simplify
+            # each immutable expression once, retaining the same exact zeros.
+            if value not in simplified_values:
+                simplified_values[value] = sp.simplify(value)
+            coefficient = simplified_values[value]
+            if coefficient != 0:
+                column[state] = coefficient
+        synthesis_columns.append(column)
 
     return tuple(synthesis_columns)
 

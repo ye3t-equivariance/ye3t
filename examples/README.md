@@ -8,6 +8,8 @@ every independent coordinate for each configured input content.
 |---|---|
 | `coupling_multiplicity_counts.py` | Count scalar fixed-content labels across ranks 1–8 and inspect representative labels. |
 | `coupling_coefficient_materialization.py` | Compile the scalar rank 1–8 catalogue into factorized schedules and compare their sizes with exact counts. |
+| `coupled_carrier_products.py` | Couple complete supplied Young/O(3) multiplets with every Kronecker copy and input gradients. |
+| `induced_carrier_products.py` | Couple disjoint child representations using every compiler-ordered LR placement. |
 | `symmetric_count_formula.py` | Compare the GE-PI symmetric fixed-content multiplicity formula against YE3T's exact compiler counts for every allowed output `L`. No coefficients are compiled. |
 | `symmetric_density_factors.py` | Supply density multiplets; symmetric Young intermediates and parent give 162 independent scalar ACE-sector coordinates across ranks 1–8. |
 | `user_supplied_factors.py` | Supply complex Condon–Shortley multiplets from any source, bind the factorized runtime, and evaluate every `(N-1,1)`, `L=1` coordinate across ranks 2–8 on one factor set or a batch of message inputs with gradients. |

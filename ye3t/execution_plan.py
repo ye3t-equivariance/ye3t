@@ -70,6 +70,9 @@ YE3T_RUNTIME_OPCODES = (
 )
 
 YE3T_SOURCE_REALIZATION_KINDS = (
+    "selected_marginal",
+    "external_tensor",
+    "ordered_role_cauchy",
     "tagged_cauchy_occurrence",
     "ordinary_density",
     "lifted_density_roles",
@@ -77,6 +80,15 @@ YE3T_SOURCE_REALIZATION_KINDS = (
 )
 
 YE3T_MODEL_STAGE_PRODUCER_KINDS = (
+    "zero_carrier",
+    "complete_carrier_linear",
+    "invariant_gated_update",
+    "invariant_conditioned_transport",
+    "typed_polynomial_coupling",
+    "complete_carrier_product",
+    "invariant_reduction",
+    "invariant_injection",
+    "sum_reduction",
     "physical_source",
     "rooted_motif_source",
     "exact_source_analysis",
@@ -2201,10 +2213,15 @@ def _normalized_model_stage_program(
                     raise ValueError(
                         "external model carrier stages cannot consume sources"
                     )
-            elif not source_carrier_ids:
-                raise ValueError(
-                    "produced model stage carriers require source carriers"
-                )
+            elif not source_carrier_ids and producer_kind != "zero_carrier":
+                operation = compiler_metadata.get("operation_binding", {})
+                source_binding = (operation.get("source_action") or
+                                  operation.get("source_actions", {}).get(carrier_id))
+                auxiliary_source = (producer_kind == "exact_source_analysis" and source_binding
+                    and operation.get("fixed_map_hashes") and any(
+                        value.get("kind") == "auxiliary" for value in operation.get("input_bindings", {}).values()))
+                if not auxiliary_source:
+                    raise ValueError("Produced model carriers require source carriers or an exact bound auxiliary source")
             transform_plan_id = raw_carrier.get("transform_plan_id")
             transform_block_id = raw_carrier.get("transform_block_id")
             if producer_kind == "channel_transform":
@@ -2249,6 +2266,7 @@ def _normalized_model_stage_program(
                     "only channel-transform producers may bind transform plans"
                 )
             if producer_kind in {
+                "sum_reduction",
                 "identity_forward",
                 "graph_exchange",
                 "carrier_channel_update",
@@ -2353,6 +2371,8 @@ def _normalized_model_stage_program(
             }
         )
 
+    from ye3t._model_stage_bindings import _validate_model_operation_bindings
+    _validate_model_operation_bindings(stages)
     if not stages:
         raise ValueError("model carrier-stage programs must contain stages")
     declared_transform_blocks = {
@@ -2553,6 +2573,12 @@ def _normalized_model_stage_program(
     }
     if application_binding_hash is not None:
         normalized["application_binding_hash"] = application_binding_hash
+    if any("operation_binding" in stage["compiler_metadata"] for stage in stages):
+        from ye3t._model_stage_bindings import _model_argument_dependencies
+        _, auxiliary_lifetimes = _model_argument_dependencies(stages)
+        if "auxiliary_lifetimes" in program and _canonical_payload(program["auxiliary_lifetimes"]) != _canonical_payload(auxiliary_lifetimes):
+            raise ValueError("Auxiliary lifetimes differ from executable operation dependencies")
+        normalized["auxiliary_lifetimes"] = auxiliary_lifetimes
     return normalized
 
 
@@ -2668,14 +2694,20 @@ def _permutation_tuple(value, rank):
 
 
 @recordclass(
-    ("rank", "partition", "rotation_L", "convention_id", "parity"),
+    ("rank", "partition", "rotation_L", "convention_id", "parity", "permutation_blocks"),
     frozen=True,
 )
 class YE3TCarrierKey:
-    """Exact ``S_N x O(3)`` or explicitly legacy SO(3) carrier identity."""
+    """Exact permutation/O(3) carrier, with separately identified group factors.
+
+    A single symmetric group uses partition. A product of symmetric groups
+    uses permutation_blocks and an empty partition; rank is their total degree.
+    Legacy single-group serialization is unchanged.
+    """
 
     convention_id = YE3T_PRIMARY_CONVENTION
     parity = None
+    permutation_blocks = ()
 
     def __post_init__(self):
         rank = int(self.rank)
@@ -2695,8 +2727,16 @@ class YE3TCarrierKey:
             raise ValueError(
                 "signed parity requires an explicit O(3) convention_id with an o3: prefix"
             )
+        blocks = tuple(_partition_tuple(parts, sum(parts)) for parts in self.permutation_blocks)
+        if blocks:
+            if len(blocks) < 2 or sum(map(sum, blocks)) != rank or self.partition:
+                raise ValueError("Product-group carriers need at least two partitions covering rank and an empty single-group partition")
+            partition = ()
+        else:
+            partition = _partition_tuple(self.partition, rank)
         object.__setattr__(self, "rank", rank)
-        object.__setattr__(self, "partition", _partition_tuple(self.partition, rank))
+        object.__setattr__(self, "partition", partition)
+        object.__setattr__(self, "permutation_blocks", blocks)
         object.__setattr__(self, "rotation_L", rotation_L)
         object.__setattr__(self, "convention_id", convention_id)
         object.__setattr__(self, "parity", parity)
@@ -2707,14 +2747,31 @@ class YE3TCarrierKey:
 
     @property
     def is_totally_symmetric(self):
+        if self.permutation_blocks:
+            return all(parts == (sum(parts),) for parts in self.permutation_blocks)
         return self.partition == (self.rank,)
 
     @property
     def is_totally_antisymmetric(self):
+        if self.permutation_blocks:
+            return all(parts == (1,)*sum(parts) for parts in self.permutation_blocks)
         return self.partition == tuple(1 for _ in range(self.rank))
 
+    @property
+    def permutation_partitions(self):
+        return self.permutation_blocks or (self.partition,)
+
+    @property
+    def permutation_degrees(self):
+        return tuple(map(sum, self.permutation_partitions))
+
+    @property
+    def tableau_dimension(self):
+        from ye3t.representations.generalized_irreps import Partition
+        return math.prod(Partition(parts).dimension if parts else 1 for parts in self.permutation_partitions)
+
     def to_dict(self):
-        return {
+        result = {
             "rank": int(self.rank),
             "partition": [int(part) for part in self.partition],
             "rotation_L": int(self.rotation_L),
@@ -2722,6 +2779,10 @@ class YE3TCarrierKey:
             "group": "S_N_x_O3" if self.parity is not None else "S_N_x_SO3",
             "parity": self.parity,
         }
+        if self.permutation_blocks:
+            result["permutation_blocks"] = [list(parts) for parts in self.permutation_blocks]
+            result["group"] = "S_product_x_O3" if self.parity is not None else "S_product_x_SO3"
+        return result
 
     @classmethod
     def from_dict(cls, payload):
@@ -2731,6 +2792,7 @@ class YE3TCarrierKey:
             rotation_L=payload["rotation_L"],
             convention_id=payload.get("convention_id", YE3T_PRIMARY_CONVENTION),
             parity=payload.get("parity"),
+            permutation_blocks=payload.get("permutation_blocks", ()),
         )
 
 
@@ -4003,6 +4065,20 @@ class YE3TCarrierArenaPlan:
                     _trusted_enclosing_hash=validated_container,
                 )
             )
+            stages = metadata["model_stage_program"]["stage_records"]
+            if any("operation_binding" in stage["compiler_metadata"] for stage in stages):
+                from ye3t._model_stage_bindings import _model_argument_dependencies
+                uses, _ = _model_argument_dependencies(stages)
+                by_id = {record["slice_id"]: record for record in lifetimes}
+                for index, stage in enumerate(stages):
+                    for carrier in stage["carriers"]:
+                        identity = carrier["full_carrier_id"]
+                        life = by_id[identity]
+                        if life["requires_initial_value"] or tuple(life["producer_schedule_indices"]) != (index,):
+                            raise ValueError("Executable stage outputs require their actual producer lifetime")
+                        required = {entry[1] for entry in uses.get(identity, ())}
+                        if not required.issubset(life["consumer_schedule_indices"]):
+                            raise ValueError("Carrier lifetime omits an operation argument dependency")
         for schedule_name in (
             "forward_schedule",
             "reverse_schedule",
@@ -4779,6 +4855,17 @@ def _compile_model_stage_carrier_arena_plan(
                         carrier["full_carrier_id"]
                     )
 
+    from ye3t._model_stage_bindings import _model_argument_dependencies
+    argument_uses, auxiliary_lifetimes = _model_argument_dependencies(normalized_stages)
+    argument_indices = {}
+    for source_id, uses in argument_uses.items():
+        for stage_id, index in sorted(uses):
+            existing = consumers_by_carrier[source_id]
+            if not any(value.startswith(stage_id+"/") for value in existing):
+                identity = "argument:"+stage_id
+                existing.append(identity)
+                argument_indices[identity] = index
+
     if configured_target_carrier_ids is None:
         configured_target_carrier_ids = tuple(
             carrier_id
@@ -4800,8 +4887,9 @@ def _compile_model_stage_carrier_arena_plan(
             full_carrier_id = carrier["full_carrier_id"]
             source_carrier_ids = tuple(carrier["source_carrier_ids"])
             producer_id = "produce:" + full_carrier_id
-            producer_ids = () if not source_carrier_ids else (producer_id,)
-            producer_indices = () if not source_carrier_ids else (stage_index,)
+            executed = "operation_binding" in stage["compiler_metadata"]
+            producer_ids = (producer_id,) if source_carrier_ids or executed else ()
+            producer_indices = (stage_index,) if producer_ids else ()
             actual_consumer_ids = tuple(
                 consumers_by_carrier[full_carrier_id]
             )
@@ -4812,9 +4900,15 @@ def _compile_model_stage_carrier_arena_plan(
             )
             consumer_ids = actual_consumer_ids + target_consumer_ids
             consumer_indices = tuple(
-                int(carrier_records_by_id[value]["stage_index"])
+                argument_indices[value] if value in argument_indices else int(carrier_records_by_id[value]["stage_index"])
                 for value in actual_consumer_ids
             ) + tuple(stage_index for _value in target_consumer_ids)
+            # Conditioning arguments are discovered after representation
+            # ancestry. Merge both uses in execution order, including a target
+            # that is also consumed by a later stage.
+            ordered_uses = sorted(zip(consumer_indices, consumer_ids), key=lambda item: item[0])
+            consumer_indices = tuple(index for index, _ in ordered_uses)
+            consumer_ids = tuple(identity for _, identity in ordered_uses)
             accesses = producer_indices + consumer_indices
             if not producer_ids:
                 storage_class = "external_input"
@@ -4934,6 +5028,7 @@ def _compile_model_stage_carrier_arena_plan(
                     "complete_layout_after_last_consumer"
                 ),
                 "stage_records": tuple(normalized_stages),
+                "auxiliary_lifetimes": auxiliary_lifetimes,
                 "stage_barriers": tuple(stage_barriers or ()),
                 "workspace_records": workspace_records,
                 "destination_fan_in": tuple(destination_fan_in),
@@ -5676,13 +5771,19 @@ class YE3TSourceRealization:
                 "role-resolved, motif and tagged occurrence sources must retain source role order"
             )
         if kind == "tagged_cauchy_occurrence":
-            tags = int(dict(self.metadata).get("tag_count", -1))
-            if tags not in (0, 1, 2) or tags > rank:
+            tags = dict(self.metadata).get("tag_count", -1)
+            if isinstance(tags, bool) or not isinstance(tags, int) or tags < 0 or tags > rank:
                 raise ValueError("tagged occurrence source requires an admissible explicit tag_count")
             if not bool(self.injective):
                 raise ValueError("explicit tagged occurrences must be distinct")
             if dict(self.metadata).get("density_context") != "inclusive":
                 raise ValueError("tagged occurrence source requires inclusive density context")
+        if kind == "ordered_role_cauchy":
+            role_dimension = dict(self.metadata).get("role_dimension")
+            if not isinstance(role_dimension, int) or isinstance(role_dimension, bool) or role_dimension < 1:
+                raise ValueError("Supplied Cauchy factors require a positive role dimension")
+            if len(role_labels) != rank or len(content) != rank:
+                raise ValueError("Supplied Cauchy factors require complete ordered content and factor identities")
         object.__setattr__(self, "kind", kind)
         object.__setattr__(self, "rank", rank)
         object.__setattr__(self, "content", content)
@@ -5695,14 +5796,17 @@ class YE3TSourceRealization:
     def validate_for_carrier(self, carrier_key):
         if not isinstance(carrier_key, YE3TCarrierKey):
             carrier_key = YE3TCarrierKey.from_dict(carrier_key)
-        if int(carrier_key.rank) != int(self.rank):
+        right_tags = self.kind == "tagged_cauchy_occurrence" and self.metadata.get("emitted_action") == "right_tags"
+        if int(carrier_key.rank) != int(self.metadata["tag_count"] if right_tags else self.rank):
             raise ValueError("source and carrier ranks must match")
+        if carrier_key.permutation_blocks and self.kind in {"ordinary_density", "tagged_cauchy_occurrence"}:
+            raise ValueError("A full symmetric-group source needs an explicit restriction map before emitting a product-group action")
         if self.kind == "ordinary_density" and not carrier_key.is_totally_symmetric:
             raise ValueError(
                 "ordinary commutative density can emit only the totally "
                 "symmetric partition lambda=(N)"
             )
-        if self.kind == "tagged_cauchy_occurrence" and not carrier_key.is_totally_symmetric:
+        if self.kind == "tagged_cauchy_occurrence" and not right_tags and not carrier_key.is_totally_symmetric:
             raise ValueError("commutative direct tagged-Cauchy sources have formal parent (N); hidden LR parents are separate")
         return {
             "passed": True,
@@ -5711,6 +5815,17 @@ class YE3TSourceRealization:
             "ordinary_density_selection_enforced": True,
             "role_order_retained": bool(self.retain_role_order),
         }
+
+    def bind_outputs(self, output_layouts, **settings):
+        """Bind complete emitted carriers and their exact source analysis.
+
+        Construction parents retain the source factor rank. Output layouts
+        carry the actual action after restriction or marginalization. The
+        returned versioned record includes fixed-map and parameter identities,
+        physical argument bindings, and supported differentiation modes.
+        """
+        from ye3t._model_stage_bindings import _source_action_binding
+        return _source_action_binding(self, output_layouts, **settings)
 
     def to_dict(self):
         return {

@@ -7,6 +7,11 @@ multiplicity counts, backend plans, and coefficient materialization.
 """
 
 from ye3t._record import recordclass
+from ye3t.couplings.selected_scalar_vector import (
+    is_selected_scalar_vector_request, selected_scalar_vector_count,
+    selected_scalar_vector_plan, compile_selected_scalar_vector,
+    selected_scalar_vector_product_table,
+)
 from collections.abc import Mapping
 from dataclasses import field
 import hashlib
@@ -112,7 +117,12 @@ from ye3t.couplings.tagged_cauchy_carriers import (
     tagged_cauchy_carrier_schedule,
     tagged_cauchy_carrier_physical_image_plan,
     tagged_cauchy_carrier_model_plan,
+    tagged_cauchy_marginal_graph_records,
     validate_tagged_cauchy_carriers,
+)
+from ye3t.couplings.carrier_products import (
+    carrier_product_request, carrier_product_count, compile_carrier_product,
+    is_carrier_product_request, bind_carrier_product_torch,
 )
 from ye3t.couplings.rank_additive_hidden_lineage import (
     rank_additive_hidden_lineage_request,
@@ -181,6 +191,16 @@ from ye3t.couplings.orthogonal_shifted_jacobi import (
     shifted_jacobi_normalization_squared,
     shifted_jacobi_power_coefficients,
     validate_radial_species_product_record,
+)
+from ye3t.couplings.shell_filtered_radial import (
+    SHELL_FILTERED_BASE_FAMILIES,
+    SHELL_FILTERED_SOURCE_FAMILY_PREFIX,
+    is_shell_filtered_family,
+    normalize_shell_filter_settings,
+    shell_filtered_radial_values,
+    shell_filtered_source_metadata,
+    shell_filtered_source_plan,
+    validate_shell_filtered_source_plan,
 )
 from ye3t.couplings.algebraic_curvature import (
     AlgebraicCurvatureOutputPlan,
@@ -2677,6 +2697,10 @@ def count(
 ):
     """Return valid labels and multiplicities for a fixed-content request."""
 
+    if is_carrier_product_request(request):
+        return carrier_product_count(request)
+    if is_selected_scalar_vector_request(request):
+        return selected_scalar_vector_count(request)
     if is_tagged_right_rank_growth_request(request):
         return tagged_right_rank_growth_count(request)
     if is_rank_additive_hidden_lineage_request(request):
@@ -2911,6 +2935,10 @@ def plan(
 ):
     """Return a coupling backend plan with multiplicity provenance."""
 
+    if is_carrier_product_request(request):
+        return carrier_product_count(request)
+    if is_selected_scalar_vector_request(request):
+        return selected_scalar_vector_plan(request)
     if is_tagged_right_rank_growth_request(request):
         return tagged_right_rank_growth_count(request)
     if is_rank_additive_hidden_lineage_request(request):
@@ -4924,6 +4952,10 @@ def compile(
     matrix for tests and independent comparisons.
     """
 
+    if is_carrier_product_request(request):
+        return compile_carrier_product(request)
+    if is_selected_scalar_vector_request(request):
+        return compile_selected_scalar_vector(request)
     if isinstance(request, dict) and request.get("kind") == "tagged_cauchy_carrier_execution":
         if request.get("execution") != "role_factorized":
             raise ValueError("unknown tagged carrier execution lowering")
@@ -8346,6 +8378,14 @@ __all__ = [
     "shifted_jacobi_ladder_with_derivative",
     "shifted_jacobi_normalization_squared",
     "shifted_jacobi_power_coefficients",
+    "SHELL_FILTERED_BASE_FAMILIES",
+    "SHELL_FILTERED_SOURCE_FAMILY_PREFIX",
+    "is_shell_filtered_family",
+    "normalize_shell_filter_settings",
+    "shell_filtered_radial_values",
+    "shell_filtered_source_metadata",
+    "shell_filtered_source_plan",
+    "validate_shell_filtered_source_plan",
     "tagged_cauchy_image_count",
     "tagged_cauchy_carriers_request",
     "tagged_cauchy_carriers_count",

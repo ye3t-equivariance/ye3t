@@ -30,6 +30,11 @@ from ye3t.representations.projectors import (
     standard_tableaux, tableau_positions,
 )
 
+from .chebyshev_c2 import CHEBYSHEV_C2_SOURCE_FAMILY, CHEBYSHEV_C2_SOURCE_METADATA
+from .orthogonal_shifted_jacobi import ORTHOGONAL_SHIFTED_JACOBI_SOURCE_FAMILY
+from .shell_filtered_radial import (
+    is_shell_filtered_family, shell_filtered_source_metadata, validate_shell_filtered_source_plan,
+)
 from . import lifted_cauchy_scalar as _scalar
 from .covariant_cauchy import covariant_cauchy_count, covariant_cauchy_request, _real_rows
 from .tagged_cauchy_general import (
@@ -42,6 +47,22 @@ TAGGED_CAUCHY_CARRIERS_SCHEMA = "ye3t_tagged_cauchy_carriers_v1"
 _CONVENTION = "selected_schur_synthesis_exact_weight_space_tag_projected_pivots_v1"
 
 
+def _physical_radial_family(payloads, *, products=True):
+    """One radial family of the payloads; ``products`` requires its exact product algebra."""
+    families = {channel["source_family_id"] for payload in payloads
+                for channel in payload["request"]["channels"]}
+    if len(families) == 1 and is_shell_filtered_family(next(iter(families))):
+        if products:
+            raise ValueError("Shell-filtered sources have no exact same-occurrence product algebra; "
+                             "edge marginals and physical-image lowering need the Jacobi or Chebyshev family")
+        return next(iter(families))
+    if len(families) != 1 or not families <= {
+        ORTHOGONAL_SHIFTED_JACOBI_SOURCE_FAMILY, CHEBYSHEV_C2_SOURCE_FAMILY,
+    }:
+        raise ValueError("A physical image requires one supported radial family; cross-family identities are unavailable")
+    return next(iter(families))
+
+
 def is_tagged_cauchy_carriers_request(request):
     return isinstance(request, dict) and request.get("family") == TAGGED_CAUCHY_CARRIERS_FAMILY
 
@@ -51,12 +72,14 @@ def tagged_cauchy_carriers_request(
     tag_sectors="all", kappa_policy="all", selected_coordinates=None,
     catalogue=None, species=None,
 ):
-    """Declare fixed sources or a rank-keyed catalogue without building coefficients.
+    """Specify fixed sources or a rank-keyed catalogue without building coefficients.
 
     A catalogue needs ranks and either shared nmax/lmax or exact per-rank maps.
     Source-block patterns default to all integer partitions; max_source_blocks
     or an explicit per-rank map selects a smaller family. Candidate-record and
     complete-multiplet caps are optional, with None meaning exhaustive.
+    source_contents_by_rank optionally selects full-channel contents and tag
+    counts within those bounds before coefficient compilation.
     """
     if catalogue is not None:
         if channels is not None or block_sizes is not None or tag_count is not None:
@@ -109,7 +132,10 @@ def _copy_contents(role_dimension, size, kappa):
 
 @lru_cache(maxsize=256)
 def _role_copy_swap_character(size, kappa, copy):
-    states, vectors, _ = _role_data(3, size, kappa)
+    content = _copy_contents(3, size, kappa)[copy]
+    if content[0] != content[1]:
+        return None
+    states, vectors, _ = _scalar._selected_role_schur_vectors(3, size, kappa, copy)
     state_index = {state: index for index, state in enumerate(states)}
     swap = tuple(state_index[tuple(1 - role if role < 2 else role for role in state)] for state in states)
     for sign in (1, -1):
@@ -240,7 +266,7 @@ def _angular_data(size, angular_l, kappa, output_L):
 @lru_cache(maxsize=128)
 def _selected_block_synthesis(role_dimension, size, kappa, angular_l, output_L, role_copy, angular_copy):
     """One paired-Schur copy, all M; independent of chemical/radial labels."""
-    role_states, role_all, _ = _role_data(role_dimension, size, kappa)
+    role_states, role_all, _ = _scalar._selected_role_schur_vectors(role_dimension, size, kappa, role_copy)
     magnetic_states, angular_all, angular_count = _angular_data(size, angular_l, kappa, output_L)
     if not 0 <= angular_copy < angular_count:
         raise ValueError("selected angular multiplicity is not available")
@@ -734,6 +760,7 @@ def tagged_cauchy_carrier_physical_image_plan(payloads):
     payloads = tuple(payloads)
     if not payloads:
         raise ValueError("physical image needs at least one tagged source")
+    radial_family = _physical_radial_family(payloads)
     candidates, groups = [], defaultdict(list)
     candidate_tensor_orders = []
     for payload in payloads:
@@ -785,22 +812,28 @@ def tagged_cauchy_carrier_physical_image_plan(payloads):
         "permutation_policy": "rank_specific_formal_parents_not_a_common_S_N_action",
         "support_policy": "ordered_distinct_neighbor_occurrences",
         "density_context": "inclusive",
-        "collision_lowering": "exact_species_jacobi_racah_real_tesseral",
+        "collision_lowering": ("exact_species_chebyshev_c2_racah_real_tesseral"
+            if radial_family == CHEBYSHEV_C2_SOURCE_FAMILY else "exact_species_jacobi_racah_real_tesseral"),
         "complete_multiplet_reconstruction": True,
         "provenance": {"plan_api": "ye3t.couplings.tagged_cauchy_carrier_physical_image_plan",
                        "source_compiler": "ye3t.couplings.compile"},
     }
+    if radial_family == CHEBYSHEV_C2_SOURCE_FAMILY:
+        plan["radial_source"] = dict(CHEBYSHEV_C2_SOURCE_METADATA)
     plan["self_hash"] = _scalar._stable_hash(_scalar._freeze_json(plan))
     return plan
 
 
-def tagged_cauchy_carrier_schedule(payloads, *, coordinate_ids=None, support_realization="ordered_tags"):
+def tagged_cauchy_carrier_schedule(payloads, *, coordinate_ids=None, support_realization="ordered_tags",
+                                   source_family_plan=None):
     """Pack certified source multiplets into a shared sparse polynomial DAG.
 
     All sources in one schedule have the same support tag count. Primitive
     coordinates are compiler-owned (complete channel, role, tesseral index).
     Numeric coefficients are rounded once from the exact source certificates;
     the schedule preserves their hashes and the original coordinate inventory.
+    Shell-filtered channels carry their frozen radial source plan (windows and
+    transform coefficients) as the schedule's ``radial_source``.
     """
     payloads = tuple(payloads)
     if not payloads:
@@ -822,6 +855,7 @@ def tagged_cauchy_carrier_schedule(payloads, *, coordinate_ids=None, support_rea
     coefficients, inventory = [], []
     marginal_rows, marginal_certificate = {}, None
     if support_realization == "edge_marginal":
+        radial_family = _physical_radial_family(payloads)
         # Lower before selecting the image: independent ordered-pair source
         # coordinates need not remain independent after one tag is summed.
         candidates, groups = [], defaultdict(list)
@@ -867,7 +901,8 @@ def tagged_cauchy_carrier_schedule(payloads, *, coordinate_ids=None, support_rea
             "analytic_tag_count": 2, "explicit_support_tag_count": 1,
             "inherited_tag_action": "right_S2_character_exact_by_linearity",
             "exact_all_M_reconstruction": True, "orthogonalization": "none",
-            "physical_collision_lowering": "exact_species_jacobi_racah_real_tesseral",
+            "physical_collision_lowering": ("exact_species_chebyshev_c2_racah_real_tesseral"
+                if radial_family == CHEBYSHEV_C2_SOURCE_FAMILY else "exact_species_jacobi_racah_real_tesseral"),
             "physical_image_scope": "arbitrary_coordination_with_independent_untagged_neighbor_moments",
             "available_coordinate_ids": tuple(record[0] for record in candidates),
             "selected_coordinate_ids": tuple(candidates[index][0] for index in selected),
@@ -947,6 +982,15 @@ def tagged_cauchy_carrier_schedule(payloads, *, coordinate_ids=None, support_rea
             "passed": True, "identity": "rho(s_i) B_t=sum_u D(s_i)[u,t] B_u",
             "partitions": tuple(sorted({tuple(record["label"]["tag_partition"])
                 for record in inventory})), "exact_generator_checks": True}
+    families = {channel["source_family_id"] for channel in channels}
+    if CHEBYSHEV_C2_SOURCE_FAMILY in families:
+        _physical_radial_family(payloads)
+        schedule["radial_source"] = dict(CHEBYSHEV_C2_SOURCE_METADATA)
+    if any(is_shell_filtered_family(family) for family in families):
+        family = _physical_radial_family(payloads, products=False)
+        if source_family_plan is None or validate_shell_filtered_source_plan(source_family_plan)["family_id"] != family:
+            raise ValueError("Shell-filtered schedules require the frozen source plan of their radial family")
+        schedule["radial_source"] = json.loads(json.dumps(source_family_plan))
     schedule["self_hash"] = _scalar._stable_hash(_scalar._freeze_json(schedule))
     return schedule
 
@@ -1103,7 +1147,8 @@ def tagged_cauchy_carrier_model_plan(compiled, *, sector_policy="tagged_mixed", 
             continue
         realization = support_realization if tags == 2 else "ordered_tags"
         schedule = tagged_cauchy_carrier_schedule(payloads, coordinate_ids=selected,
-            support_realization=realization)
+            support_realization=realization,
+            source_family_plan=compiled["request"].get("catalogue", {}).get("source_family_plan"))
         if tags > 2:
             groups = {}
             for record in schedule["inventory"]:
@@ -1205,6 +1250,210 @@ def tagged_cauchy_carrier_model_plan(compiled, *, sector_policy="tagged_mixed", 
     return payload
 
 
+def tagged_cauchy_marginal_graph_records(compiled, *, target_L, parity, hidden_channels=4, output_sectors=None,
+                                        support_realization="edge_marginal"):
+    """Bind tagged source coordinates to their actual physical actions.
+
+    ``support_realization="ordered_tags"`` retains complete tag-set multiplets
+    for general tag counts. ``"edge_marginal"`` selects the existing density,
+    one-tag and two-tag edge representation described below.
+
+    Construction parents retain their formal rank N. Each emitted coordinate
+    carries its tag action through the compiler's source map. A one-tag input
+    uses the identity map and its occurrence anchors an edge. For two tags,
+    the exact marginal sums the other tag over distinct occurrences and keeps
+    the inherited S2 action on the resulting edge features.
+    Zero-tag inputs are ordinary density polynomials at each root. They retain
+    their rank-N trivial S_N action and use a separate node-domain packed array.
+    output_sectors selects several complete O(3) types from the same canonical
+    source inventory. Their names include L and parity; legacy single-sector
+    calls retain their existing names and saved identities.
+    """
+    if support_realization not in {"edge_marginal", "ordered_tags"}:
+        raise ValueError("Tagged graph support must be ordered_tags or edge_marginal")
+    from ye3t.execution_plan import YE3TCarrierKey, YE3TCarrierLayout, YE3TSourceRealization, YE3T_O3_PRIMARY_CONVENTION
+    if output_sectors is not None:
+        if not isinstance(output_sectors, (tuple, list)) or not output_sectors or any(
+                not isinstance(row, dict) or set(row) != {"L", "parity"}
+                or isinstance(row["L"], bool) or not isinstance(row["L"], int)
+                or row["L"] < 0 or row["parity"] not in {"even", "odd"} for row in output_sectors):
+            raise ValueError("Output sectors require integer L >= 0 and even/odd parity")
+        if len({(row["L"], row["parity"]) for row in output_sectors}) != len(output_sectors):
+            raise ValueError("Output sectors must be unique")
+    if support_realization == "ordered_tags":
+        return _tagged_occurrence_graph_records(compiled, target_L, parity, hidden_channels, output_sectors)
+    if any(is_shell_filtered_family(channel["source_family_id"])
+           for source in compiled["sources"] for channel in source["request"]["channels"]):
+        raise ValueError("Shell-filtered sources have no exact edge-marginal lowering; use support_realization ordered_tags")
+    source_plan = tagged_cauchy_carrier_model_plan(compiled, sector_policy="tagged_mixed",
+        hidden_channels=hidden_channels, support_realization="edge_marginal")
+    sectors = {(int(target_L), int(parity))} if output_sectors is None else {
+        (int(row["L"]), {"even": 1, "odd": -1}[row["parity"]]) for row in output_sectors}
+    if not sectors or any(ell < 0 or sign not in (-1, 1) for ell, sign in sectors):
+        raise ValueError("Marginal output sectors require nonnegative L and O3 parity")
+    tag_counts = {int(item["tag_count"]) for item in source_plan["schedules"]}
+    if not tag_counts or not tag_counts <= {0, 1, 2}:
+        raise ValueError("Graph inputs require zero-tag density, one tag or a two-tag marginal")
+    offsets, packed_widths = {}, {"node": 0, "edge": 0}
+    for schedule in source_plan["schedules"]:
+        tags = int(schedule["tag_count"])
+        domain = "edge" if tags else "node"
+        offsets[tags] = packed_widths[domain]
+        packed_widths[domain] += schedule["output_dimension"]
+    records = []
+    for group in source_plan["source_inventories"]:
+        tags = int(group["tag_count"])
+        for record in group["sources"]:
+            formal = YE3TCarrierLayout.from_dict(record["carrier_layout"])
+            if (formal.key.rotation_L, formal.key.parity) not in sectors:
+                continue
+            character = record["tag_character"]
+            partition = (tags,) if character == 1 else (1, 1)
+            key = (YE3TCarrierKey(tags, partition, formal.key.rotation_L, YE3T_O3_PRIMARY_CONVENTION, formal.key.parity)
+                   if tags else formal.key)
+            # The model-plan carrier_layout describes its optional learned
+            # projection. This adapter consumes the full raw schedule output;
+            # input_channel_count and component_indices specify that codomain.
+            layout = YE3TCarrierLayout(key, record["input_channel_count"], 1, formal.magnetic_count)
+            name = "r"+str(formal.key.rank)+"_"+("even" if character == 1 else "odd")+"_"+record["source_sector_branch"]
+            if tags < 2:
+                name += "_s"+str(tags)
+            if output_sectors is not None:
+                name += "_L"+str(formal.key.rotation_L)+("_even" if formal.key.parity == 1 else "_odd")
+            if any(row["id"] == name for row in records):
+                raise ArithmeticError("Marginal source group identity is not unique")
+            source = YE3TSourceRealization("selected_marginal" if tags else "ordinary_density",
+                formal.key.rank, retain_role_order=bool(tags),
+                metadata={"source_family": "tagged_cauchy", "coordinate_ids": record["source_coordinate_ids"]})
+            components = tuple(offsets[tags]+index for index in record["source_component_indices"])
+            arguments = {"root": "edge_index[0]", "anchor": "edge_index[1],image_shift",
+                "density_context": "inclusive", "source_tag_count": tags, "support_tag_count": 1,
+                "source_coordinate_ids": record["source_coordinate_ids"],
+                "source_component_indices": components,
+                "angular_input": "real_tesseral", "angular_output": "complex_condon_shortley",
+                "collection": "sum_to_anchor_receiver"}
+            if not tags:
+                arguments.pop("anchor")
+                arguments.update(root="node_index", support_tag_count=0, collection="identity_at_root")
+            binding = source.bind_outputs({name: layout}, actual_action=("shared_auxiliary_S"+str(tags)+"_times_O3"
+                if tags else "ordinary_density:S"+str(formal.key.rank)),
+                construction_parents=[formal.key.to_dict()],
+                fixed_maps=[{"plan_hash": source_plan["plan_hash"],
+                    "map_name": ("distinct_second_tag_marginal" if tags == 2 else
+                                 "one_tag_identity" if tags else "density_polynomial"),
+                    "orientation": "identity" if tags == 1 else "analysis"}],
+                argument_bindings=arguments, parameter_names=[], row_domain="edge" if tags else "node",
+                derivative_modes=["value", "vjp", "double_backward"])
+            records.append({"id": name, "rank": formal.key.rank, "source_kind": "tagged_cauchy_marginal",
+                "factors": [], "binding": binding, "component_indices": list(components),
+                "execution_plan": {"plan_hash": source_plan["plan_hash"], "kind": "tagged_cauchy_marginal"}})
+    if not records:
+        raise ValueError("The selected tagged marginal rotation/parity sector has zero physical image")
+    realized = {(layout["key"]["rotation_L"], layout["key"]["parity"])
+        for row in records for layout in row["binding"]["output_layouts"].values()}
+    if realized != sectors:
+        raise ValueError("Selected marginal sectors have zero physical image: " + repr(sorted(sectors-realized)))
+    return {"source_plan": source_plan, "records": records,
+            "source_smoothness": (dict(CHEBYSHEV_C2_SOURCE_METADATA)
+                if _physical_radial_family(compiled["sources"]) == CHEBYSHEV_C2_SOURCE_FAMILY else
+                {"radial_family": "orthogonal_shifted_jacobi_origin_regular_v1",
+                 "zero_extension": "C1", "cutoff_second_derivative": "one_sided",
+                 "maturity": "experimental_compatibility_source"}),
+            "available_products": ["same_action_tensor_product"]}
+
+
+def _tagged_occurrence_graph_records(compiled, target_L, parity, hidden_channels, output_sectors):
+    """Bind complete S_s x O(3) multiplets to distinct physical tag tuples.
+
+    Formal construction rank N and the acting tag degree s remain separate.
+    All source coefficients and multiplicity coordinates are consumed from the
+    canonical model plan. Runtime may choose one orientation per tag orbit,
+    provided transport carries the same physical occurrences and final scalar
+    reduction uses complete irreducible tensors.
+    """
+    from ye3t.execution_plan import YE3TCarrierKey, YE3TCarrierLayout, YE3TSourceRealization, YE3T_O3_PRIMARY_CONVENTION
+    sectors = {(int(target_L), int(parity))} if output_sectors is None else {
+        (int(row["L"]), {"even": 1, "odd": -1}[row["parity"]]) for row in output_sectors}
+    if not sectors or any(ell < 0 or sign not in (-1, 1) for ell, sign in sectors):
+        raise ValueError("Tagged output sectors require nonnegative L and signed parity")
+    source_plan = tagged_cauchy_carrier_model_plan(compiled, sector_policy="tagged_mixed",
+        hidden_channels=hidden_channels, support_realization="ordered_tags")
+    shell_plans = [schedule["radial_source"] for schedule in source_plan["schedules"]
+                   if is_shell_filtered_family(schedule.get("radial_source", {}).get("family_id", ""))]
+    physical = {"radial_family": shell_plans[0]["family_id"]} if shell_plans else {}
+    records = []
+    for family in source_plan["source_inventories"]:
+        tags = int(family["tag_count"])
+        grouped = {}
+        for item in family["sources"]:
+            grouped.setdefault(item.get("right_tag_group_id", item["lineage_id"]), []).append(item)
+        for group in grouped.values():
+            first = group[0]
+            formal = YE3TCarrierLayout.from_dict(first["carrier_layout"])
+            if (formal.key.rotation_L, formal.key.parity) not in sectors:
+                continue
+            partition = tuple(first.get("tag_partition", (tags,) if first["tag_character"] == 1 else (1,)*tags))
+            dimension = int(first.get("tag_tableau_count", 1))
+            group.sort(key=lambda item: item.get("tag_tableau_index", 0))
+            if len(group) != dimension or any(item.get("tag_tableau_index", 0) != t
+                                            for t, item in enumerate(group)):
+                raise ArithmeticError("Tagged graph sources require every tableau coordinate")
+            key = (YE3TCarrierKey(tags, partition, formal.key.rotation_L, YE3T_O3_PRIMARY_CONVENTION, formal.key.parity)
+                   if tags else formal.key)
+            channels, magnetic = int(first["input_channel_count"]), formal.magnetic_count
+            layout = YE3TCarrierLayout(key, channels, dimension, magnetic)
+            # The model inventory is tableau-major. Public carriers are a,t,M.
+            indices = tuple(group[t]["source_component_indices"][a*magnetic+m]
+                            for a in range(channels) for t in range(dimension) for m in range(magnetic))
+            if len(set(indices)) != layout.width:
+                raise ArithmeticError("Tagged graph component indices overlap")
+            name = ("r"+str(formal.key.rank)+"_s"+str(tags)+"_tau"+"_".join(map(str, partition))
+                    +"_"+first["source_sector_branch"]+"_L"+str(key.rotation_L)
+                    +("_even" if key.parity == 1 else "_odd"))
+            source = YE3TSourceRealization("tagged_cauchy_occurrence" if tags else "ordinary_density",
+                formal.key.rank, retain_role_order=bool(tags), injective=bool(tags),
+                metadata={"source_family": "tagged_cauchy", "coordinate_ids": first["source_coordinate_ids"],
+                          "tag_count": tags, "density_context": "inclusive", "emitted_action": "right_tags",
+                          **physical})
+            binding = source.bind_outputs({name: layout},
+                actual_action="tagged_occurrence:S"+str(tags) if tags else "ordinary_density:S"+str(formal.key.rank),
+                construction_parents=[formal.key.to_dict()],
+                fixed_maps=[{"plan_hash": source_plan["plan_hash"], "map_name": "complete_ordered_tag_source", "orientation": "analysis"}],
+                argument_bindings={"root": "center_atom", "source_tag_count": tags, "support_tag_count": tags,
+                    "occurrence_identity": "root_atom_neighbor_atom_lattice_image",
+                    "distinctness": "all_tag_occurrences_distinct", "density_context": "inclusive",
+                    "source_coordinate_ids": first["source_coordinate_ids"], "source_component_indices": indices,
+                    "angular_input": "real_tesseral", "angular_output": "complex_condon_shortley",
+                    "transport": "same_physical_tag_set_after_root_image_translation"},
+                parameter_names=[], row_domain="sample", derivative_modes=["value", "vjp", "double_backward"])
+            records.append({"id": name, "rank": formal.key.rank, "tag_count": tags,
+                "source_kind": "tagged_cauchy_occurrence", "factors": [], "binding": binding,
+                "component_indices": list(indices),
+                "execution_plan": {"plan_hash": source_plan["plan_hash"], "kind": "tagged_cauchy_occurrence"}})
+    if {(YE3TCarrierLayout.from_dict(row["binding"]["output_layouts"][row["id"]]).key.rotation_L,
+         YE3TCarrierLayout.from_dict(row["binding"]["output_layouts"][row["id"]]).key.parity)
+        for row in records} != sectors:
+        raise ValueError("Selected tagged output sector has zero physical image")
+    if len({row["id"] for row in records}) != len(records):
+        raise ArithmeticError("Tagged source group identities overlap")
+    # TODO(general-tags-validation): validate shared-graph atomistic execution,
+    # force-loss gradients and scaling at s>=4 (including s=10). Keep the
+    # compiler and support algorithms tag-count general; the initial new
+    # end-to-end qualification exercises s=3 only.
+    return {"source_plan": source_plan, "records": records,
+            "available_products": ["same_action_tensor_product"],
+            "support_realization": "ordered_tags",
+            **({"source_smoothness": shell_filtered_source_metadata(shell_plans[0])} if shell_plans else {})}
+
+
+def _catalogue_content_key(channels, sizes, tags):
+    # Content selection is independent of block input order. Coefficient
+    # orientation still comes from the canonical catalogue's original request.
+    return (tuple(sorted((size, channel["neighbor_species"], channel["radial_channel"],
+                          channel["l"], channel["source_family_id"])
+                         for channel, size in zip(channels, sizes, strict=True))), tags)
+
+
 def _catalogue_request(catalogue, species):
     cfg = dict(catalogue)
     species = tuple(str(value) for value in species or ())
@@ -1301,6 +1550,103 @@ def _catalogue_request(catalogue, species):
     if ((normalized["max_records_per_rank"] is not None and
          normalized["max_records_per_rank"] <= 0) or normalized["input_Lmax"] < 0):
         raise ValueError("record cap must be positive or None and input_Lmax nonnegative")
+    plan = cfg.get("source_family_plan")
+    if is_shell_filtered_family(normalized["source_family_id"]):
+        # Shell-decorated channels: q = shell * radial_count + n. The frozen
+        # transform plan is part of the request identity; nmax/lmax caps count
+        # base radial functions per shell and angular degrees of that plan.
+        if plan is None or validate_shell_filtered_source_plan(plan)["family_id"] != normalized["source_family_id"]:
+            raise ValueError("A shell-filtered source family requires the frozen source_family_plan of its family id")
+        if (max(normalized["nmax_per_rank"].values()) > int(plan["radial_count"])
+                or max(normalized["lmax_per_rank"].values()) > int(plan["lmax"])):
+            raise ValueError("Catalogue radial/angular caps exceed the frozen shell-filtered source plan")
+        normalized["source_family_plan"] = json.loads(json.dumps(plan))
+        if "shell_occupancies_by_rank" in cfg:
+            raw = cfg["shell_occupancies_by_rank"]
+            if not isinstance(raw, Mapping):
+                raise TypeError("shell_occupancies_by_rank must be a rank-keyed mapping")
+            supplied = {int(rank): rows for rank, rows in raw.items()}
+            if len(supplied) != len(raw) or set(supplied) != set(ranks):
+                raise ValueError("shell_occupancies_by_rank must cover each configured rank exactly once")
+            occupancies = {}
+            for rank in ranks:
+                rows = supplied[rank]
+                if not isinstance(rows, (list, tuple)) or not rows:
+                    raise ValueError("Each shell_occupancies_by_rank entry needs at least one occupancy")
+                selected = set()
+                for row in rows:
+                    if (not isinstance(row, (list, tuple)) or len(row) != int(plan["shell_count"])
+                            or any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in row)
+                            or sum(row) != rank):
+                        raise ValueError("A shell occupancy lists one nonnegative factor count per shell summing to its rank")
+                    selected.add(tuple(int(value) for value in row))
+                occupancies[str(rank)] = tuple(sorted(selected))
+            normalized["shell_occupancies_by_rank"] = occupancies
+    elif plan is not None or "shell_occupancies_by_rank" in cfg:
+        raise ValueError("source_family_plan and shell_occupancies_by_rank apply only to shell-filtered radial families")
+
+    def radial_allowed(radial, rank):
+        count = normalized["nmax_per_rank"][str(rank)]
+        if plan is None:
+            return 0 <= radial < count
+        return 0 <= radial < plan["shell_count"] * plan["radial_count"] and radial % plan["radial_count"] < count
+    if "source_contents_by_rank" in cfg:
+        raw = cfg["source_contents_by_rank"]
+        if not isinstance(raw, Mapping):
+            raise TypeError("source_contents_by_rank must be a rank-keyed mapping")
+        supplied = {int(rank): rows for rank, rows in raw.items()}
+        if len(supplied) != len(raw) or set(supplied) != set(ranks):
+            raise ValueError("source_contents_by_rank must cover each configured rank exactly once")
+        contents = {}
+        for rank in ranks:
+            rows = supplied[rank]
+            if not isinstance(rows, (list, tuple)) or not rows:
+                raise ValueError("Each source_contents_by_rank entry needs nonempty contents")
+            selected, seen = [], set()
+            for row in rows:
+                if (not isinstance(row, Mapping) or not {"channels", "block_sizes"} <= set(row)
+                        or set(row)-{"channels", "block_sizes", "tag_counts"}):
+                    raise ValueError("A source content needs channels, block_sizes and optional tag_counts")
+                sizes = row["block_sizes"]
+                if (not isinstance(sizes, (list, tuple)) or not sizes or
+                        any(isinstance(size, bool) or not isinstance(size, int) or size < 1 for size in sizes)
+                        or sum(sizes) != rank or tuple(sorted(sizes)) not in
+                        {tuple(sorted(pattern)) for pattern in partitions[rank]}):
+                    raise ValueError("Source content block_sizes must match a configured rank partition")
+                tags = row.get("tag_counts", tag_counts_by_rank[str(rank)])
+                if (not isinstance(tags, (list, tuple)) or not tags or len(set(tags)) != len(tags)
+                        or any(isinstance(tag, bool) or not isinstance(tag, int) or
+                               tag not in tag_counts_by_rank[str(rank)] for tag in tags)):
+                    raise ValueError("Source content tag_counts must be unique configured tag counts")
+                channels = []
+                for channel in row["channels"]:
+                    if (not isinstance(channel, Mapping) or not
+                            {"neighbor_species", "radial_channel", "l"} <= set(channel)
+                            or set(channel)-{"neighbor_species", "radial_channel", "l", "source_family_id"}):
+                        raise ValueError("Source content channels need species, radial_channel and l")
+                    radial, angular = channel["radial_channel"], channel["l"]
+                    if (channel["neighbor_species"] not in species or
+                            any(isinstance(value, bool) or not isinstance(value, int) for value in (radial, angular))
+                            or not radial_allowed(radial, rank)
+                            or not 0 <= angular <= normalized["lmax_per_rank"][str(rank)]
+                            or channel.get("source_family_id", normalized["source_family_id"]) != normalized["source_family_id"]):
+                        raise ValueError("Source content channel is outside the configured species/radial/angular bounds")
+                    channels.append(dict(channel, source_family_id=normalized["source_family_id"]))
+                # Reuse fixed-content validation, including maximal full-channel
+                # blocks. This constructs no labels or numerical coefficients.
+                tagged_cauchy_carriers_request(channels, sizes, tag_count=tags[0])
+                blocks = sorted(zip(sizes, channels, strict=True),
+                                key=lambda item: _catalogue_content_key([item[1]], [item[0]], 0))
+                sizes, channels = zip(*blocks)
+                for tag in tags:
+                    key = _catalogue_content_key(channels, sizes, tag)
+                    if key in seen:
+                        raise ValueError("Duplicate source content and tag count")
+                    seen.add(key)
+                selected.append({"channels": channels, "block_sizes": sizes, "tag_counts": tuple(sorted(tags))})
+            contents[str(rank)] = tuple(sorted(selected, key=lambda row:
+                (_catalogue_content_key(row["channels"], row["block_sizes"], 0), row["tag_counts"])))
+        normalized["source_contents_by_rank"] = contents
     request = {"family": TAGGED_CAUCHY_CARRIERS_FAMILY, "species": species, "catalogue": normalized}
     request["request_hash"] = _scalar._stable_hash(_scalar._freeze_json(request))
     return request
@@ -1329,10 +1675,21 @@ def _catalogue_count(request):
     cfg = request["catalogue"]
     records, rank_reports = [], []
     for rank in cfg["ranks"]:
+        explicit = cfg.get("source_contents_by_rank", {}).get(str(rank))
+        requested = None if explicit is None else {
+            _catalogue_content_key(row["channels"], row["block_sizes"], tags)
+            for row in explicit for tags in row["tag_counts"]}
+        matched = set()
+        plan = cfg.get("source_family_plan")
+        radial_indices = (range(cfg["nmax_per_rank"][str(rank)]) if plan is None else
+                          [shell * int(plan["radial_count"]) + n for shell in range(int(plan["shell_count"]))
+                           for n in range(cfg["nmax_per_rank"][str(rank)])])
         channels = [{"neighbor_species": species, "radial_channel": radial, "l": angular,
                      "source_family_id": cfg["source_family_id"]}
                     for angular in range(cfg["lmax_per_rank"][str(rank)] + 1)
-                    for radial in range(cfg["nmax_per_rank"][str(rank)]) for species in request["species"]]
+                    for radial in radial_indices for species in request["species"]]
+        occupancies = cfg.get("shell_occupancies_by_rank", {}).get(str(rank))
+        occupancies = None if occupancies is None else {tuple(row) for row in occupancies}
         candidates = []
         for pattern in cfg["source_block_partitions_by_rank"][str(rank)]:
             # Equal-size blocks are unordered; different sizes bind different
@@ -1346,12 +1703,25 @@ def _catalogue_count(request):
                     if tags > rank:
                         continue
                     selected_channels = [channels[index] for index in indices]
+                    if occupancies is not None and tuple(
+                            sum(size for channel, size in zip(selected_channels, pattern, strict=True)
+                                if channel["radial_channel"] // int(plan["radial_count"]) == shell)
+                            for shell in range(int(plan["shell_count"]))) not in occupancies:
+                        continue
+                    key = _catalogue_content_key(selected_channels, pattern, tags)
+                    if requested is not None and key not in requested:
+                        continue
+                    if requested is not None and key in matched:
+                        raise ValueError("Configured block partitions repeat a selected source content")
+                    matched.add(key)
                     candidates.append({"rank": rank, "pattern": pattern,
                         "max_primitive_l": max(channel["l"] for channel in selected_channels),
                         "request": tagged_cauchy_carriers_request(selected_channels, pattern, tag_count=tags,
                             target_Ls=range(cfg["input_Lmax"] + 1),
                             kappa_policy=cfg.get("kappa_policy", "all"),
                             tag_sectors=cfg.get("tag_sectors", "all"))})
+        if requested is not None and matched != requested:
+            raise ValueError("Configured source contents do not match canonical catalogue candidates")
         selected = _round_robin_groups(candidates,
             lambda record: (record["pattern"], record["request"]["tag_count"], record["max_primitive_l"]),
             len(candidates) if rank == 1 or cfg["max_records_per_rank"] is None

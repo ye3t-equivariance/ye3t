@@ -209,7 +209,7 @@ def class_word_table(w0, slots, size, generators):
     return table
 
 
-def unit_columns(dimension, size, class_words, class_dmap, class_stabilizer):
+def unit_columns(dimension, size, class_words, class_dmap, class_stabilizer, *, selected_word_indices=None):
     """Yield ``(local_index, word, full)`` for each word in ``class_words`` (in
     the given order), with ``full[t]`` the sparse dict
     ``{local_target_index: coefficient}`` of ``E_{t,0} e_word`` for every
@@ -220,12 +220,21 @@ def unit_columns(dimension, size, class_words, class_dmap, class_stabilizer):
     ``local_target_index`` indexes into ``class_words`` itself (position of
     the target word within this same list), so callers that need a
     different index space (e.g. the position within a larger state list)
-    must remap it.
+    must remap it. ``selected_word_indices`` restricts which source columns
+    are constructed; their indices still refer to the complete class.
     """
 
     sp = _sympy()
     prefactor = sp.Rational(int(dimension), factorial(int(size)))
+    selected = None
+    if selected_word_indices is not None:
+        indices = tuple(int(index) for index in selected_word_indices)
+        selected = set(indices)
+        if len(indices) != len(selected) or any(index < 0 or index >= len(class_words) for index in indices):
+            raise ValueError("Selected matrix-unit columns must be distinct valid class indices.")
     for local_index, word in enumerate(class_words):
+        if selected is not None and local_index not in selected:
+            continue
         row0 = class_dmap[word][0, :] * class_stabilizer
         full = {t: {} for t in range(int(dimension))}
         for target_local_index, target_word in enumerate(class_words):
@@ -235,6 +244,89 @@ def unit_columns(dimension, size, class_words, class_dmap, class_stabilizer):
                 if value != 0:
                     full[t][target_local_index] = value
         yield local_index, word, full
+
+
+def _word_adjacent_path(start, target):
+    """A stable adjacent-factor path from the sorted word to its target."""
+    start, target = tuple(start), tuple(target)
+    if tuple(sorted(target)) != start:
+        raise ValueError("Coset target must have the sorted source word's content.")
+    current, path = list(start), []
+    for destination, value in enumerate(target):
+        position = current.index(value, destination)
+        while position > destination:
+            adjacent = position - 1
+            current[adjacent], current[position] = current[position], current[adjacent]
+            path.append(adjacent)
+            position -= 1
+    return tuple(path)
+
+
+def class_projected_row(w0, word, dimension, generators, class_stabilizer):
+    """Compute D_word[0,:]S by vector transport, without the full D_word.
+
+    A different representative of the same word changes D_word by a right
+    stabilizer factor. Its product with S is unchanged. The generator order
+    follows class_word_table's left multiplication at each adjacent step.
+    """
+    sp = _sympy()
+    row = sp.zeros(1, int(dimension))
+    row[0, 0] = 1
+    for adjacent in reversed(_word_adjacent_path(w0, word)):
+        row = row * generators[adjacent]
+    return row * class_stabilizer
+
+
+def selected_unit_column(dimension, size, class_words, w0, word, generators, class_stabilizer):
+    """All tableau components of one matrix-unit column by vector transport."""
+    sp = _sympy()
+    initial = class_projected_row(w0, word, dimension, generators, class_stabilizer).T
+    prefactor = sp.Rational(int(dimension), factorial(int(size)))
+    full = {tableau: {} for tableau in range(int(dimension))}
+    for index, target in enumerate(class_words):
+        column = initial
+        for adjacent in _word_adjacent_path(w0, target):
+            column = generators[adjacent] * column
+        for tableau in range(int(dimension)):
+            value = sp.simplify(prefactor * column[tableau])
+            if value != 0:
+                full[tableau][index] = value
+    return full
+
+
+def class_pivot_indices(dimension, class_words, class_dmap, class_stabilizer, target_count, *, row_for_word=None):
+    """Return the original E00 pivots using exact Young-dimension rows.
+
+    Put R_w=D(pi_w)[0,:]S, where S sums the stabilizer matrices. Group
+    averaging gives S.T=S and S*S=|H|S, hence E00=d/(N!|H|) R R.T.
+    A row Gram matrix and R.T have identical indexed column dependencies.
+    Scanning these smaller columns therefore preserves every pivot word.
+
+    Reference: Etingof et al., Introduction to Representation Theory (2011),
+    sections 4.5--4.7, averaging and matrix-element orthogonality. This Gram
+    reduction is independently derived from the coset convention above.
+    """
+    sp = _sympy()
+    target_count = int(target_count)
+    if target_count < 0:
+        raise ValueError("The expected class multiplicity must be nonnegative.")
+    if target_count == 0:
+        return []
+    kept = sp.zeros(int(dimension), 0)
+    indices = []
+    for index, word in enumerate(class_words):
+        column = ((class_dmap[word][0, :] * class_stabilizer) if row_for_word is None
+                  else row_for_word(word)).T
+        trial = kept.row_join(column)
+        _, pivots = trial.rref()
+        if len(pivots) == kept.cols + 1:
+            kept = trial
+            indices.append(index)
+            if len(indices) == target_count:
+                return indices
+        elif len(pivots) != kept.cols:
+            raise RuntimeError("Exact class pivot rank changed inconsistently.")
+    raise RuntimeError("Coset class pivot count disagrees with its expected Kostka count.")
 
 
 def stream_class_pivots(dimension, size, class_words, class_dmap, class_stabilizer, target_count):

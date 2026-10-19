@@ -568,18 +568,25 @@ def _real_rows(canonical, request, phase_exponent):
                             projector[component, column] * weight
                         )
     rows = []
+    # Repeated exact expressions share one simplification and reality check.
+    # This cache is local to the complete multiplet conversion.
+    simplified_values = {}
     for terms in components:
         row = {}
         for monomial, value in terms.items():
-            value = sp.simplify(sp.expand(value))
-            if value == 0:
-                continue
-            if sp.simplify(sp.im(value)) != 0:
-                raise RuntimeError(
-                    "Real-form coefficient is not exactly real; the declared "
-                    "pseudo-tensor phase does not realify this multiplet."
-                )
-            row[monomial] = sp.simplify(sp.re(value))
+            if value not in simplified_values:
+                simplified = sp.simplify(sp.expand(value))
+                if simplified != 0:
+                    if sp.simplify(sp.im(simplified)) != 0:
+                        raise RuntimeError(
+                            "Real-form coefficient is not exactly real; the configured "
+                            "pseudo-tensor phase does not realify this multiplet."
+                        )
+                    simplified = sp.simplify(sp.re(simplified))
+                simplified_values[value] = simplified
+            value = simplified_values[value]
+            if value != 0:
+                row[monomial] = value
         rows.append(row)
     return tuple(rows)
 

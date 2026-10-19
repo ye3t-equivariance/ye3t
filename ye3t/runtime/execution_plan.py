@@ -12089,8 +12089,26 @@ def symmetric_power_shared_monomial_reference(
         dtype=input.dtype,
         device=input.device,
     )
-    for component in range(input_dimension):
-        component_counts = counts[:, component].reshape(1, -1)
+    # Reference evaluation and the CPU differentiable adjoint share this path.
+    # Pack positive-exponent factors so absent variables do not each retain a
+    # batch-by-monomial autograd graph. Support comes from the compiler table;
+    # no labels or coefficients are generated here. Integer products remain
+    # zero-safe and differentiable through higher orders.
+    if bool(torch.any(counts < 0)):
+        raise ValueError("monomial_counts must be nonnegative")
+    present = counts > 0
+    support_sizes = present.sum(dim=1)
+    support_width = int(support_sizes.max()) if support_sizes.numel() else 0
+    components = counts.new_zeros((counts.shape[0], support_width))
+    exponents = torch.zeros_like(components)
+    term_index, component_index = present.nonzero(as_tuple=True)
+    if term_index.numel():
+        support_index = present.cumsum(dim=1)[term_index, component_index] - 1
+        components[term_index, support_index] = component_index
+        exponents[term_index, support_index] = counts[term_index, component_index]
+    for factor in range(support_width):
+        component_counts = exponents[:, factor].reshape(1, -1)
+        factor_values = flat[:, components[:, factor]]
         component_power = torch.ones_like(monomials)
         maximum = (
             int(component_counts.max().detach().cpu())
@@ -12100,7 +12118,7 @@ def symmetric_power_shared_monomial_reference(
         for exponent in range(maximum):
             component_power = torch.where(
                 component_counts > exponent,
-                component_power * flat[:, component : component + 1],
+                component_power * factor_values,
                 component_power,
             )
         monomials = monomials * component_power

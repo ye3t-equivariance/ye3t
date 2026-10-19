@@ -1,5 +1,48 @@
 # Covariant Cauchy bases for arbitrary `(L, parity)` and Young outputs
 
+## Selecting tagged input contents
+
+The tagged catalogue accepts `source_contents_by_rank` to select particular
+full-channel contents before coefficient compilation. Each entry supplies
+`channels`, their `block_sizes`, and optional `tag_counts`. For example, within
+a catalogue with ranks `[4, 6]`, `nmax=3`, `lmax=1`, `max_source_blocks=3`, and
+`tag_counts=[0, 2]`:
+
+```python
+source_contents_by_rank = {
+    4: [{
+        "channels": [
+            {"neighbor_species": "Ni", "radial_channel": 2, "l": 1},
+            {"neighbor_species": "Ni", "radial_channel": 0, "l": 1},
+            {"neighbor_species": "Ni", "radial_channel": 1, "l": 1},
+        ],
+        "block_sizes": [2, 1, 1],
+        "tag_counts": [0, 2],
+    }],
+    6: [{
+        "channels": [{"neighbor_species": "Ni", "radial_channel": 0, "l": 0}],
+        "block_sizes": [6],
+        "tag_counts": [2],
+    }],
+}
+```
+
+Place this mapping in the `catalogue` passed to
+`ye3t.couplings.tagged_cauchy_carriers_request`. Radial channel indices start
+at zero. The catalogue's radial family supplies `source_family_id`; an
+explicit value must agree with it. Every configured rank needs a nonempty
+selection. Each content must fit the configured species, radial/angular caps,
+block partitions and tag counts. Repeated identical channels occupy one
+maximal block. Omitted per-content `tag_counts` selects that rank's configured
+tag counts.
+
+The selection identifies physical inputs. The canonical compiler still
+chooses the coefficient orientation and every valid multiplicity coordinate.
+Set `max_records_per_rank=None` and `max_features_per_rank=None` to compile all
+couplings for these contents, subject to the configured parent rotations and
+permutation sectors. Selection is part of the request hash and saved config.
+Omitting `source_contents_by_rank` preserves the ordinary catalogue behavior.
+
 ## Ordered role-resolved factors and general Young outputs
 
 The `ordered_role` carrier is the factor-resolved extension of the commuting
@@ -74,6 +117,62 @@ External sources may name channels with `factor_type`, `l`, and
 Omitting `parity` uses the polar value `(-1)^l`. The older atomistic
 `neighbor_species`/`radial_channel` channel form remains readable. The
 compiler fixes output parity to the product of input factor parities.
+
+### Role-copy selection for tagged sources
+
+The tagged-source compiler obtains role-copy contents from exact pivot words.
+For a content class with stabilizer \(H\), let \(D_w\) be its real
+Young-orthogonal coset matrix, \(d\) the Young dimension, and
+\(S=\sum_{h\in H}D(h)\). Write \(R_w=D_w[0,:]S\). Then
+
+\[
+S^{\mathsf T}=S,\qquad S^2=|H|S,\qquad
+E_{00}=\frac{d}{N!|H|}RR^{\mathsf T}.
+\]
+
+The ordered independent columns of \(E_{00}\) have the same indices as
+those of \(R^{\mathsf T}\). Copy selection therefore uses vectors of length
+\(d\). The exact Kostka count determines the number of pivots in each
+content class; sorting their words gives the established global copy order.
+When coefficients are needed, the compiler constructs all tableau components
+of the selected copy on its content class. Other role words have exactly zero
+coefficients. This preserves the existing normalization, labels and source
+polynomials. The compiler applies adjacent Young generators to the required
+row or column vectors directly. It computes a candidate pivot row only when
+the exact rank test needs it, and stores no full Young matrix per word in
+this tagged role-copy path. The content-word list and a selected copy's
+coefficient support still grow with the content class.
+
+The averaging and matrix-element identities are described in
+[Etingof et al., *Introduction to Representation Theory*, sections 4.5–4.7](https://math.mit.edu/~etingof/reprbook.pdf).
+The Gram reduction above follows from the repository's coset convention.
+Tests compare complete vectors, factor actions, tag exchange, count labels
+and compiled artifacts against the full native construction.
+
+Angular highest-weight construction uses the same selected-column storage.
+Let \(e_p\) denote the selected word columns and let \(\gamma_{pa}\) be the
+coefficients of angular copy \(a\) from the raising nullspace. If \(s_a\) is
+the first nonzero entry of \(\sum_p\gamma_{pa}E_{00}e_p\), its established
+normalization gives
+
+\[
+v_a=\frac{1}{s_a}\sum_p\gamma_{pa}E_{00}e_p,
+\qquad
+E_{t0}v_a=\frac{1}{s_a}\sum_p\gamma_{pa}E_{t0}e_p.
+\]
+
+The second equality follows from \(E_{t0}E_{00}=E_{t0}\). The compiler
+therefore stores columns for the selected pivots and uses the same raising
+nullspace, copy order and normalization for all tableau components. Exact
+factor-action, independence and raising/lowering checks apply to the resulting
+vectors.
+
+Restricted adjacent-factor actions are computed by permuting basis rows.
+For a transposition \(s\), \((P_s V)_{q,a}=V_{s^{-1}q,a}=V_{sq,a}\).
+The compiler gathers these rows, solves for the action in the selected
+independent columns, and checks exact closure. This avoids storing a square
+permutation matrix on the full magnetic-word space. The coefficient coordinates
+and the independence and closure requirements are unchanged.
 
 ### Compact Young transport
 

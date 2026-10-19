@@ -10,8 +10,10 @@ builder. It works in the raw uncoupled magnetic basis and constructs:
 4. a canonical carrier-vs-copy split
 5. full lowered multiplets for every canonical highest-weight vector
 
-This is a heavier exact reference path for mathematical work. The default
-runtime-oriented ACE / ``ye3t`` path is unchanged.
+Full-sector construction is a bounded exact reference for mathematical work.
+Canonical Cauchy compilation also uses this module's requested-weight helpers:
+they store selected matrix-unit columns and construct complete angular
+multiplets through exact raising and lowering.
 
 Related validation tools can compare these sectors with Young/block builders and
 with generalized tensor-product metadata.
@@ -399,34 +401,23 @@ def _angular_scalar_vectors_coset(
     *,
     normalize_tableaux=True,
 ):
-    """Class-wise construction of the E_{0,0} image and tableau vectors on the
-    M=0 scalar space, via the exact coset decomposition.
+    """Selected E_{0,0} pivots and complete tableau vectors on one weight space.
 
-    Mirrors ``ye3t.couplings.lifted_cauchy_scalar._role_schur_vectors_coset``
-    using the shared ``ye3t.representations.coset_units`` helpers:
-    words here are magnetic-index tuples (signed integers) instead of role
-    values, and content classes are grouped by multiset of ``m`` values
-    instead of role values -- the torus of ``GL(V_l)`` commutes with
-    ``S_size``, so every matrix unit and the isotypic projector preserve
-    these magnetic-content classes exactly as role-content classes are
-    preserved (the same argument: any linear combination of slot-permutation
-    operators maps a word to a combination of words with the same multiset).
-    ``coset_units.content_key`` (``tuple(sorted(word))``) is agnostic to
-    whether the entries are non-negative role values or signed magnetic
-    indices, so it is reused unchanged here.
+    Magnetic-content classes contain words with the same multiset of m
+    values. Factor permutations preserve each class. The shared coset_units
+    helpers select its original independent columns by the exact Kostka
+    count and construct their complete tableau components by vector transport.
 
-    Returns ``(scalar_vectors, multiplicity)`` with ``scalar_vectors`` keyed
-    ``(copy_index, tableau) -> exact column vector over scalar_states``,
-    matching what the native ``multiplicity > 1`` branch returns.  Never
-    calls ``combined_projector_matrix`` or
-    ``_selected_subgroup_matrix_units_for_factor_native`` (both cost one sum
-    over all ``size!`` permutations per state; avoiding them is the entire
-    point of this path).  Certificates replacing the native path's
-    ``projector_matrix * v == v`` check: an explicit Coxeter/intertwining
-    check on the raw (pre-normalization) tableau vectors of every copy (see
-    below) and an exact linear-independence check of all
-    ``dimension * multiplicity`` tableau vectors together (the caller
-    additionally checks ``J+ v == 0``, unchanged from the native path).
+    The raising nullspace fixes the angular multiplicity coordinates in that
+    selected E00 basis. E_t0 E00 = E_t0 transfers those same coefficients to
+    every tableau. Storage contains the selected columns and the returned
+    vectors. The full native matrix-unit construction is an independent
+    reference in tests.
+
+    Return (scalar_vectors, multiplicity), keyed by (copy_index, tableau),
+    with vectors over scalar_states. Exact Coxeter/intertwining checks act on
+    every raw tableau vector; the assembled vectors must be independent.
+    Callers additionally check the raising equation and complete lowering.
     """
 
     from ye3t.couplings.tagged_cauchy import kostka_number
@@ -434,9 +425,10 @@ def _angular_scalar_vectors_coset(
     from .coset_units import (
         adjacent_transposition_generators,
         class_stabilizer_sum,
-        class_word_table,
+        class_pivot_indices,
+        class_projected_row,
         content_key,
-        unit_columns,
+        selected_unit_column,
     )
 
     sp = _sympy()
@@ -450,7 +442,7 @@ def _angular_scalar_vectors_coset(
         class_member_indices.setdefault(content_key(state), []).append(global_index)
 
     global_pivots = []       # (global_index, key, local_index)
-    class_full = {}          # key -> {word: full}  (every word of the class, all t)
+    class_full = {}          # key -> {pivot word: full}, all tableau components
     class_words_by_key = {}  # key -> class words tuple (class-word order)
 
     for key, member_indices in class_member_indices.items():
@@ -467,38 +459,17 @@ def _angular_scalar_vectors_coset(
             continue
 
         s_w0 = class_stabilizer_sum(w0, dimension, generators)
-        class_dmap = class_word_table(w0, slots, size, generators)
-        if len(class_dmap) != len(class_words):
-            raise RuntimeError(
-                "Angular scalar class breadth-first walk did not reach every "
-                "class word."
-            )
-
+        pivot_indices = class_pivot_indices(
+            dimension, class_words, None, s_w0, expected_class_count,
+            row_for_word=lambda word: class_projected_row(
+                w0, word, dimension, generators, s_w0),
+        )
         full_by_word = {}
-        rref_kept = sp.zeros(len(class_words), 0)
-        kept_count = 0
-        for local_index, word, full in unit_columns(
-            dimension, size, class_words, class_dmap, s_w0
-        ):
-            full_by_word[word] = full
-            test_column = sp.zeros(len(class_words), 1)
-            for target_local_index, value in full[0].items():
-                test_column[target_local_index, 0] = value
-            trial = rref_kept.row_join(test_column)
-            _reduced, pivots = trial.rref()
-            if len(pivots) == rref_kept.cols + 1:
-                rref_kept = trial
-                global_pivots.append((member_indices[local_index], key, local_index))
-                kept_count += 1
-            elif len(pivots) != rref_kept.cols:
-                raise RuntimeError(
-                    "Incremental exact rref produced an inconsistent rank "
-                    "while scanning angular scalar class candidates."
-                )
-        if kept_count != expected_class_count:
-            raise RuntimeError(
-                "Angular scalar class copy count disagrees with its Kostka number."
-            )
+        for local_index in pivot_indices:
+            word = class_words[local_index]
+            full_by_word[word] = selected_unit_column(
+                dimension, size, class_words, w0, word, generators, s_w0)
+            global_pivots.append((member_indices[local_index], key, local_index))
         class_full[key] = full_by_word
         class_words_by_key[key] = class_words
 
@@ -528,51 +499,46 @@ def _angular_scalar_vectors_coset(
     )
     if not reference_coefficients:
         return {}, 0
-    reference_vectors = tuple(
-        _pivot_normalize_vector(reference_basis_matrix * coefficient)
-        for coefficient in reference_coefficients
-    )
-    multiplicity = len(reference_vectors)
+    multiplicity = len(reference_coefficients)
 
     scalar_vectors = {}
     all_tableau_vectors = []
-    for copy_index, reference_vector in enumerate(reference_vectors):
-        # decompose v = reference_vector into its per-class components: every
-        # nonzero entry of v belongs to exactly one content class.
-        support_by_class = {}
-        for row in range(reference_vector.rows):
-            value = reference_vector[row, 0]
-            if value == 0:
-                continue
-            word = scalar_states[row]
-            support_by_class.setdefault(content_key(word), []).append((word, value))
-
-        # E_{t,0} v = sum over words w of v with coefficient c_w of
-        # c_w * (E_{t,0} e_w), applied word by word and summed (the coset
-        # formula for each w via its own class's precomputed full_by_word).
+    for copy_index, coefficients in enumerate(reference_coefficients):
+        reference_vector = reference_basis_matrix * coefficients
+        pivot = next((sp.simplify(value) for value in reference_vector
+                      if sp.simplify(value) != 0), None)
+        if pivot is None:
+            raise RuntimeError("Angular reference-copy coefficients produce a zero vector.")
+        # v = sum_p c_p E00 e_p / pivot. The exact matrix-unit identity
+        # E_t0 E00 = E_t0 gives every tableau from the same selected columns.
+        # Preserve the initial pivot normalization even when callers disable
+        # the later per-tableau normalization for requested-weight lowering.
+        # See Etingof et al. (2011), sections 4.5--4.7, matrix elements.
         raw_by_tableau = tuple({} for _ in range(dimension))
-        for key, entries in support_by_class.items():
+        for coefficient, (_global_index, key, local_index) in zip(
+                coefficients, global_pivots, strict=True):
+            coefficient = sp.simplify(coefficient / pivot)
+            if coefficient == 0:
+                continue
             class_words = class_words_by_key[key]
-            full_by_word = class_full[key]
-            for word, coefficient in entries:
-                full = full_by_word[word]
-                for tableau in range(dimension):
-                    target = raw_by_tableau[tableau]
-                    for target_local_index, unit_value in full[tableau].items():
-                        target_word = class_words[target_local_index]
-                        target[target_word] = (
-                            target.get(target_word, sp.Integer(0))
-                            + coefficient * unit_value
-                        )
+            full = class_full[key][class_words[local_index]]
+            for tableau in range(dimension):
+                target = raw_by_tableau[tableau]
+                for target_local_index, unit_value in full[tableau].items():
+                    target_word = class_words[target_local_index]
+                    target[target_word] = (
+                        target.get(target_word, sp.Integer(0))
+                        + coefficient * unit_value
+                    )
 
-        # Explicit Coxeter/intertwining certificate, checked on the RAW
+        # Exact Coxeter/intertwining check on the raw
         # (pre-normalization) vectors: P(s_i) raw_t == sum_k D(s_i)[k,t] raw_k
         # exactly. This is the same relation the role construction relies on
         # (P(g) E_{t,0} = sum_k D(g)[k,t] E_{k,0}, derived from the same
         # anti-homomorphism law coset_units.py documents); independent
         # per-tableau pivot normalization afterward (matching the native
         # path's own convention) rescales this to a diagonal similarity, so
-        # the certificate is checked before normalizing, not after.
+        # this check uses the vectors before normalization.
         for adjacent in range(max(size - 1, 0)):
             permutation = tuple(
                 index + 1 if index == adjacent else adjacent

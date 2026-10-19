@@ -2200,7 +2200,13 @@ def sparse_bilinear_backward_reference(
     )
 
 
-def _validate_weighted(left, right, weight, table):
+def _validate_weighted(left, right, weight, table, *, indices_validated=False):
+    arrays = [table.left_index, table.right_index, table.output_index,
+              table.weight_index, table.coefficient]
+    if any(value.ndim != 1 for value in arrays) or len({value.numel() for value in arrays}) != 1:
+        raise ValueError("Weighted table arrays must be one-dimensional with equal lengths")
+    if int(table.output_width) < 1 or int(table.weight_count) < 0:
+        raise ValueError("Weighted table output width must be positive and weight count nonnegative")
     _validate(
         left,
         right,
@@ -2211,12 +2217,13 @@ def _validate_weighted(left, right, weight, table):
             coefficient=table.coefficient,
             output_width=int(table.output_width),
         ),
+        indices_certified=indices_validated,
     )
     if weight.ndim != 1 or int(weight.numel()) != int(table.weight_count):
         raise ValueError("Packed weighted mixing_weight has an incompatible shape.")
     if weight.dtype != left.dtype or weight.device != left.device:
         raise ValueError("Packed weighted mixing_weight must match input dtype and device.")
-    if int(table.term_count):
+    if int(table.term_count) and not indices_validated:
         if int(table.weight_index.min()) < 0 or int(table.weight_index.max()) >= int(table.weight_count):
             raise ValueError("Packed weighted table weight_index is out of range.")
 
@@ -2270,6 +2277,16 @@ def weighted_sparse_bilinear_backward_reference(grad_output, left, right, weight
     """Differentiable adjoint for fused analysis and multiplicity mixing."""
 
     _validate_weighted(left, right, weight, table)
+    return _weighted_sparse_bilinear_torch_adjoint(grad_output, left, right, weight, table)
+
+
+def _weighted_sparse_bilinear_torch_adjoint(grad_output, left, right, weight, table):
+    """Production product-rule adjoint on a previously validated table.
+
+    Torch gathers and scatters keep this adjoint differentiable for force-loss
+    parameter gradients. The custom native Function saves the validated inputs
+    and table tensors, whose mutation is guarded by autograd version checks.
+    """
     table = table.to(device=left.device, dtype=left.dtype)
     selected_grad = grad_output.index_select(1, table.output_index)
     coefficients = table.coefficient.reshape(1, -1)
@@ -3163,7 +3180,7 @@ class _WeightedSparseBilinearTritonAutograd(torch.autograd.Function):
             weight_count=int(weight.numel()),
         )
         if torch.is_grad_enabled():
-            grad_left, grad_right, grad_weight = weighted_sparse_bilinear_backward_reference(
+            grad_left, grad_right, grad_weight = _weighted_sparse_bilinear_torch_adjoint(
                 grad_output,
                 left,
                 right,
@@ -3545,12 +3562,19 @@ def weighted_sparse_bilinear_forward(
     *,
     prefer_triton=True,
     strict=False,
+    indices_validated=False,
 ):
-    """Evaluate fused exact bilinear analysis and multiplicity mixing."""
+    """Evaluate fused exact bilinear analysis and multiplicity mixing.
+
+    ``indices_validated=True`` is for immutable tables whose complete index
+    bounds were checked against these input widths before device transfer.
+    It avoids repeated device-to-host index reductions during evaluation.
+    Callers must retain the validated widths and table contents.
+    """
 
     global _LAST_WEIGHTED_SPARSE_BILINEAR_BACKEND
 
-    _validate_weighted(left, right, weight, table)
+    _validate_weighted(left, right, weight, table, indices_validated=indices_validated)
     if bool(prefer_triton) and _can_use_triton(left, right):
         table_cuda = table.to(device=left.device, dtype=left.dtype)
         try:

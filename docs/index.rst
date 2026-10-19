@@ -30,6 +30,8 @@ compatible saved models. LAMMPS inference is provided by
    tensor_products
    coefficient_benchmarks
    operator_ir_and_schedules
+   selected_scalar_vector
+   model_stage_sources
    message_passing_equation_coverage
    native_execution_plan
    young_primitive_construction

@@ -26,6 +26,81 @@ def _channel(angular_l=1, species="Ni", n=0):
             "source_family_id": "orthogonal_shifted_jacobi_origin_regular_v1"}
 
 
+@pytest.mark.parametrize("tags", [0, 1])
+def test_rank_one_graph_source_complete_s1_multiplets_through_octupole(tags):
+    from ye3t.couplings import tagged_cauchy_marginal_graph_records
+    request = tagged_cauchy_carriers_request(species=["Ni"], catalogue={
+        "ranks": [1], "nmax": 2, "lmax": 3, "input_Lmax": 3,
+        "tag_counts_by_rank": {1: [tags]}, "max_source_blocks": 1})
+    compiled = compile(plan(count(request)))
+    outputs = tagged_cauchy_marginal_graph_records(compiled, target_L=0, parity=1,
+        output_sectors=[{"L": ell, "parity": "even" if ell % 2 == 0 else "odd"} for ell in range(4)])
+    records = outputs["records"]
+    assert len(records) == 4
+    seen = []
+    for row in records:
+        binding = row["binding"]
+        layout = binding["output_layouts"][row["id"]]
+        ell = layout["key"]["rotation_L"]
+        assert layout["key"]["rank"] == 1
+        assert tuple(layout["key"]["partition"]) == (1,)
+        assert layout["key"]["parity"] == (-1)**ell
+        assert layout["channel_count"] == 2
+        assert layout["tableau_count"] == 1
+        assert layout["magnetic_count"] == 2*ell+1
+        assert binding["actual_action"] == ("shared_auxiliary_S1_times_O3" if tags else "ordinary_density:S1")
+        assert binding["fixed_maps"][0]["map_name"] == ("one_tag_identity" if tags else "density_polynomial")
+        assert binding["row_domain"] == ("edge" if tags else "node")
+        assert len(row["component_indices"]) == 2*(2*ell+1)
+        seen.extend(row["component_indices"])
+    # Two radial channels for each l=0,1,2,3, each with all 2l+1 components.
+    assert sorted(seen) == list(range(32))
+
+
+def test_zero_tag_graph_inventory_preserves_rank_and_separate_node_offsets():
+    from ye3t.couplings import tagged_cauchy_marginal_graph_records
+    request = tagged_cauchy_carriers_request(species=["Ni"], catalogue={
+        "ranks": [1, 2, 3, 4], "nmax": 1, "lmax": 1, "input_Lmax": 1,
+        "tag_counts_by_rank": {1: [0, 1], 2: [0, 1, 2], 3: [0, 1, 2], 4: [0, 1, 2]},
+        "max_source_blocks": 2})
+    compiled = compile(plan(count(request)))
+    output = tagged_cauchy_marginal_graph_records(compiled, target_L=0, parity=1,
+        output_sectors=[{"L": 0, "parity": "even"}, {"L": 1, "parity": "odd"}])
+    schedules = output["source_plan"]["schedules"]
+    offsets, widths = {}, {"node": 0, "edge": 0}
+    for schedule in schedules:
+        tags = schedule["tag_count"]
+        domain = "edge" if tags else "node"
+        offsets[tags] = widths[domain]
+        widths[domain] += schedule["output_dimension"]
+    seen, density_ranks = {"node": [], "edge": []}, set()
+    for row in output["records"]:
+        binding = row["binding"]
+        arguments = binding["argument_bindings"]
+        tags = arguments["source_tag_count"]
+        domain = binding["row_domain"]
+        layout = binding["output_layouts"][row["id"]]
+        schedule = next(item for item in schedules if item["tag_count"] == tags)
+        inventory = {item["label"]["coordinate_id"]: item for item in schedule["inventory"]}
+        selected = [inventory[coordinate] for coordinate in arguments["source_coordinate_ids"]]
+        expected = [offsets[tags]+i for item in selected for i in range(*item["component_slice"])]
+        assert list(row["component_indices"]) == expected
+        assert layout["channel_count"] == len(selected)
+        assert len(expected) == layout["channel_count"]*layout["magnetic_count"]
+        assert all(0 <= i < widths[domain] for i in expected)
+        seen[domain].extend(expected)
+        if not tags:
+            density_ranks.add(row["rank"])
+            assert domain == "node"
+            assert layout["key"]["rank"] == row["rank"]
+            assert tuple(layout["key"]["partition"]) == (row["rank"],)
+            assert binding["source_realization"]["kind"] == "ordinary_density"
+            assert arguments["collection"] == "identity_at_root"
+            assert "anchor" not in arguments
+    assert density_ranks == {1, 2, 3, 4}
+    assert all(len(indices) == len(set(indices)) for indices in seen.values())
+
+
 @pytest.fixture(scope="module")
 def rank2():
     request = tagged_cauchy_carriers_request([_channel()], [2], tag_count=2, target_Ls=[0, 1, 2])
@@ -365,6 +440,96 @@ def test_catalogue_uses_distinct_tag_count_sets_at_each_rank():
     with pytest.raises(ValueError, match="duplicate normalized rank keys"):
         tagged_cauchy_carriers_request(catalogue={
             **cfg, "tag_counts_by_rank": {1: [0], "1": [1], 2: [2]}}, species=["Ni"])
+
+
+def test_explicit_catalogue_contents_preserve_full_source_artifacts_and_cache(tmp_path):
+    import json
+    cfg = {"ranks": [2], "nmax": 2, "lmax": 1, "input_Lmax": 2,
+           "tag_counts": [0, 2], "max_source_blocks": 2}
+    broad = compile(plan(count(tagged_cauchy_carriers_request(catalogue=cfg, species=["Ni"]))),
+                    cache_dir=tmp_path)
+    cfg["source_contents_by_rank"] = {2: [
+        {"channels": [_channel(1)], "block_sizes": [2], "tag_counts": [2]},
+        {"channels": [_channel(0), _channel(1, n=1)], "block_sizes": [1, 1], "tag_counts": [0]},
+    ]}
+    request = tagged_cauchy_carriers_request(catalogue=cfg, species=["Ni"])
+    report = count(request)
+    assert len(report["candidate_records"]) == 2
+    assert report["coefficient_materialization"] == "not_requested"
+    selected = compile(plan(report), cache_dir=tmp_path)
+    assert len(selected["sources"]) == 2
+    for source in selected["sources"]:
+        reference = next(item for item in broad["sources"] if
+            json.dumps(item["request"], sort_keys=True) == json.dumps(source["request"], sort_keys=True))
+        assert json.dumps(source, sort_keys=True) == json.dumps(reference, sort_keys=True)
+        assert validate_tagged_cauchy_carriers(source)
+        assert source["component_count"] == sum(2*row["label"]["target_L"]+1
+                                                for row in source["descriptors"])
+    assert json.dumps(compile(json.loads(json.dumps(request)), cache_dir=tmp_path), sort_keys=True) == json.dumps(selected, sort_keys=True)
+    permuted = copy.deepcopy(cfg)
+    permuted["source_contents_by_rank"][2].reverse()
+    row = permuted["source_contents_by_rank"][2][0]
+    row["channels"].reverse()
+    row["block_sizes"].reverse()
+    assert tagged_cauchy_carriers_request(catalogue=permuted, species=["Ni"]) == request
+    assert selected["request"]["request_hash"] != broad["request"]["request_hash"]
+
+
+def test_explicit_catalogue_selects_three_blocks_and_high_rank_tags_without_coefficients():
+    cfg = {"ranks": [4, 6], "nmax": 3, "lmax": 1, "input_Lmax": 2,
+           "tag_counts": [0, 2], "max_source_blocks": 3,
+           "source_contents_by_rank": {
+               4: [{"channels": [_channel(1, n=2), _channel(1), _channel(1, n=1)],
+                    "block_sizes": [2, 1, 1], "tag_counts": [2]}],
+               6: [{"channels": [_channel(0)], "block_sizes": [6], "tag_counts": [2]}]}}
+    report = count(tagged_cauchy_carriers_request(catalogue=cfg, species=["Ni"]))
+    assert [(row["rank"], row["request"]["block_sizes"], row["request"]["tag_count"])
+            for row in report["candidate_records"]] == [(4, (2, 1, 1), 2), (6, (6,), 2)]
+
+
+@pytest.mark.parametrize("field,value", [
+    ("block_sizes", [1]), ("block_sizes", [True, 1]),
+    ("tag_counts", [1]), ("tag_counts", [0, 0]), ("tag_counts", [False]),
+    ("channels", [_channel(2)]), ("channels", [_channel(1, n=2)]),
+    ("channels", [_channel(1, species="Cu")]),
+    ("channels", [{**_channel(1), "source_family_id": "unknown"}]),
+    ("channels", [{**_channel(1), "radial_channel": .5}]),
+])
+def test_explicit_catalogue_rejects_out_of_scope_contents(field, value):
+    row = {"channels": [_channel(1)], "block_sizes": [2], "tag_counts": [2]}
+    row[field] = value
+    cfg = {"ranks": [2], "nmax": 2, "lmax": 1, "tag_counts": [0, 2],
+           "max_source_blocks": 1, "source_contents_by_rank": {2: [row]}}
+    with pytest.raises(ValueError, match="Source content"):
+        tagged_cauchy_carriers_request(catalogue=cfg, species=["Ni"])
+
+
+@pytest.mark.parametrize("contents", [{}, {2: []}, {2: [], "2": []}, {3: []}])
+def test_explicit_catalogue_rejects_missing_empty_or_ambiguous_rank_selections(contents):
+    with pytest.raises(ValueError, match="source_contents_by_rank"):
+        tagged_cauchy_carriers_request(catalogue={"ranks": [2], "nmax": 1, "lmax": 1,
+            "source_contents_by_rank": contents}, species=["Ni"])
+
+
+def test_explicit_catalogue_rejects_duplicate_content_and_nonmaximal_blocks():
+    row = {"channels": [_channel(1)], "block_sizes": [2], "tag_counts": [2]}
+    cfg = {"ranks": [2], "nmax": 1, "lmax": 1, "source_contents_by_rank": {2: [row, row]}}
+    with pytest.raises(ValueError, match="Duplicate source content"):
+        tagged_cauchy_carriers_request(catalogue=cfg, species=["Ni"])
+    cfg["source_contents_by_rank"][2] = [{"channels": [_channel(1), _channel(1)],
+                                        "block_sizes": [1, 1], "tag_counts": [2]}]
+    with pytest.raises(ValueError, match="Blocks must be maximal"):
+        tagged_cauchy_carriers_request(catalogue=cfg, species=["Ni"])
+
+
+def test_explicit_catalogue_rejects_repeated_partition_orientations():
+    request = tagged_cauchy_carriers_request(species=["Ni"], catalogue={
+        "ranks": [3], "nmax": 1, "lmax": 1, "tag_counts": [2],
+        "source_block_partitions_by_rank": {3: [[2, 1], [1, 2]]},
+        "source_contents_by_rank": {3: [{"channels": [_channel(0), _channel(1)],
+                                         "block_sizes": [2, 1]}]}})
+    with pytest.raises(ValueError, match="partitions repeat a selected source content"):
+        count(request)
 
 
 def test_joint_physical_image_can_reconstruct_across_tensor_ranks():

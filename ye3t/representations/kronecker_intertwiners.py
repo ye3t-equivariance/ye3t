@@ -56,6 +56,11 @@ def kronecker_multiplicity(parent, left, right):
     order = sum(parent)
     if sum(left) != order or sum(right) != order:
         raise ValueError("Kronecker partitions must share one tensor order.")
+    for fixed, a, b in ((parent, left, right), (left, parent, right), (right, parent, left)):
+        if fixed == (order,):
+            return int(a == b)
+        if fixed == (1,)*order:
+            return int(a == _conjugate(b))
     total = 0
     for cycle_type, size in _symmetric_group_conjugacy_classes(order):
         cycle_key = tuple(sorted((int(part) for part in cycle_type), reverse=True))
@@ -132,8 +137,59 @@ def _seminormal_data(partition):
     return tuple(generators), scale
 
 
+def _conjugate(partition):
+    return tuple(sum(row > column for row in partition) for column in range(partition[0]))
+
+
+def _sign_twist(partition):
+    """Signed tableau-transpose map, in the existing positive-pivot gauge."""
+    sp = _sympy()
+    tableaux = standard_tableaux(partition)
+    transposed = {tableau: index for index, tableau in enumerate(standard_tableaux(_conjugate(partition)))}
+    result = sp.zeros(len(tableaux))
+    for row, tableau in enumerate(tableaux):
+        transpose = tuple(tuple(tableau[i][j] for i in range(len(tableau)) if j < len(tableau[i]))
+                          for j in range(len(tableau[0])))
+        word = tuple(value for line in tableau for value in line)
+        sign = (-1)**sum(word[i] > word[j] for i in range(len(word)) for j in range(i+1, len(word)))
+        result[row, transposed[transpose]] = sign
+    if next(value for value in result if value != 0) < 0:
+        result = -result
+    return result
+
+
 @lru_cache(maxsize=None)
 def exact_kronecker_intertwiners(parent, left, right):
+    """Exact maps with identity, invariant-metric and sign-twist fast paths.
+
+    Tensoring by sign transposes a Young diagram. The signed tableau-transpose
+    map follows the same Young-orthogonal adjacent-generator relations and
+    positive-pivot isometry gauge as the general exact solver below.
+    """
+    sp = _sympy()
+    parent, left, right = (tuple(map(int, value)) for value in (parent, left, right))
+    multiplicity = kronecker_multiplicity(parent, left, right)
+    if multiplicity == 0:
+        return {"multiplicity": 0, "intertwiners": (), "gauge": _GAUGE}
+    trivial, sign = (sum(parent),), (1,)*sum(parent)
+    matrix = None
+    if left == trivial or right == trivial:
+        matrix = sp.eye(len(standard_tableaux(parent)))
+    elif left == sign or right == sign:
+        matrix = _sign_twist(right if left == sign else left)
+    elif parent == trivial:
+        dimension = len(standard_tableaux(left))
+        matrix = sp.eye(dimension).reshape(dimension**2, 1)/sp.sqrt(dimension)
+    elif parent == sign:
+        matrix = _sign_twist(left)
+        matrix = matrix.reshape(matrix.rows**2, 1)/sp.sqrt(matrix.rows)
+    if matrix is not None:
+        return {"multiplicity": 1, "intertwiners": (matrix,), "gauge": _GAUGE}
+    return _exact_kronecker_intertwiners_general(parent, left, right)
+
+
+@lru_cache(maxsize=None)
+def _exact_kronecker_intertwiners_general(parent, left, right):
     """Orthonormal exact basis of ``Hom_{S_n}(S^parent, S^left (x) S^right)``.
 
     Returns a dict with ``multiplicity`` and ``intertwiners``: SymPy matrices
@@ -144,13 +200,13 @@ def exact_kronecker_intertwiners(parent, left, right):
     sp = _sympy()
     parent, left, right = (tuple(int(v) for v in value) for value in (parent, left, right))
     multiplicity = kronecker_multiplicity(parent, left, right)
+    if multiplicity == 0:
+        return {"multiplicity": 0, "intertwiners": tuple(), "gauge": _GAUGE}
     parent_generators, parent_scale = _seminormal_data(parent)
     left_generators, left_scale = _seminormal_data(left)
     right_generators, right_scale = _seminormal_data(right)
     parent_dimension = parent_scale.rows
     child_dimension = left_scale.rows * right_scale.rows
-    if multiplicity == 0:
-        return {"multiplicity": 0, "intertwiners": tuple(), "gauge": _GAUGE}
     if sum(parent) == 1:
         if parent != (1,) or left != (1,) or right != (1,) or multiplicity != 1:
             raise ArithmeticError("Rank-one Kronecker labels are inconsistent.")
