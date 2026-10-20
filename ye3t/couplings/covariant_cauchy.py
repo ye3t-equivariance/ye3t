@@ -22,7 +22,9 @@ implementation; no external source code is adapted.
 """
 
 from collections import defaultdict
+from functools import lru_cache
 from itertools import combinations_with_replacement, product
+import copy
 import math
 
 from ye3t.representations.builder import GeneralizedExactSymbolicLabeler
@@ -322,9 +324,20 @@ def covariant_cauchy_count(request):
 
 
 def _outer_multiplet_template(block_Ls, target_L):
+    """Reuse the same angular table across physical channel/occupation requests.
+
+    Its coefficients depend only on the block angular momenta and target L.
+    Return a detached payload because compiled artifacts are editable mappings.
+    """
+    return copy.deepcopy(_cached_outer_multiplet_template(
+        tuple(int(value) for value in block_Ls), int(target_L)))
+
+
+@lru_cache(maxsize=64)
+def _cached_outer_multiplet_template(block_Ls, target_L):
     """Exact analysis rows of every magnetic component of each outer copy.
 
-    The Gram matrix of the lowered synthesis columns is certified identical
+    The Gram matrix of the lowered synthesis columns is checked to be identical
     for all ``M``, which is the ``G (x) I_{2L+1}`` structure that makes one
     multiplicity-space dual valid for the complete multiplet.
     """
@@ -401,7 +414,7 @@ def _outer_multiplet_template(block_Ls, target_L):
     return payload
 
 
-def compile_covariant_cauchy(request):
+def compile_covariant_cauchy(request, *, _block_templates=None):
     """Compile exact factored coordinates for every label of the request."""
     if request.get("request", request).get("carrier") == "ordered_role":
         from .ordered_role_cauchy import compile_ordered_role_cauchy
@@ -412,6 +425,10 @@ def compile_covariant_cauchy(request):
     request = report["request"]
     target_L = request["target"]["L"]
     block_templates = {}
+    # One catalogue can reuse validated local maps across source contents and
+    # target L. The caller owns this compilation-local pool; no validation or
+    # cache policy is carried into a later independent compilation.
+    shared_blocks = {} if _block_templates is None else _block_templates
     outer_templates = {}
     descriptors = []
     phase_exponent = int(
@@ -455,10 +472,13 @@ def compile_covariant_cauchy(request):
                 int(Lambda),
             )
             if key not in block_templates:
-                block_templates[key] = _scalar._compile_block_template(
-                    key, angular_basis_backend=request.get("angular_basis_backend", "legacy_exact")
-                )["payload"]
-            template_ids.append(str(block_templates[key]["template_id"]))
+                backend = request.get("angular_basis_backend", "legacy_exact")
+                shared_key = (key, "legacy_exact" if key[4] == 0 else backend)
+                if shared_key not in shared_blocks:
+                    shared_blocks[shared_key] = _scalar._compile_block_template(
+                        key, angular_basis_backend=backend)
+                block_templates[key] = shared_blocks[shared_key]
+            template_ids.append(str(block_templates[key]["payload"]["template_id"]))
         Lambdas = tuple(label["block_Lambdas"])
         if Lambdas not in outer_templates:
             outer_templates[Lambdas] = _outer_multiplet_template(Lambdas, target_L)
@@ -495,7 +515,7 @@ def compile_covariant_cauchy(request):
         "schema": COVARIANT_CAUCHY_SCHEMA,
         "request": request,
         "block_templates": tuple(
-            block_templates[key] for key in sorted(block_templates)
+            block_templates[key]["payload"] for key in sorted(block_templates)
         ),
         "outer_templates": tuple(
             outer_templates[key] for key in sorted(outer_templates)
@@ -559,9 +579,10 @@ def _canonical_complex_rows(label, request, block_templates, outer_template):
             int(request["channels"][block_index]["l"]),
             int(Lambda),
         )
-        source = _scalar._block_template_from_payload(block_templates[key])[
-            "canonical_rows"
-        ]
+        # The block compiler already returned exact decoded rows. Reuse those
+        # rows across role/angular copies instead of decoding and simplifying
+        # the complete serialized block again for every descriptor.
+        source = block_templates[key]["canonical_rows"]
         block_rows.append(
             {
                 M: {

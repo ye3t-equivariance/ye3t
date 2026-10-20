@@ -96,12 +96,12 @@ def shell_cauchy_candidates(request, rank):
     return records
 
 
-def compile_shell_cauchy(value):
+def compile_shell_cauchy(value, *, _block_templates=None):
     report = count_shell_cauchy(value)
     request = report["request"]
     selected = {label["descriptor_index"]: label for label in report["labels"]}
     coupling_request = {**request["coupling_request"], "selected_multiplicities": tuple(sorted(selected))}
-    compiled = compile_covariant_cauchy(coupling_request)
+    compiled = compile_covariant_cauchy(coupling_request, _block_templates=_block_templates)
     roles = request["coupling_request"]["role_dimension"]
     descriptors = []
     for descriptor in compiled["descriptors"]:

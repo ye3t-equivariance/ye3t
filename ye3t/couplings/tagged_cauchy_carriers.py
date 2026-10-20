@@ -2142,6 +2142,7 @@ def _compile_catalogue(request, *, cache_dir=None, legacy_validation=False):
             return compiled
     report = _catalogue_count(request, legacy_validation=legacy_validation)
     selected_sources, rank_inventory = [], []
+    shell_block_templates = {}
     for rank_record in report["rank_inventory"]:
         rank = rank_record["rank"]
         accepted = []
@@ -2157,8 +2158,12 @@ def _compile_catalogue(request, *, cache_dir=None, legacy_validation=False):
                 if _scalar._freeze_json(compiled["request"]) != _scalar._freeze_json(_request(fixed)):
                     raise ValueError("tagged source cache request mismatch")
             else:
-                compiled = (_materialize_source_image(_tagged_cauchy_projection_candidates(fixed), legacy_validation=True)
-                            if legacy_validation else compile_tagged_cauchy_carriers(fixed))
+                if not legacy_validation and fixed.get("basis_coordinates") == "formal_cauchy":
+                    from .shell_cauchy import compile_shell_cauchy
+                    compiled = compile_shell_cauchy(fixed, _block_templates=shell_block_templates)
+                else:
+                    compiled = (_materialize_source_image(_tagged_cauchy_projection_candidates(fixed), legacy_validation=True)
+                                if legacy_validation else compile_tagged_cauchy_carriers(fixed))
                 if path is not None:
                     temporary = path.with_suffix(".tmp")
                     temporary.write_text(json.dumps(compiled, sort_keys=True), encoding="utf-8")
