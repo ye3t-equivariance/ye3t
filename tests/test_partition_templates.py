@@ -1,6 +1,40 @@
 import pytest
 
 
+@pytest.mark.parametrize("rows", range(1, 9))
+def test_equal_row_families_use_balanced_positive_parts(rows):
+    from ye3t.couplings import apportion_partition_template
+
+    for rank in range(1, 17):
+        result = apportion_partition_template(rank, ("N/" + str(rows),) * rows)
+        if rank < rows:
+            assert result["status"] == "inapplicable"
+            assert result["partition"] is None
+        else:
+            partition = result["partition"]
+            assert result["status"] == "selected"
+            assert len(partition) == rows
+            assert sum(partition) == rank
+            assert min(partition) > 0
+            assert partition == sorted(partition, reverse=True)
+            assert max(partition) - min(partition) <= 1
+
+
+def test_balanced_family_does_not_relax_other_templates():
+    from ye3t.couplings import apportion_partition_template, expand_partition_templates
+
+    assert apportion_partition_template(4, ("N-4", "4"))["status"] == "inapplicable"
+    assert apportion_partition_template(5, ("N-2", "2"), 0)["partition"] == [3, 2]
+    assert apportion_partition_template(5, ("2N/3", "N/3"), 0)["status"] == "inapplicable"
+    # Equality with N/3 at N=3 and N=4 does not identify a symbolic family.
+    assert apportion_partition_template(
+        5, ("N/3+(N-3)*(N-4)",) * 3
+    )["status"] == "inapplicable"
+    report = expand_partition_templates((4, 5), (("N/3",) * 3, ("N-2", "1", "1")))
+    assert report["partitions_by_rank"] == {"4": [[2, 1, 1]], "5": [[2, 2, 1], [3, 1, 1]]}
+    assert sum(record["status"] == "duplicate" for record in report["records"]) == 1
+
+
 def test_symbolic_partition_templates_handle_odd_rank_and_deduplicate():
     from ye3t.couplings import expand_partition_templates
 

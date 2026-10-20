@@ -320,7 +320,7 @@ def _cg_tree_payload(tree):
 
 def compile_typed_factorized(
     spec, input_Ls, *, subduction_materialization_backend,
-    subduction_cache_dir, subduction_constraint_backend, selected_alpha=None,
+    subduction_cache_dir, subduction_constraint_backend, selected_alpha=None, selected_alphas=None,
 ):
     """Compile every exact multiplicity route, or one selected route, as shared maps."""
 
@@ -379,7 +379,15 @@ def compile_typed_factorized(
         type(selected_alpha) is not int or not 0 <= selected_alpha < expected
     ):
         raise ValueError("selected_typed_alpha must index the exact typed route inventory.")
-    compiled_routes = routes if selected_alpha is None else (routes[selected_alpha],)
+    if selected_alphas is not None:
+        selected_alphas = tuple(selected_alphas)
+        if (selected_alpha is not None or not selected_alphas
+                or any(type(a) is not int or not 0 <= a < expected for a in selected_alphas)
+                or selected_alphas != tuple(sorted(set(selected_alphas)))):
+            raise ValueError("selected_typed_alphas must select sorted unique exact multiplicity indices")
+        compiled_routes = tuple(routes[a] for a in selected_alphas)
+    else:
+        compiled_routes = routes if selected_alpha is None else (routes[selected_alpha],)
     if spec.block_permutation or "subgroup_partitions" in spec.metadata:
         requested = _block_partitions_from_spec(spec)
         if {route["block_partitions"] for route in compiled_routes} != {requested}:
@@ -668,6 +676,9 @@ def compile_typed_factorized(
     if selected_alpha is not None:
         payload["selected_full_alpha"] = selected_alpha
         payload["full_target_count"] = expected
+    if selected_alphas is not None:
+        payload["selected_full_alphas"] = selected_alphas
+        payload["full_target_count"] = expected
     payload["hash"] = "sha256:" + hashlib.sha256(json.dumps(
         payload, sort_keys=True, separators=(",", ":"), allow_nan=False
     ).encode("utf-8")).hexdigest()
@@ -697,9 +708,12 @@ def compile_typed_factorized(
             "angular_factorized_paths_present": all(
                 bool(item.factorized_paths) for item in angular_maps
             ) if len(blocks) > 2 else True,
-            "full_alpha_axes_present": selected_alpha is None and len(route_rows) == expected,
+            "full_alpha_axes_present": selected_alpha is None and selected_alphas is None and len(route_rows) == expected,
             "selected_alpha_axis_valid": selected_alpha is None or (
                 len(route_rows) == 1 and route_rows[0]["alpha_index"] == selected_alpha
+            ),
+            "selected_alpha_axes_valid": selected_alphas is None or (
+                tuple(row["alpha_index"] for row in route_rows) == selected_alphas
             ),
             "dense_typed_matrix_not_materialized": True,
             "numeric_rank_gap_and_projector_validated": all(

@@ -2748,8 +2748,8 @@ class YE3TCarrierKey:
     @property
     def is_totally_symmetric(self):
         if self.permutation_blocks:
-            return all(parts == (sum(parts),) for parts in self.permutation_blocks)
-        return self.partition == (self.rank,)
+            return all(parts == ((sum(parts),) if parts else ()) for parts in self.permutation_blocks)
+        return self.partition == ((self.rank,) if self.rank else ())
 
     @property
     def is_totally_antisymmetric(self):
@@ -5797,7 +5797,11 @@ class YE3TSourceRealization:
         if not isinstance(carrier_key, YE3TCarrierKey):
             carrier_key = YE3TCarrierKey.from_dict(carrier_key)
         right_tags = self.kind == "tagged_cauchy_occurrence" and self.metadata.get("emitted_action") == "right_tags"
-        if int(carrier_key.rank) != int(self.metadata["tag_count"] if right_tags else self.rank):
+        empty_tags = self.kind == "ordinary_density" and self.metadata.get("emitted_action") == "trivial_S0"
+        if empty_tags and self.metadata.get("tag_count") != 0:
+            raise ValueError("A trivial S0 source requires an empty physical tag set")
+        degree = 0 if empty_tags else self.metadata["tag_count"] if right_tags else self.rank
+        if int(carrier_key.rank) != int(degree):
             raise ValueError("source and carrier ranks must match")
         if carrier_key.permutation_blocks and self.kind in {"ordinary_density", "tagged_cauchy_occurrence"}:
             raise ValueError("A full symmetric-group source needs an explicit restriction map before emitting a product-group action")

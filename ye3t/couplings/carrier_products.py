@@ -30,7 +30,8 @@ def _hash(value):
 
 def carrier_product_request(left, right, *, target_partition=None, target_L,
                             operation="same_action_tensor_product", argument_ids=("left", "right"),
-                            role_algebra=None, target_permutation_blocks=()):
+                            role_algebra=None, target_permutation_blocks=(), copy_limit=None, selected_copy_indices=None,
+                            full_path=None):
     """Select a complete product sector; equal argument IDs request a self-product.
 
     Inputs are complete carrier layouts. Permutation action alignment and physical
@@ -80,12 +81,137 @@ def carrier_product_request(left, right, *, target_partition=None, target_L,
     result = {"family": _FAMILY, "left": left.to_dict(), "right": right.to_dict(),
               "target": target.to_dict(), "operation": operation, "argument_ids": ids,
               "role_algebra": role_algebra}
+    if full_path is not None:
+        result["full_path"] = _product_full_path(full_path, layouts, ids)
+    if copy_limit is not None:
+        if isinstance(copy_limit, bool) or not isinstance(copy_limit, int) or copy_limit < 1:
+            raise ValueError("copy_limit must be a positive complete-multiplet budget")
+        result["copy_limit"] = copy_limit
+    if selected_copy_indices is not None:
+        indices = list(selected_copy_indices)
+        if (copy_limit is not None or not indices or any(isinstance(i, bool) or not isinstance(i, int) or i < 0 for i in indices)
+                or indices != sorted(set(indices))):
+            raise ValueError("selected_copy_indices requires sorted unique nonnegative indices and no copy_limit")
+        result["selected_copy_indices"] = indices
     result["request_hash"] = _hash(result)
     return result
 
 
+def _product_full_path(value, layouts, argument_ids):
+    """Validate a shared construction graph and bind its two argument nodes.
+
+    Source labels and physical bindings remain available to source-specific
+    product planning. This graph alone is not an independent-image calculation.
+    """
+    path = value
+    if not isinstance(path, dict) or set(path) != {"arguments", "nodes"} or not isinstance(path["nodes"], dict):
+        raise ValueError("Product full_path needs arguments and construction nodes")
+    arguments, nodes = path["arguments"], path["nodes"]
+    if (not isinstance(arguments, (list, tuple)) or len(arguments) != 2
+            or any(not isinstance(name, str) or name not in nodes for name in arguments)):
+        raise ValueError("Product full_path must identify both existing argument nodes")
+    visited, active, identities = set(), set(), {}
+
+    def visit(name):
+        if name in active:
+            raise ValueError("Product full_path contains a construction cycle")
+        if name in visited:
+            return
+        node = nodes.get(name)
+        if not isinstance(node, dict) or not isinstance(node.get("inputs"), list):
+            raise ValueError("Product full_path node needs explicit input references")
+        active.add(name)
+        for child in node["inputs"]:
+            if not isinstance(child, str) or child not in nodes:
+                raise ValueError("Product full_path references an absent input node")
+            visit(child)
+        active.remove(name)
+        visited.add(name)
+        definition = {key: item for key, item in node.items() if key != "inputs"}
+        definition["inputs"] = [identities[child] for child in node["inputs"]]
+        identities[name] = _hash(definition)
+
+    for name, layout in zip(arguments, layouts, strict=True):
+        visit(name)
+        if nodes[name].get("layout") != layout.to_dict():
+            raise ValueError("Product full_path argument layout differs from the requested carrier")
+    if (arguments[0] == arguments[1]) != (argument_ids[0] == argument_ids[1]):
+        raise ValueError("Repeated arguments must use the same full_path node and canonical argument ID")
+    if arguments[0] != arguments[1] and identities[arguments[0]] == identities[arguments[1]]:
+        raise ValueError("Identical full_path constructions must share one canonical repeated-argument identity")
+    # Unused branches cannot affect the request identity or grow cached maps.
+    return json.loads(json.dumps({"arguments": list(arguments),
+        "nodes": {name: nodes[name] for name in sorted(visited)}}, sort_keys=True, allow_nan=False))
+
+
 def is_carrier_product_request(value):
     return isinstance(value, dict) and value.get("family") == _FAMILY
+
+
+def is_carrier_product_inventory(value):
+    return isinstance(value, dict) and value.get("family") == "complete_carrier_product_inventory"
+
+
+def carrier_product_inventory(value):
+    """Enumerate all valid output types using exact product multiplicities.
+
+    No Young or angular coefficients are materialized. Each returned request
+    compiles one complete output sector through the ordinary product API.
+    The caller provides the physical action alignment and argument identities.
+    """
+    from . import integer_partitions
+    from .sector_selection import normalize_sector_selection, sector_is_selected, _validate_sector_requests
+    raw = value.get("request", value)
+    allowed = {"family", "left", "right", "operation", "argument_ids", "selection", "full_path"}
+    if set(raw)-allowed:
+        raise ValueError("Unknown product inventory fields: " + str(sorted(set(raw)-allowed)))
+    left, right = (YE3TCarrierLayout.from_dict(raw[name]) for name in ("left", "right"))
+    operation = raw.get("operation", "same_action_tensor_product")
+    selection = normalize_sector_selection(raw.get("selection", {}))
+    if operation == "disjoint_induction":
+        partitions = [(parts, ()) for parts in integer_partitions(left.key.rank+right.key.rank)]
+    elif operation == "independent_action_tensor_product":
+        partitions = [((), left.key.permutation_partitions+right.key.permutation_partitions)]
+    elif operation == "same_action_tensor_product":
+        if left.key.permutation_degrees != right.key.permutation_degrees:
+            raise ValueError("Same-action inventory needs matching permutation degrees")
+        choices = [integer_partitions(degree) for degree in left.key.permutation_degrees]
+        partitions = [((), blocks) if left.key.permutation_blocks else (blocks[0], ())
+                      for blocks in product(*choices)]
+    else:
+        raise ValueError("Product inventory requires a tensor-product operation")
+    if (left.key.permutation_blocks or operation == "independent_action_tensor_product") and selection["young_lambda"] != "all":
+        raise ValueError("Product-group Young limits require a selection for each independent action")
+    plans = []
+    all_types = []
+    for partition, blocks in partitions:
+        for L in range(abs(left.key.rotation_L-right.key.rotation_L), left.key.rotation_L+right.key.rotation_L+1):
+            request = carrier_product_request(left, right, target_partition=partition, target_L=L,
+                target_permutation_blocks=blocks, operation=operation,
+                argument_ids=raw.get("argument_ids", ("left", "right")),
+                full_path=raw.get("full_path"),
+                copy_limit=None if selection["copies"] == "all" else selection["copies"])
+            report = carrier_product_count(request)
+            if not report["output_channel_count"]:
+                continue
+            target = YE3TCarrierKey.from_dict(request["target"])
+            all_types.append({"action_degree": target.rank,
+                              "young_lambda": list(partition), "permutation_blocks": [list(p) for p in blocks],
+                              "L": L, "parity": target.parity,
+                              "available_copies": report.get("available_output_channel_count", report["output_channel_count"])})
+            if sector_is_selected(selection, target.rank, partition, L, target.parity):
+                plans.append(report)
+    _validate_sector_requests(all_types, selection)
+    request = {"family": "complete_carrier_product_inventory", "left": left.to_dict(), "right": right.to_dict(),
+               "operation": operation, "argument_ids": list(raw.get("argument_ids", ("left", "right"))),
+               "selection": selection}
+    if "full_path" in raw:
+        request["full_path"] = _product_full_path(raw["full_path"], (left, right), request["argument_ids"])
+    return {"family": request["family"], "request": request, "request_hash": _hash(request),
+            "products": plans, "available_sectors": all_types,
+            "selected_sector_count": len(plans),
+            "selected_copy_count": sum(row["output_channel_count"] for row in plans),
+            "physical_polynomial_independence_claimed": False}
 
 
 def _request(value):
@@ -93,7 +219,8 @@ def _request(value):
     result = carrier_product_request(raw["left"], raw["right"],
         target_partition=raw["target"]["partition"], target_L=raw["target"]["rotation_L"],
         operation=raw["operation"], argument_ids=raw["argument_ids"], role_algebra=raw["role_algebra"],
-        target_permutation_blocks=raw["target"].get("permutation_blocks", ()))
+        target_permutation_blocks=raw["target"].get("permutation_blocks", ()), copy_limit=raw.get("copy_limit"),
+        selected_copy_indices=raw.get("selected_copy_indices"), full_path=raw.get("full_path"))
     if raw != result:
         raise ValueError("Product request identity or parity differs from its canonical contents")
     return result
@@ -110,6 +237,86 @@ def _exchange_trace(partition, target):
     if total % order:
         raise ArithmeticError("Exchange character sum is not integral")
     return int(total // order)
+
+
+def _local_density_product_is_zero(request):
+    """Reject a zero fixed-content target using canonical counts only.
+
+    This necessary check follows untransported density sources through constant
+    channel maps and local products. Nonzero target multiplicity does not assert
+    that a particular child-product map fills that target. Such selected images
+    require the existing multiplicity-space product maps.
+    """
+    from . import count
+    path = request.get("full_path")
+    if path is None or request["operation"] != "same_action_tensor_product":
+        return None
+    nodes = path["nodes"]
+    bindings = set()
+    memo = {}
+
+    def words(name):
+        if name in memo:
+            return memo[name]
+        node = nodes[name]
+        if node.get("value_scope") == "propagated_hidden_state":
+            result = None
+        elif node["operation"] == "source":
+            source = node.get("source", {})
+            binding = source.get("physical_binding", {})
+            if (source.get("tag_count") != 0 or binding.get("actual_action") != "ordinary_density:S0"
+                    or binding.get("density_context") != "inclusive"):
+                result = None
+            else:
+                bindings.add(json.dumps(binding, sort_keys=True))
+                result = set()
+                for coordinate in source["coordinates"]:
+                    word = []
+                    physical = coordinate["label"].get("physical_factor_content")
+                    blocks = ([(item["channel"], item["count"]) for item in physical] if physical is not None else
+                              zip(coordinate["channels"], coordinate["label"]["block_sizes"], strict=True))
+                    for channel, size in blocks:
+                        # Catalogue-local integer IDs cannot identify a channel
+                        # across source ranks. Keep the complete physical type.
+                        channel = {key: value for key, value in channel.items()
+                                   if key not in {"channel_id", "channel_index"}}
+                        word.extend([(json.dumps(channel, sort_keys=True), channel["l"])] * size)
+                    result.add(tuple(sorted(word)))
+        elif node.get("value_scope") != "local_source":
+            result = None
+        else:
+            children = [words(child) for child in node["inputs"]]
+            if any(child is None for child in children):
+                result = None
+            elif node["operation"] == "learned_channel_projection":
+                result = set().union(*children)
+            elif node["operation"] == "same_action_tensor_product":
+                result = {tuple(sorted(left + right)) for left, right in product(*children)}
+            else:
+                result = None
+        memo[name] = result
+        return result
+
+    children = [words(name) for name in path["arguments"]]
+    if any(child is None for child in children) or len(bindings) != 1:
+        return None
+    target = request["target"]
+    seen = set()
+    for left, right in product(*children):
+        word = tuple(sorted(left + right))
+        if word in seen:
+            continue
+        seen.add(word)
+        identities = {channel: index for index, channel in enumerate(sorted({item[0] for item in word}), 1)}
+        angular = tuple(item[1] for item in word)
+        report = count({"content": tuple(identities[item[0]] for item in word),
+            "target_rotation": {"L_R": target["rotation_L"], "group": "O3",
+                                "parity": "even" if target["parity"] == 1 else "odd"},
+            "target_permutation": "young:" + str(len(word)), "carrier": "ACE_density",
+            "metadata": {"input_Ls": angular}}, input_Ls=angular)
+        if report.counts_by_target[target["rotation_L"]]:
+            return False
+    return True
 
 
 def carrier_product_count(value):
@@ -133,9 +340,42 @@ def carrier_product_count(value):
                                                        target.permutation_partitions, strict=True))
         sign = (-1)**(2*left.key.rotation_L-target.rotation_L)
         channels = (channels + sign*left.channel_count*trace)//2
-    return {"family": _FAMILY, "request": request, "representation_multiplicity": copies,
+    if channels and _local_density_product_is_zero(request):
+        channels = 0
+    # TODO(mp-subspace-policy-20261019): preserve source identities, known linear
+    # span relations, degree, argument bindings and full_path in plans.
+    # Add optional primitive/decomposable image policies and separate gating
+    # through canonical maps; representation counts alone do not resolve the
+    # nonlinear function algebra. Keep complete selected tableau/M components.
+    result = {"family": _FAMILY, "request": request, "representation_multiplicity": copies,
             "output_channel_count": channels, "placement_count": placements,
             "physical_polynomial_independence_claimed": False}
+    if "copy_limit" in request:
+        result["available_output_channel_count"] = channels
+        result["output_channel_count"] = min(channels, request["copy_limit"])
+        result["copy_selection"] = "canonical_exchange_mode_then_channel_pair_prefix"
+    if "selected_copy_indices" in request:
+        indices = request["selected_copy_indices"]
+        if indices[-1] >= channels:
+            raise ValueError("Selected product copy index exceeds the exact available multiplicity")
+        result["available_output_channel_count"] = channels
+        result["output_channel_count"] = len(indices)
+        result["copy_selection"] = "canonical_exchange_mode_then_channel_pair_indices"
+    return result
+
+
+def carrier_product_plan(value):
+    """Resolve local product images after coefficient-free representation counts."""
+    from .density_product_images import reduced_density_product_image
+    result = carrier_product_count(value)
+    if result["output_channel_count"]:
+        image = reduced_density_product_image(result["request"])
+        if image is not None:
+            if image["route_count"] != result["output_channel_count"]:
+                raise ArithmeticError("Reduced product routes disagree with the canonical product count")
+            result["reduced_product_image"] = image
+            result["independent_output_channel_count"] = image["independent_image_count"]
+    return result
 
 
 def _exchange_modes(maps, dimension, target_dimension):
@@ -251,8 +491,10 @@ def _compile(serialized):
                     continue
                 channels.append({"young_copy": mode, "left_channel": a, "right_channel": b,
                                  "exchange": sign if self_product else 0})
-    if len(channels) != report["output_channel_count"]:
+    if len(channels) != report.get("available_output_channel_count", report["output_channel_count"]):
         raise ArithmeticError("Exchange-resolved product size differs from its exact character count")
+    channels = ([channels[index] for index in request["selected_copy_indices"]]
+                if "selected_copy_indices" in request else channels[:report["output_channel_count"]])
     # Separate sparse tables: no Young x magnetic product matrix is allocated.
     angular = []
     ll, lr, L = left.key.rotation_L, right.key.rotation_L, target.rotation_L
@@ -285,9 +527,23 @@ def _compile(serialized):
 
 
 def compile_carrier_product(value):
-    """Compile all copies, retaining separate exact Young and angular tables."""
+    """Compile selected complete copies with separate exact Young/angular maps."""
     import copy
-    return copy.deepcopy(_compile(json.dumps(_request(value), sort_keys=True)))
+    request = _request(value)
+    if "full_path" not in request:
+        return copy.deepcopy(_compile(json.dumps(request, sort_keys=True)))
+    if not carrier_product_count(request)["output_channel_count"]:
+        raise ValueError("Requested product has no nonzero coupled coordinates for its source full_path")
+    # Fixed coefficients depend on the complete carrier layouts and selected
+    # copies. Preserve source provenance in the returned artifact while sharing
+    # the same coefficient cache across distinct physical construction paths.
+    structural = {key: value for key, value in request.items() if key not in {"full_path", "request_hash"}}
+    structural["request_hash"] = _hash(structural)
+    result = copy.deepcopy(_compile(json.dumps(structural, sort_keys=True)))
+    result["request"] = request
+    result.pop("self_hash")
+    result["self_hash"] = _hash(result)
+    return result
 
 
 def bind_carrier_product_torch(compiled, *, dtype=None, device=None, backend="auto"):

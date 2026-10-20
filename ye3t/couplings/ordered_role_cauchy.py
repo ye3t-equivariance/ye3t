@@ -108,6 +108,14 @@ def ordered_role_cauchy_count(request):
     ))
     labels = tuple({**row, "multiplicity_index": index}
                    for index, row in enumerate(routes))
+    selection = {}
+    if "selected_multiplicities" in request:
+        indices = tuple(request["selected_multiplicities"])
+        if (not indices or any(type(index) is not int or index < 0 for index in indices)
+                or indices != tuple(sorted(set(indices))) or indices[-1] >= len(labels)):
+            raise ValueError("Selected ordered-role copy indices exceed or repeat the exact multiplicity inventory")
+        selection["available_multiplet_count"] = len(labels)
+        labels = tuple(labels[index] for index in indices)
     tableau_count = int(Partition(parent).dimension)
     return {
         "schema": "ye3t_ordered_role_cauchy_count_v2",
@@ -116,6 +124,7 @@ def ordered_role_cauchy_count(request):
         "multiplet_count": len(labels),
         "tableau_count": tableau_count,
         "component_count": len(labels) * tableau_count * (2 * output_L + 1),
+        **selection,
         "validation_report": {"passed": True,
                               "source": "local_Kronecker_x_global_LR_x_binary_CG"},
     }
@@ -317,6 +326,8 @@ def compile_ordered_role_cauchy(request):
         "schema": "ye3t_ordered_role_cauchy_compiled_v2",
         "request": request,
         "labels": report["labels"],
+        **({"available_multiplet_count": report["available_multiplet_count"]}
+           if "available_multiplet_count" in report else {}),
         "multiplet_count": report["multiplet_count"],
         "tableau_count": report["tableau_count"],
         "component_count": report["component_count"],
@@ -362,12 +373,13 @@ def validate_ordered_role_cauchy(compiled):
             json.dumps(report["labels"], sort_keys=True)
             or int(compiled["multiplet_count"]) != report["multiplet_count"]
             or int(compiled["tableau_count"]) != report["tableau_count"]
-            or int(compiled["component_count"]) != report["component_count"]):
+            or int(compiled["component_count"]) != report["component_count"]
+            or compiled.get("available_multiplet_count") != report.get("available_multiplet_count")):
         raise ValueError("Ordered-role Cauchy multiplicity labels are invalid.")
     routes = tuple(compiled["routes"])
     if (len(routes) != int(compiled["multiplet_count"])
             or tuple(int(item["multiplicity_index"]) for item in routes)
-            != tuple(range(len(routes)))
+            != tuple(item["multiplicity_index"] for item in report["labels"])
             or not compiled["validation_report"].get("passed", False)):
         raise ValueError("Ordered-role Cauchy route inventory is invalid.")
     sizes = tuple(int(value) for value in compiled["request"]["block_sizes"])

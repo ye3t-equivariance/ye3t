@@ -60,7 +60,7 @@ def _partition(value, rank):
     (
         "group", "ranks", "parent_partitions", "L", "parity", "factorization",
         "subspace", "eta_count_per_rank", "l_max_per_rank", "young_kappa",
-        "block_rotation",
+        "block_rotation", "source_sectors", "hidden_sectors",
     ),
     frozen=True,
 )
@@ -74,12 +74,15 @@ class YE3TRepresentation:
     Does not: Enumerate atomistic channels or materialize coefficients.
     """
 
+    source_sectors = None
+    hidden_sectors = None
+
     @classmethod
     def from_config(cls, config):
         """Validate the public representation section into immutable fields."""
         _keys(config, {
             "group", "ranks", "parent", "factorization", "subspace",
-            "uncoupled_factor_inputs", "intermediates",
+            "uncoupled_factor_inputs", "intermediates", "source_sectors", "hidden_sectors",
         }, "representation")
         group = str(config["group"])
         if group not in {"O3", "SO3"}:
@@ -175,8 +178,60 @@ class YE3TRepresentation:
         else:
             raise ValueError("block_rotation.policy must be all_valid, capped, or explicit.")
 
+        from ye3t.couplings.sector_selection import normalize_sector_selection
+        selections = []
+        for name in ("source_sectors", "hidden_sectors"):
+            selection = config.get(name)
+            selections.append(None if selection is None else tuple(
+                (key, tuple(value) if isinstance(value, list) else value)
+                for key, value in normalize_sector_selection(selection).items()))
         return cls(group, ranks, partitions, L, parity, factorization, subspace,
-                   eta, angular, young, rotation)
+                   eta, angular, young, rotation, *selections)
+
+    def select_source_inventory(self, inventory):
+        """Inspect selected independent copies from a canonical source plan."""
+        from ye3t.couplings.sector_selection import select_independent_sector_copies
+        return select_independent_sector_copies(inventory, dict(self.source_sectors or ()))
+
+    def select_intermediate_inventory(self, labels):
+        """Select whole copies by their canonical block Young/angular labels.
+
+        Explicit block-size entries restrict those sizes; other sizes retain
+        all valid intermediates. An explicitly listed type must occur in the
+        supplied inventory. This method uses no coefficient maps.
+        """
+        labels = tuple(labels)
+        young = dict(self.young_kappa[1]) if self.young_kappa[0] == "explicit" else {}
+        rotation = dict(self.block_rotation[1])
+        available_young, available_L = {}, {}
+        for label in labels:
+            for size, kappa, Lambda in zip(label["block_sizes"], label["block_kappas"],
+                                           label["block_Lambdas"], strict=True):
+                available_young.setdefault(size, set()).add(tuple(kappa))
+                available_L.setdefault(size, set()).add(Lambda)
+        for size, requested in young.items():
+            if set(requested) - available_young.get(size, set()):
+                raise ValueError(f"Unavailable paired Young type at block size {size}; valid alternatives: "
+                                 + str(sorted(available_young.get(size, set()))))
+        if self.block_rotation[0] == "explicit":
+            for size, requested in rotation.items():
+                if set(requested) - available_L.get(size, set()):
+                    raise ValueError(f"Unavailable block angular momentum at size {size}; valid alternatives: "
+                                     + str(sorted(available_L.get(size, set()))))
+        selected = []
+        for label in labels:
+            valid = True
+            for size, kappa, Lambda in zip(label["block_sizes"], label["block_kappas"],
+                                           label["block_Lambdas"], strict=True):
+                valid &= (self.young_kappa[0] != "symmetric_only" or tuple(kappa) == (size,))
+                valid &= size not in young or tuple(kappa) in young[size]
+                if self.block_rotation[0] == "capped":
+                    valid &= Lambda <= rotation[sum(label["block_sizes"])]
+                elif self.block_rotation[0] == "explicit":
+                    valid &= size not in rotation or Lambda in rotation[size]
+            if valid:
+                selected.append(label)
+        return tuple(selected)
 
     def parent_partition(self, rank):
         """Return the exact Young parent partition for a selected rank."""
@@ -241,7 +296,7 @@ class YE3TRepresentation:
             rotation["Lambda_values_by_block_size"] = {
                 size: list(values) for size, values in self.block_rotation[1]
             }
-        return {
+        result = {
             "group": self.group,
             "ranks": list(self.ranks),
             "parent": {
@@ -257,3 +312,9 @@ class YE3TRepresentation:
             },
             "intermediates": {"young_kappa": young, "block_rotation": rotation},
         }
+        for name in ("source_sectors", "hidden_sectors"):
+            selection = getattr(self, name)
+            if selection is not None:
+                result[name] = {key: list(value) if isinstance(value, tuple) else value
+                                for key, value in selection}
+        return result

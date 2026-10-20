@@ -3031,6 +3031,7 @@ class JointYoungE3Coupler:
 
         rows = []
         selected_full_alpha = None
+        selected_full_alphas = None
         typed_factorized = bool(
             self.factorized_coefficient_tables and
             self.factorized_coefficient_tables[0].get("kind") ==
@@ -3040,6 +3041,7 @@ class JointYoungE3Coupler:
             selected_full_alpha = self.factorized_coefficient_tables[0].get(
                 "selected_full_alpha"
             )
+            selected_full_alphas = self.factorized_coefficient_tables[0].get("selected_full_alphas")
         for label_index, label in enumerate(self.labels):
             payload = label.to_dict() if hasattr(label, "to_dict") else dict(label)
             for resolved_index, row in enumerate(tuple(payload.get("resolved_alpha_labels", ()))): 
@@ -3049,6 +3051,7 @@ class JointYoungE3Coupler:
                 row["alpha_index"] = int(len(rows))
                 if typed_factorized:
                     row["full_alpha_index"] = int(
+                        selected_full_alphas[row["alpha_index"]] if selected_full_alphas is not None else
                         row["alpha_index"] if selected_full_alpha is None
                         else selected_full_alpha
                     )
@@ -5667,8 +5670,10 @@ def CompileGlobalYE3TCouplers(
         input_Ls = tuple(0 for _ in content)
     if len(input_Ls) != len(content):
         raise ValueError(f"input_Ls length {len(input_Ls)} must match content rank {len(content)}.")
-    if spec.carrier != "ACE_density" and any(input_Ls):
+    if spec.carrier != "ACE_density" and (any(input_Ls) or "selected_typed_alphas" in spec.metadata):
         if dense_reference:
+            if "selected_typed_alphas" in spec.metadata:
+                raise ValueError("Selected multiplicity copies require factorized compilation; compare with the full dense reference in tests")
             return _compile_typed_joint_orbit(
                 spec, input_Ls,
                 subduction_materialization_backend=subduction_materialization_backend,
@@ -5700,6 +5705,7 @@ def CompileGlobalYE3TCouplers(
             subduction_materialization_backend=subduction_materialization_backend,
             subduction_cache_dir=subduction_cache_dir,
             subduction_constraint_backend=subduction_constraint_backend,
+            selected_alphas=spec.metadata.get("selected_typed_alphas"),
         )
     ordinary_angular = None
     if spec.carrier == "ACE_density" and any(input_Ls):
@@ -7603,6 +7609,7 @@ def compile_joint_ye3t_slot_permutation_actions(
         reference_metadata = dict(coupler.spec.metadata)
         reference_metadata.pop("subgroup_partitions", None)
         reference_metadata.pop("selected_typed_alpha", None)
+        reference_metadata.pop("selected_typed_alphas", None)
         reference_spec = record_replace(
             coupler.spec,
             content=universal_content,

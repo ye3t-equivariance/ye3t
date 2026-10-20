@@ -53,9 +53,15 @@ def kronecker_multiplicity(parent, left, right):
     """Exact ``g_{parent,left,right}`` from the character inner product."""
 
     parent, left, right = (tuple(int(v) for v in value) for value in (parent, left, right))
+    if any(any(v <= 0 for v in parts) or tuple(sorted(parts, reverse=True)) != parts
+           for parts in (parent, left, right)):
+        raise ValueError("Kronecker labels must be partitions with positive nonincreasing parts")
     order = sum(parent)
     if sum(left) != order or sum(right) != order:
         raise ValueError("Kronecker partitions must share one tensor order.")
+    if order == 0:
+        # S_0 has one element and one one-dimensional irrep, labelled ().
+        return 1
     for fixed, a, b in ((parent, left, right), (left, parent, right), (right, parent, left)):
         if fixed == (order,):
             return int(a == b)
@@ -138,7 +144,7 @@ def _seminormal_data(partition):
 
 
 def _conjugate(partition):
-    return tuple(sum(row > column for row in partition) for column in range(partition[0]))
+    return tuple(sum(row > column for row in partition) for column in range(partition[0])) if partition else ()
 
 
 def _sign_twist(partition):
@@ -171,6 +177,8 @@ def exact_kronecker_intertwiners(parent, left, right):
     multiplicity = kronecker_multiplicity(parent, left, right)
     if multiplicity == 0:
         return {"multiplicity": 0, "intertwiners": (), "gauge": _GAUGE}
+    if not parent:
+        return {"multiplicity": 1, "intertwiners": (sp.eye(1),), "gauge": _GAUGE}
     trivial, sign = (sum(parent),), (1,)*sum(parent)
     matrix = None
     if left == trivial or right == trivial:

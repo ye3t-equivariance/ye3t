@@ -17,6 +17,43 @@ SHELLS = {"kind": "softmax_gaussian", "centers": [0.25, 0.75], "width": 0.25}
 FAMILY = "shell_filtered_chebyshev_c2_v1"
 
 
+@pytest.mark.parametrize("factorization", ["cholesky", "lowdin"])
+def test_physical_occupation_uses_inverse_coordinate_transport_with_derivatives(factorization):
+    options = {"factorization": factorization}
+    orthogonal = shell_filtered_source_plan(FAMILY, 2, 2, SHELLS, options)
+    physical = shell_filtered_source_plan(FAMILY, 2, 2, SHELLS, options,
+                                           evaluation_coordinates="physical_shells")
+    assert orthogonal["family_id"] != physical["family_id"]
+    assert orthogonal["transforms"] == physical["transforms"]
+    assert validate_shell_filtered_source_plan(physical, recompute=True)["passed"]
+    x = torch.tensor([.13, .37, .68, .91], dtype=torch.float64, requires_grad=True)
+    for ell in (0, 1, 2):
+        transformed = shell_filtered_radial_values(orthogonal, x, ell)
+        reconstructed = torch.linalg.solve(_transform(orthogonal, ell), transformed)
+        direct = shell_filtered_radial_values(physical, x, ell)
+        torch.testing.assert_close(direct, reconstructed, rtol=2e-12, atol=2e-13)
+        # A physical (3,1) occupation is transported as the full subspace,
+        # even when T mixes every shell/radial coordinate.
+        actual, expected = direct[0]**3 * direct[2], reconstructed[0]**3 * reconstructed[2]
+        derivatives = [torch.autograd.grad(row.sum(), x, create_graph=True)[0] for row in (actual, expected)]
+        torch.testing.assert_close(*derivatives, rtol=1e-11, atol=1e-13)
+        second = [torch.autograd.grad(row.sum(), x)[0] for row in derivatives]
+        torch.testing.assert_close(*second, rtol=1e-10, atol=1e-12)
+        assert (actual - transformed[0]**3 * transformed[2]).abs().max() > 1e-5
+
+
+def test_physical_shell_catalogue_requires_matching_coordinate_choice():
+    physical = shell_filtered_source_plan(FAMILY, 1, 1, SHELLS, evaluation_coordinates="physical_shells")
+    catalogue = {"ranks": [2], "nmax": 1, "lmax": 1, "input_Lmax": 1, "tag_counts": [0],
+                 "source_family_id": physical["family_id"], "source_family_plan": physical,
+                 "shell_occupancies_by_rank": {2: [[1, 1]]}, "shell_occupation_coordinates": "physical_shells"}
+    request = tagged_cauchy_carriers_request(species=["Ni"], catalogue=catalogue)
+    assert count(request)["graph_inventory"]
+    catalogue["shell_occupation_coordinates"] = "orthogonal_channels"
+    with pytest.raises(ValueError, match="occupation coordinates"):
+        tagged_cauchy_carriers_request(species=["Ni"], catalogue=catalogue)
+
+
 def _transform(plan_payload, angular_l):
     return torch.tensor(plan_payload["transforms"][str(angular_l)], dtype=torch.float64)
 
@@ -36,10 +73,24 @@ def test_joint_ordered_transform_is_lower_triangular_and_orthonormal_on_a_third_
         assert diagnostics["equilibrated_condition_number"] > 1.
     report = validate_shell_filtered_source_plan(payload, recompute=True)
     assert report["passed"] and set(report["residuals"]) == {"0", "1"}
+    assert report["source_independence"] == "distinct_exponents_and_polynomial_degrees"
+    assert report["independent_radial_channels_per_l"] == 4
     corrupted = copy.deepcopy(payload)
     corrupted["transforms"]["0"][0][0] += 1e-6
     with pytest.raises(ValueError, match="hash mismatch"):
         validate_shell_filtered_source_plan(corrupted)
+
+
+@pytest.mark.parametrize("factorization", ["cholesky", "lowdin"])
+def test_rehashed_singular_source_transform_fails_before_materialization(factorization):
+    from ye3t.couplings.shell_filtered_radial import _stable_hash
+    payload = shell_filtered_source_plan(FAMILY, 2, 0, SHELLS, {"factorization": factorization})
+    payload["transforms"]["0"][1] = list(payload["transforms"]["0"][0])
+    body = {key: value for key, value in payload.items() if key not in {"plan_hash", "family_id"}}
+    payload["plan_hash"] = _stable_hash(body)
+    payload["family_id"] = payload["family"] + ":" + payload["plan_hash"][:16]
+    with pytest.raises(ValueError, match="singular"):
+        validate_shell_filtered_source_plan(payload)
 
 
 def test_orientation_samples_in_rows_use_transpose_and_pullback_is_the_transpose():

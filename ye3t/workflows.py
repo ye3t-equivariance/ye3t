@@ -242,12 +242,18 @@ def count_coupling_cases(representation, basis):
     ``basis.cases_by_rank`` maps each rank to a sequence of input contents.
     Ordinary and external cases contain ``content`` and ``input_Ls``. Cauchy
     cases contain ``channel_indices`` and ``block_sizes`` into ``channels``.
-    Results are keyed by ``(rank, case_index)`` and retain the public compiler
-    report and request. Every label comes from ``ye3t.couplings.count``.
+    Results are keyed by ``(rank, case_index)``; source-sector selections use
+    ``(rank, source_id)`` to distinguish targets of the same input case. Results
+    retain the public compiler report and request. Every label comes from
+    ``ye3t.couplings.count``.
     No coefficients are constructed by this operation.
     """
     from ye3t import couplings
     from ye3t.representation_config import _integer_key_map
+    import json
+
+    if representation.source_sectors is not None:
+        return _selected_coupling_cases(representation, basis)
 
     selected = _integer_key_map(basis["cases_by_rank"], "basis.cases_by_rank")
     if set(selected) != set(representation.ranks):
@@ -267,11 +273,27 @@ def count_coupling_cases(representation, basis):
     for rank in representation.ranks:
         if not selected[rank]:
             raise ValueError("Each selected rank needs at least one input case.")
+        density_contents = {}
+        supplied_contents = set()
         for index, case in enumerate(selected[rank]):
             if carrier in {"ACE_density", "external_tensor"}:
                 content, angular = tuple(case["content"]), tuple(case["input_Ls"])
                 if len(content) != rank or len(angular) != rank:
                     raise ValueError("Case content and input_Ls must match its rank key.")
+                if carrier == "ACE_density":
+                    # Commuting density products identify every permutation of
+                    # the complete (channel, l) word. A repeated case cannot
+                    # supply another independent source multiplicity space.
+                    word = tuple(sorted(zip(content, angular)))
+                    if word in density_contents:
+                        raise ValueError(f"Density cases {density_contents[word]} and {index} at rank {rank} "
+                                         "repeat the same complete channel content")
+                    density_contents[word] = index
+                else:
+                    identity = tuple(zip(content, angular))
+                    if identity in supplied_contents:
+                        raise ValueError("Source cases repeat the same physical input content and bindings")
+                    supplied_contents.add(identity)
                 report = representation.count_fixed_content(content, angular, carrier=carrier)
                 request = report.spec
                 count = report.counts_by_target[representation.L]
@@ -283,6 +305,11 @@ def count_coupling_cases(representation, basis):
                     raise ValueError("channel_indices must select distinct configured channels.")
                 channels = tuple(basis["channels"][i] for i in indices)
                 sizes = tuple(case["block_sizes"])
+                identity = json.dumps({"channels": channels, "block_sizes": sizes,
+                                       "role_dimension": basis["role_dimension"]}, sort_keys=True)
+                if identity in supplied_contents:
+                    raise ValueError("Source cases repeat the same physical input content and bindings")
+                supplied_contents.add(identity)
                 if sum(sizes) != rank:
                     raise ValueError("Cauchy block_sizes must sum to the rank key.")
                 if any(channel["l"] > dict(representation.l_max_per_rank)[rank]
@@ -305,6 +332,130 @@ def count_coupling_cases(representation, basis):
                 "inputs": dict(case), "request": request, "report": report,
                 "target_L": representation.L, "multiplicity_count": int(count),
             }
+            result[rank, index]["full_path"] = _coupling_case_full_path(result[rank, index])
+    return result
+
+
+def _coupling_case_full_path(case):
+    """Keep canonical channel content and copy labels with a counted source.
+
+    This is count-report metadata. It performs no coefficient materialization
+    and supplies no additional multiplicity coordinates.
+    """
+    import json
+    report = case["report"]
+    labels = (report["labels"] if isinstance(report, dict)
+              else report.labels_for_target(case["target_L"]))
+    if "selected_labels" in case:
+        labels = case["selected_labels"]
+    labels = [label if isinstance(label, dict) else label.to_dict() for label in labels]
+    if len(labels) != case["multiplicity_count"]:
+        raise ArithmeticError("Source full_path labels differ from its exact multiplicity")
+    inputs = dict(case["inputs"])
+    if isinstance(case["request"], dict):
+        inputs["channels"] = case["request"]["channels"]
+        inputs["role_dimension"] = case["request"]["role_dimension"]
+    return json.loads(json.dumps({"schema": "ye3t_source_full_path_v1",
+        "carrier": case["carrier"], "factor_rank": case["rank"], "inputs": inputs,
+        "target_L": case["target_L"],
+        "available_multiplicity_count": case.get("available_multiplicity_count", case["multiplicity_count"]),
+        "multiplicity_indices": list(case.get("selected_multiplicities", range(len(labels)))),
+        "labels": labels}, sort_keys=True))
+
+
+def _selected_coupling_cases(representation, basis):
+    """Enumerate exact fixed-content sectors, then select complete copies."""
+    from copy import deepcopy
+    import hashlib
+    import json
+    from math import prod
+    from ye3t import YE3TRepresentation, couplings
+    from ye3t.representation_config import _integer_key_map
+
+    selection = dict(representation.source_sectors)
+    configured = _integer_key_map(basis["cases_by_rank"], "basis.cases_by_rank")
+    if set(configured) != set(representation.ranks):
+        raise ValueError("cases_by_rank must cover exactly representation.ranks.")
+    if basis["carrier"] not in {"ACE_density", "external_tensor", "ordered_role"}:
+        raise NotImplementedError("Source selection for this carrier needs its physical-image inventory")
+    candidates, inventory = {}, []
+    for rank in representation.ranks:
+        if not configured[rank]:
+            raise ValueError("Each selected rank needs at least one input case.")
+        seen_contents = set()
+        for input_index, inputs in enumerate(configured[rank]):
+            if basis["carrier"] == "ordered_role":
+                angular = tuple(basis["channels"][i]["l"] for i, size in
+                                zip(inputs["channel_indices"], inputs["block_sizes"], strict=True)
+                                for _ in range(size))
+                parity = prod(basis["channels"][i].get("parity", (-1) ** basis["channels"][i]["l"]) ** size
+                              for i, size in zip(inputs["channel_indices"], inputs["block_sizes"], strict=True))
+                physical_identity = {"carrier": basis["carrier"], "role_dimension": basis["role_dimension"],
+                    "channels": [basis["channels"][i] for i in inputs["channel_indices"]],
+                    "block_sizes": inputs["block_sizes"]}
+            else:
+                angular = tuple(inputs["input_Ls"])
+                parity = 1 if sum(angular) % 2 == 0 else -1
+                word = tuple(zip(inputs["content"], angular))
+                if basis["carrier"] == "ACE_density":
+                    word = tuple(sorted(word))
+                physical_identity = {"carrier": basis["carrier"], "factor_word": word}
+            identity = json.dumps(physical_identity, sort_keys=True, separators=(",", ":"))
+            if identity in seen_contents:
+                raise ValueError("Source cases repeat the same physical input content and bindings")
+            seen_contents.add(identity)
+            content_id = "sha256:" + hashlib.sha256(identity.encode()).hexdigest()
+            partitions = ((rank,),) if basis["carrier"] == "ACE_density" else couplings.integer_partitions(rank)
+            # Explicit requests are checked against the available inventory.
+            # Omitting angular limits allows every physically available L.
+            max_L = selection.get("L_max", max(selection.get("L", [sum(angular)])))
+            for partition in partitions:
+                for L in range(min(sum(angular), max_L) + 1):
+                    config = representation.to_dict()
+                    config.pop("source_sectors", None)
+                    config["ranks"] = [rank]
+                    config["parent"] = {"young_lambda": {rank: list(partition)},
+                                        "L": L, "parity": "even" if parity == 1 else "odd"}
+                    for name, values in config["uncoupled_factor_inputs"].items():
+                        config["uncoupled_factor_inputs"][name] = {rank: values[rank]}
+                    local_basis = dict(basis, cases_by_rank={rank: [inputs]})
+                    case = count_coupling_cases(YE3TRepresentation.from_config(config), local_basis)[rank, 0]
+                    if not case["multiplicity_count"]:
+                        continue
+                    case_id = f"r{rank}_case{input_index}_young{'_'.join(map(str, partition))}_L{L}"
+                    case.update(case_index=input_index, source_id=case_id,
+                                parent_partition=tuple(partition), parity=parity)
+                    candidates[case_id] = case
+                    labels = (case["report"]["labels"] if basis["carrier"] == "ordered_role"
+                              else case["report"].labels_for_target(L))
+                    if len(labels) != case["multiplicity_count"]:
+                        raise ArithmeticError("Compiler labels differ from the independent count")
+                    for a, label in enumerate(labels):
+                        inventory.append({"content_id": content_id,
+                            "action_degree": rank, "young_lambda": list(partition), "L": L,
+                            "parity": parity, "coordinate_id": case_id + f"_a{a}",
+                            "case_id": case_id, "multiplicity_index": a,
+                            "label": deepcopy(label if isinstance(label, dict) else label.to_dict())})
+    selected = representation.select_source_inventory(inventory)
+    groups = {}
+    for row in selected["selected"]:
+        groups.setdefault(row["case_id"], []).append(row)
+    result = {}
+    for case_id, rows in groups.items():
+        case = dict(candidates[case_id])
+        indices = tuple(row["multiplicity_index"] for row in rows)
+        case.update(available_multiplicity_count=case["multiplicity_count"],
+                    multiplicity_count=len(indices), selected_multiplicities=indices,
+                    selected_labels=tuple(row["label"] for row in rows),
+                    selection_report=next(row for row in selected["sector_inventory"]
+                        if row["content_id"] == rows[0]["content_id"]
+                        and tuple(row["young_lambda"]) == case["parent_partition"]
+                        and row["L"] == case["target_L"]))
+        if case["carrier"] == "ordered_role":
+            request = dict(case["request"], selected_multiplicities=list(indices))
+            case.update(request=request, report=couplings.count(request))
+        case["full_path"] = _coupling_case_full_path(case)
+        result[case["rank"], case_id] = case
     return result
 
 
@@ -353,6 +504,26 @@ def compile_coupling_cases(cases, *, constructor_backend="auto",
         item = dict(case)
         report = case["report"]
         item["plan"] = couplings.plan(report)
+        if case["carrier"] == "external_tensor" and "selected_multiplicities" in case:
+            item["plan"] = item["plan"].select_multiplicities(case["selected_multiplicities"])
+        if case["carrier"] == "ACE_density" and "selected_multiplicities" in case:
+            from ye3t.execution_plan import YE3TSourceRealization
+            labels = tuple(report.labels_for_target(case["target_L"])[a]
+                           for a in case["selected_multiplicities"])
+            word = tuple(zip(labels[0].n_tuple, labels[0].l_tuple))
+            blocks = [{"power": word.count((n, ell)), "input_L": ell,
+                       "slot_indices": [f for f, value in enumerate(word) if value == (n, ell)],
+                       "source_binding": {"binding_id": f"density_n{n}_l{ell}", "input_L": ell}}
+                      for n, ell in dict.fromkeys(word)]
+            execution = couplings.execution_plan_from_repeated_angular_blocks(
+                blocks, parent_partition=case["parent_partition"], target_L=case["target_L"],
+                source_realization=YE3TSourceRealization("ordinary_density", case["rank"], content=word),
+                compiler_labels=labels, expected_multiplicity=case["multiplicity_count"],
+                coefficient_materialization="exact")
+            item.update(execution_plan=execution, compiled=execution, density_word=word,
+                        density_blocks=blocks)
+            result[key] = item
+            continue
         if case["carrier"] == "ACE_density":
             compiled = couplings.compile_ace_factorized_schedules_by_L(
                 content=report.content, input_Ls=case["inputs"]["input_Ls"],
@@ -418,7 +589,14 @@ def evaluate_coupling_cases(cases, multiplets, *, dtype="complex128", device="cp
     for key, case in cases.items():
         compiled = case["compiled"]
         carrier = case["carrier"]
-        if carrier == "A_s":
+        if carrier == "ACE_density" and "selected_multiplicities" in case:
+            from ye3t.runtime import YE3THierarchicalRepeatedBlockModule
+            runtime = YE3THierarchicalRepeatedBlockModule(case["execution_plan"],
+                dtype=torch_dtype, device=device, backend=backend)
+            factors = tuple(torch.as_tensor(multiplets[ell], dtype=torch_dtype, device=device)
+                            [..., n - 1, :] for n, ell in dict.fromkeys(case["density_word"]))
+            values = runtime(*factors).squeeze(-2)
+        elif carrier == "A_s":
             if str(device) != "cpu":
                 raise ValueError("Role-density Cauchy evaluation currently requires CPU.")
             if dtype != "float64":

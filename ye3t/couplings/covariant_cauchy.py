@@ -22,7 +22,7 @@ implementation; no external source code is adapted.
 """
 
 from collections import defaultdict
-from itertools import product
+from itertools import combinations_with_replacement, product
 import math
 
 from ye3t.representations.builder import GeneralizedExactSymbolicLabeler
@@ -58,6 +58,8 @@ def covariant_cauchy_request(
     angular_basis_backend="exact_weight_space_v1",
     target_permutation="trivial",
     carrier="A_s",
+    selected_multiplicities=None,
+    role_occupations=None,
 ):
     """Describe one fixed complete-channel content and an ``O(3)`` target.
 
@@ -132,6 +134,31 @@ def covariant_cauchy_request(
         )
     if carrier not in {"A_s", "ordered_role"}:
         raise ValueError("Cauchy carrier must be A_s or ordered_role.")
+    occupation_selection = {}
+    if role_occupations is not None:
+        if carrier != "A_s":
+            raise ValueError("Fixed role occupations apply to the commuting A_s carrier")
+        if not isinstance(role_occupations, (list, tuple)) or not role_occupations:
+            raise ValueError("role_occupations must contain nonempty occupation vectors")
+        occupations = []
+        for row in role_occupations:
+            if (not isinstance(row, (list, tuple)) or len(row) != role_dimension
+                    or any(type(value) is not int or value < 0 for value in row)
+                    or sum(row) != sum(block_sizes)):
+                raise ValueError("A role occupation needs role_dimension nonnegative integers summing to the factor rank")
+            occupations.append(tuple(row))
+        if len(set(occupations)) != len(occupations):
+            raise ValueError("role_occupations contains a duplicate weight")
+        occupation_selection = {"role_occupations": tuple(sorted(occupations)),
+                                "role_copy_basis": "weight_resolved_kostka_copies_v1"}
+    selection = {}
+    if selected_multiplicities is not None:
+        indices = tuple(selected_multiplicities)
+        if ((carrier != "ordered_role" and role_occupations is None) or not indices
+                or any(type(index) is not int or index < 0 for index in indices)
+                or indices != tuple(sorted(set(indices)))):
+            raise ValueError("selected_multiplicities requires ordered_role or fixed role occupations and sorted unique nonnegative copy indices")
+        selection["selected_multiplicities"] = indices
     from ye3t.global_coupler import _partition_from_target
 
     if str(target_permutation).strip().lower() == "(n)":
@@ -157,6 +184,7 @@ def covariant_cauchy_request(
             },
             "factor_input": "one_ordered_role_angular_multiplet_per_factor",
             "convention_id": "ordered_role_cauchy_joint_young_cg_v2",
+            **selection,
         }
     return {
         "family": COVARIANT_CAUCHY_FAMILY,
@@ -173,6 +201,8 @@ def covariant_cauchy_request(
             "o3_parity": int(content_parity),
         },
         "convention_id": COVARIANT_CAUCHY_CONVENTION,
+        **occupation_selection,
+        **selection,
     }
 
 
@@ -190,6 +220,8 @@ def _normalized(request):
         angular_basis_backend=request.get("angular_basis_backend", "legacy_exact"),
         target_permutation=request["target"].get("permutation", "trivial"),
         carrier=request.get("carrier", "A_s"),
+        selected_multiplicities=request.get("selected_multiplicities"),
+        role_occupations=request.get("role_occupations"),
     )
     if "angular_basis_backend" not in request:
         normalized.pop("angular_basis_backend")
@@ -232,10 +264,28 @@ def covariant_cauchy_count(request):
         outer_count = _scalar._outer_counts(Lambdas, target_L)
         if outer_count <= 0:
             continue
-        copy_ranges = tuple(
-            tuple(product(range(block[2]), range(block[3]))) for block in blocks
-        )
+        fixed_occupations = request.get("role_occupations")
+        if fixed_occupations is None:
+            copy_ranges = tuple(tuple((role, angular, None) for role, angular in
+                product(range(block[2]), range(block[3]))) for block in blocks)
+        else:
+            from .tagged_cauchy import kostka_number
+            copy_ranges = []
+            for size, block in zip(request["block_sizes"], blocks, strict=True):
+                choices = []
+                for word in combinations_with_replacement(range(role_dimension), size):
+                    weight = tuple(word.count(role) for role in range(role_dimension))
+                    if not any(all(value <= bound for value, bound in zip(weight, total, strict=True))
+                               for total in fixed_occupations):
+                        continue
+                    for role, angular in product(range(int(kostka_number(block[0], weight))), range(block[3])):
+                        choices.append((role, angular, weight))
+                copy_ranges.append(tuple(choices))
         for copies in product(*copy_ranges):
+            if fixed_occupations is not None:
+                total = tuple(sum(copy[2][role] for copy in copies) for role in range(role_dimension))
+                if total not in fixed_occupations:
+                    continue
             for outer_copy in range(outer_count):
                 labels.append(
                     {
@@ -245,7 +295,9 @@ def covariant_cauchy_count(request):
                         "block_sizes": request["block_sizes"],
                         "block_kappas": tuple(block[0] for block in blocks),
                         "block_Lambdas": Lambdas,
-                        "role_copy_indices": tuple(copy[0] for copy in copies),
+                        **({"role_copy_indices": tuple(copy[0] for copy in copies)} if fixed_occupations is None else {
+                            "role_weight_copy_indices": tuple(copy[0] for copy in copies),
+                            "block_role_contents": tuple(copy[2] for copy in copies)}),
                         "angular_copy_indices": tuple(copy[1] for copy in copies),
                         "outer_copy_index": int(outer_copy),
                         "target_L": target_L,
@@ -253,12 +305,19 @@ def covariant_cauchy_count(request):
                         "convention_id": COVARIANT_CAUCHY_CONVENTION,
                     }
                 )
+    available_count = len(labels)
+    indices = request.get("selected_multiplicities")
+    if indices is not None:
+        if indices[-1] >= available_count:
+            raise ValueError("Selected Cauchy multiplicity index exceeds the available fixed-occupation copies")
+        labels = [labels[index] for index in indices]
     return {
         "schema": COVARIANT_CAUCHY_SCHEMA,
         "request": request,
         "labels": tuple(labels),
         "multiplet_count": len(labels),
         "component_count": len(labels) * (2 * target_L + 1),
+        **({"available_multiplet_count": available_count} if indices is not None else {}),
     }
 
 
@@ -368,6 +427,17 @@ def compile_covariant_cauchy(request):
         % 2
     )
     for label in report["labels"]:
+        coefficient_label = label
+        if "block_role_contents" in label:
+            # Counts use Kostka dimensions only. At coefficient compilation,
+            # bind the within-weight copy to the existing Schur table's gauge.
+            role_copies = []
+            for size, kappa, weight, index in zip(label["block_sizes"], label["block_kappas"],
+                    label["block_role_contents"], label["role_weight_copy_indices"], strict=True):
+                metadata = _scalar._role_schur_pivot_metadata(request["role_dimension"], size, tuple(kappa))
+                candidates = [copy for copy, (_, content) in enumerate(metadata) if tuple(content) == tuple(weight)]
+                role_copies.append(candidates[index])
+            coefficient_label = {**label, "role_copy_indices": tuple(role_copies)}
         template_ids = []
         for block_index, (size, kappa, Lambda) in enumerate(
             zip(
@@ -393,7 +463,7 @@ def compile_covariant_cauchy(request):
         if Lambdas not in outer_templates:
             outer_templates[Lambdas] = _outer_multiplet_template(Lambdas, target_L)
         canonical = _canonical_complex_rows(
-            label, request, block_templates, outer_templates[Lambdas]
+            coefficient_label, request, block_templates, outer_templates[Lambdas]
         )
         descriptors.append(
             {

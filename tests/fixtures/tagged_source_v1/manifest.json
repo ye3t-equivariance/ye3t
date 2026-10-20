@@ -1,0 +1,25 @@
+{
+  "schema": "ye3t_pre_v2_tagged_source_fixture_v1",
+  "purpose": "validate current exact reconstruction of a historical fixed source",
+  "ye3t_revision": "abc042fc667297e38d696882c3cf52af505fe793",
+  "artifact_schema": "ye3t_tagged_cauchy_carriers_v1",
+  "artifact_self_hash": "29d607c1df109db6144e9b53d308b9ab4c1a22adf21e97249254b0d4e9b4020d",
+  "multiplet_count": 4,
+  "component_count": 4,
+  "tag_partitions": [
+    [
+      2
+    ],
+    [
+      2
+    ],
+    [
+      1,
+      1
+    ],
+    [
+      2
+    ]
+  ],
+  "file_sha256": "55aeabb1c1a0bfeed1d6393f06c9970f5bc92e95a025f72f0a39df69a4982e92"
+}

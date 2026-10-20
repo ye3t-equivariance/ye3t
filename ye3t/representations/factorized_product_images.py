@@ -277,8 +277,13 @@ def _local_young_subduction_template(left_signature, right_signature, target_sig
 
 
 @lru_cache(maxsize=128)
-def factorized_requested_sector(nin, lin, permutation_signature, output_L):
-    """Build the exact local Young x SO(3) basis at one requested L."""
+def factorized_requested_sector(nin, lin, permutation_signature, output_L, *, materialize_carriers=True):
+    """Build a requested sector, optionally retaining only reduced copy data.
+
+    Product planning uses materialize_carriers=False: exact block counts and
+    angular paths identify the multiplicity basis without global magnetic
+    vectors. Local block fusion maps are constructed separately when needed.
+    """
 
     from .young_sectors import (
         _permutation_irrep_from_signature,
@@ -315,9 +320,10 @@ def factorized_requested_sector(nin, lin, permutation_signature, output_L):
         ):
             if factor_index == 0 and abs(int(angular_L) - output_L) > remaining_max:
                 continue
-            carriers = _single_factor_carriers(
+            carriers = (_single_factor_carriers(
                 factor.multiplicity, factor.l, tuple(partition.parts), angular_L,
-            )
+            ) if materialize_carriers else {
+                (copy, tableau): None for copy in range(count) for tableau in range(int(partition.dimension))})
             if len(carriers) != int(count) * int(partition.dimension):
                 raise ArithmeticError("Factorized Young carrier count disagrees with the character count.")
             for (copy_index, tableau), multiplet in carriers.items():
@@ -345,7 +351,7 @@ def factorized_requested_sector(nin, lin, permutation_signature, output_L):
                         intermediates + (int(coupled_L),), carrier + (tableau,),
                         _couple_multiplets(
                             left_multiplet, left_L, right_multiplet, right_L, coupled_L,
-                        ),
+                        ) if materialize_carriers else None,
                     ))
         partials = next_partials
 
@@ -363,11 +369,16 @@ def factorized_requested_sector(nin, lin, permutation_signature, output_L):
     multiplets = {}
     for spins, copies, intermediates, carrier, multiplet in completed:
         label = (int(copy_index[(spins, copies, intermediates)]), tuple(carrier))
-        highest[label] = multiplet[output_L]
-        multiplets[label] = multiplet
+        highest[label] = multiplet[output_L] if materialize_carriers else None
+        if materialize_carriers:
+            multiplets[label] = multiplet
     labels = tuple(sorted(highest))
     if len(copy_descriptors) != expected or len(labels) != expected * int(irrep.dim):
         raise ArithmeticError("Factorized basis size disagrees with the exact Young/SO(3) count.")
+    if not materialize_carriers:
+        return _FactorizedRequestedSector(
+            nin, lin, irrep, output_L, content, labels, {}, {}, _sympy().zeros(0, 0), copy_descriptors,
+        )
     reference_carrier = tuple(0 for _ in irrep.partitions)
     copy_gram = tuple(tuple(
         _sparse_inner(
@@ -495,7 +506,17 @@ def _homogeneous_reduced_map(left_size, right_size, angular_l,
             nin, lin, _permutation_irrep_signature(irrep), int(output_L),
         ))
     left, right, target = sectors
-    matrix, _ = _factorized_product_image_reference(left, right, target)
+    # The reduced fusion needs one same-content identity-placement overlap.
+    # Keep this block-local calculation separate from the full product's
+    # direct-orbit reference backend. Global magnetic vectors are unnecessary.
+    child_labels = tuple(product(left.basis_labels, right.basis_labels))
+    columns = []
+    for left_label, right_label in child_labels:
+        coupled = _couple_multiplets(left.multiplets[left_label], left.L,
+                                     right.multiplets[right_label], right.L, target.L)[target.L]
+        columns.append([_sparse_inner(target.highest_vectors[label], coupled)._sympy_()
+                        for label in target.basis_labels])
+    matrix = (target.gram_inverse * _sympy().Matrix(columns).T).applyfunc(_sympy().simplify)
     rows, young_matrices, left_inverse = _local_young_subduction_template(
         _permutation_irrep_signature(left.permutation_irrep),
         _permutation_irrep_signature(right.permutation_irrep),
@@ -534,7 +555,7 @@ def factorized_product_image(left, right, target, *, coefficient_backend="subduc
     One-content-block fusions use exact sparse-vector inner products.
     """
 
-    if coefficient_backend == "direct_orbit" or len(target.permutation_irrep.subgroup.factors) == 1:
+    if coefficient_backend == "direct_orbit":
         return _factorized_product_image_reference(
             left, right, target, coefficient_backend=coefficient_backend,
         )

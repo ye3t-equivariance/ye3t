@@ -76,6 +76,47 @@ evaluation argument: a mapping from configured channel index to a real
 tesseral ``(role, magnetic)`` array. This evaluator uses CPU float64.
 See :doc:`basic_examples` for complete configurations and expected counts.
 
+Selecting source types and copies
+--------------------------------
+
+For ``ACE_density``, ``external_tensor`` and ``ordered_role`` cases, the optional
+``representation.source_sectors`` setting controls the independent source
+inventory before compilation:
+
+.. code-block:: python
+
+   "source_sectors": {
+       "young_lambda": "all", "L_max": 2, "parity": "all", "copies": 2,
+   }
+
+The Young policy accepts ``all``, ``symmetric_only``, ``antisymmetric_only``, or
+a list of partition templates such as ``["(N)", "(N-1,1)"]``. Templates use
+the degree of the source action. Ordinary density permits the symmetric type.
+``L`` requests particular angular momenta; ``L_max`` sets an upper bound.
+When both are omitted, all physically available angular outputs are considered.
+Parity follows the input factors, including explicit factor parities in ordered
+Cauchy inputs. Invalid explicit requests raise errors with available alternatives.
+
+``copies`` limits independent copies within each fixed content and output type;
+``"all"`` keeps every available copy. Selected copies retain their original
+compiler labels and all tableau and magnetic components. Counts include
+``available_multiplicity_count``, ``selected_multiplicities`` and
+``selected_labels``. Keys become ``(rank, source_id)`` because one input case
+can supply several output types. The same count, compile and evaluate calls
+shown above apply.
+
+Each counted case also exposes ``full_path``: complete input channel content,
+the original multiplicity indices and canonical labels. This information is
+available before coefficient materialization and follows selected sources into
+application planning. Repeated identical input cases raise an error in both
+the default and sector-selected workflows.
+
+At the lower-level fixed-content interface,
+``coupler_plan.select_multiplicities((0, 2))`` selects original independent
+copies 0 and 2 for factorized compilation. Indices must be sorted, unique and
+within the exact multiplicity count. This selection preserves complete
+irreducible multiplets and supports differentiation through supplied factors.
+
 Config Dictionary Conventions
 -----------------------------
 

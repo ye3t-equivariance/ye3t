@@ -32,6 +32,8 @@ construction, formal parent ``(N)``).
 import hashlib
 import json
 import math
+from functools import lru_cache
+from fractions import Fraction
 
 import numpy as np
 import torch
@@ -138,8 +140,15 @@ def shell_filtered_raw_values(plan, x, angular_l):
 
 
 def shell_filtered_radial_values(plan, x, angular_l, transform=None):
-    """Transformed ``psi~_l = T_l psi_l`` as ``[S*nmax, ...x]``."""
+    """Evaluate selected channel coordinates as ``[S*nmax, ...x]``.
+
+    Physical-shell occupations use the inverse coordinate transport of the
+    frozen orthogonal basis. Fusing T^-1(T psi) evaluates psi directly and
+    avoids cancellation and a second matrix multiply in every force step.
+    """
     raw = shell_filtered_raw_values(plan, x, angular_l)
+    if plan.get("evaluation_coordinates") == "physical_shells":
+        return raw
     if transform is None:
         transform = torch.tensor(plan["transforms"][str(int(angular_l))], dtype=x.dtype, device=x.device)
     return torch.tensordot(transform, raw, dims=1)
@@ -215,7 +224,8 @@ def _residuals(plan, transform, gram, orthogonalization):
             "cross_shell_overlap": float(torch.linalg.matrix_norm(identity - blocks, ord=2))}
 
 
-def shell_filtered_source_plan(family, radial_count, lmax, shells, orthogonalization=None):
+def shell_filtered_source_plan(family, radial_count, lmax, shells, orthogonalization=None, *,
+                               evaluation_coordinates="orthogonal_channels"):
     """Compile the frozen transform of one shell-filtered family.
 
     ``family`` is a configured name from ``SHELL_FILTERED_BASE_FAMILIES``;
@@ -225,6 +235,8 @@ def shell_filtered_source_plan(family, radial_count, lmax, shells, orthogonaliza
     residuals and a content hash; its ``family_id`` carries that hash.
     """
     name = shell_filtered_family_name(family)
+    if evaluation_coordinates not in {"orthogonal_channels", "physical_shells"}:
+        raise ValueError("Shell evaluation_coordinates must be orthogonal_channels or physical_shells")
     shells, orthogonalization = normalize_shell_filter_settings(shells, orthogonalization)
     radial_count, lmax = int(radial_count), int(lmax)
     if radial_count < 1 or lmax < 0:
@@ -257,6 +269,11 @@ def shell_filtered_source_plan(family, radial_count, lmax, shells, orthogonaliza
                 "identity_residual_construction": construction["identity_residual"],
                 "identity_residual_check": check["identity_residual"],
                 "cross_shell_overlap_check": check["cross_shell_overlap"]}
+    if evaluation_coordinates == "physical_shells":
+        plan["schema"] = "ye3t_shell_filtered_radial_source_plan_v2"
+        plan["evaluation_coordinates"] = evaluation_coordinates
+        plan["occupation_transport"] = "inverse_channel_transform_before_products"
+        plan["radial_definition"] = "w_s(x) (1-x)^p P_n(x); inverse T_l transport fused with T_l; x^l in the regular solid harmonic"
     plan["plan_hash"] = _stable_hash(plan)
     plan["family_id"] = name + ":" + plan["plan_hash"][:16]
     return plan
@@ -267,7 +284,14 @@ def validate_shell_filtered_source_plan(plan, *, recompute=False):
     required = {"schema", "family", "base_family", "radial_count", "lmax", "shell_count", "shells",
                 "orthogonalization", "quadrature", "channel_order", "radial_channel_index", "coordinate",
                 "measure", "radial_definition", "transforms", "gram", "diagnostics", "plan_hash", "family_id"}
-    if not isinstance(plan, dict) or set(plan) != required or plan["schema"] != SHELL_FILTERED_SOURCE_PLAN_SCHEMA:
+    physical = isinstance(plan, dict) and plan.get("schema") == "ye3t_shell_filtered_radial_source_plan_v2"
+    if physical:
+        required |= {"evaluation_coordinates", "occupation_transport"}
+        if (plan.get("evaluation_coordinates") != "physical_shells"
+                or plan.get("occupation_transport") != "inverse_channel_transform_before_products"):
+            raise ValueError("Physical shell occupations require the inverse coordinate transport")
+    if (not isinstance(plan, dict) or set(plan) != required or
+            plan["schema"] not in {SHELL_FILTERED_SOURCE_PLAN_SCHEMA, "ye3t_shell_filtered_radial_source_plan_v2"}):
         raise ValueError("Unknown shell-filtered radial source plan payload")
     body = {key: value for key, value in plan.items() if key not in {"plan_hash", "family_id"}}
     if _stable_hash(body) != plan["plan_hash"] or plan["family_id"] != plan["family"] + ":" + plan["plan_hash"][:16]:
@@ -283,13 +307,28 @@ def validate_shell_filtered_source_plan(plan, *, recompute=False):
             or plan["shell_count"] != len(shells["centers"])
             or plan["base_family"] != SHELL_FILTERED_BASE_FAMILIES[shell_filtered_family_name(plan["family"])]):
         raise ValueError("Shell-filtered radial source plan settings are not canonical")
+    if int(plan["radial_count"]) < 1 or int(plan["lmax"]) < 0:
+        raise ValueError("Shell-filtered source needs positive radial count and nonnegative lmax")
     width = plan["shell_count"] * int(plan["radial_count"])
     if (set(plan["transforms"]) != {str(l) for l in range(int(plan["lmax"]) + 1)}
             or set(plan["gram"]) != set(plan["transforms"])
             or any(len(rows) != width or any(len(row) != width for row in rows)
                    for table in (plan["transforms"], plan["gram"]) for rows in table.values())):
         raise ValueError("Shell-filtered radial source plan tables do not match the channel layout")
-    report = {"passed": True, "family_id": plan["family_id"], "recomputed": bool(recompute), "residuals": {}}
+    for rows in plan["transforms"].values():
+        if not _independent_transform(tuple(tuple(float(value) for value in row) for row in rows)):
+            raise ValueError("Shell-filtered source transform is singular")
+    # For fixed l, common-width Gaussian windows times degree-n polynomials
+    # factor into a common positive function and exp(a_s x) P_n(x), with
+    # distinct a_s. Exponential polynomials with distinct exponents and
+    # independent polynomial ladders are linearly independent on (0, 1).
+    # Softmax division contributes a common positive denominator. An invertible
+    # fixed T_l preserves this one-particle source dimension. This argument
+    # concerns functions, independently of any sampled quadrature Gram.
+    report = {"passed": True, "family_id": plan["family_id"], "recomputed": bool(recompute), "residuals": {},
+              "source_independence": "distinct_exponents_and_polynomial_degrees",
+              "independent_radial_channels_per_l": width,
+              "transform_rank": "exact_serialized_binary64"}
     if recompute:
         with torch.no_grad():
             for key, rows in plan["transforms"].items():
@@ -302,12 +341,38 @@ def validate_shell_filtered_source_plan(plan, *, recompute=False):
     return report
 
 
+@lru_cache(maxsize=256)
+def _independent_transform(rows):
+    """Check exact rank of the stored finite matrix, without a tolerance cutoff."""
+    if any(not math.isfinite(value) for row in rows for value in row):
+        raise ValueError("Shell-filtered source transform contains nonfinite entries")
+    width = len(rows)
+    if (all(rows[i][j] == 0 for i in range(width) for j in range(i + 1, width))
+            or all(rows[i][j] == 0 for i in range(width) for j in range(i))):
+        return all(rows[i][i] != 0 for i in range(width))
+    matrix = [[Fraction(value) for value in row] for row in rows]
+    for column in range(width):
+        pivot = next((row for row in range(column, width) if matrix[row][column]), None)
+        if pivot is None:
+            return False
+        matrix[column], matrix[pivot] = matrix[pivot], matrix[column]
+        for row in range(column + 1, width):
+            ratio = matrix[row][column] / matrix[column][column]
+            if ratio:
+                for index in range(column + 1, width):
+                    matrix[row][index] -= ratio * matrix[column][index]
+            matrix[row][column] = 0
+    return True
+
+
 def shell_filtered_source_metadata(plan):
     """Source smoothness/provenance record for graph bindings and reports."""
     return {"radial_family": plan["family_id"], "base_family": plan["base_family"],
             "radial_definition": plan["radial_definition"], "coordinate": plan["coordinate"],
-            "normalization": "orthonormal_under_" + plan["measure"].replace(" ", "_") + "_per_l_"
-                             + plan["orthogonalization"]["convention"] + "_" + plan["orthogonalization"]["scope"],
+            "normalization": ("physical_shell_coordinates_with_inverse_orthogonal_basis_transport"
+                             if plan.get("evaluation_coordinates") == "physical_shells" else
+                             "orthonormal_under_" + plan["measure"].replace(" ", "_") + "_per_l_"
+                             + plan["orthogonalization"]["convention"] + "_" + plan["orthogonalization"]["scope"]),
             "zero_extension": _ZERO_EXTENSION[plan["base_family"]],
             "cutoff_second_derivative": ("continuous_zero" if plan["base_family"] == CHEBYSHEV_C2_SOURCE_FAMILY
                                          else "one_sided"),

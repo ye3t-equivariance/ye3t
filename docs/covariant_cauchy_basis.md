@@ -1,5 +1,65 @@
 # Covariant Cauchy bases for arbitrary `(L, parity)` and Young outputs
 
+## Independent tagged-source planning
+
+`couplings.count(request)` and `couplings.plan(request)` return independent
+source copies before angular coefficient compilation. For `s` distinct tags,
+one factor at each tag, and `N-s` inclusive density factors, the role
+multiplicity associated with paired block types `kappa_b` and active tag type
+`tau` is
+
+\[
+m_{\boldsymbol\kappa}^{\tau}
+=\sum_{\lambda\vdash N}
+c_{\boldsymbol\kappa}^{\lambda}\,
+c_{\tau,(N-s)}^{\lambda}.
+\]
+
+The first coefficient comes from the product of the block Schur modules.
+The second restricts to the tag group and takes invariants in the pooled
+factor group. Empty groups are omitted when `s=0` or `s=N`. Multiplying by
+the block angular multiplicities and outer angular-coupling multiplicity,
+then summing the allowed intermediate angular momenta, gives the number of
+joint tag/rotation copies. Tableau and magnetic dimensions enter only the
+component count.
+
+Character calculations determine these dimensions. Exact role-only projections
+identify independent original copy coordinates with stable IDs. These projections
+do not build angular maps or evaluated source polynomials. For two scalar
+channels repeated twice at `N=4,s=2`, the independent inventory has three
+symmetric tag copies and one antisymmetric tag copy. Catalogue feature limits
+act on that four-copy inventory.
+
+`multiplet_count` counts selected independent copies;
+`component_count` includes every tableau and magnetic component.
+`sector_inventory` and `copy_inventory` provide available multiplicities and
+stable copy indices. A subset retains its original indices. The internal
+projection-seed count is diagnostic information and is never a basis dimension.
+Coefficient compilation checks the planned image against exact sparse source
+polynomials.
+
+The count describes a free inclusive-moment source with independently variable
+distinct tags and backgrounds. `physical_image_rank` requires an independent
+one-particle source family. Supported polynomial radial/angular families supply
+that condition; an abstract unbound family reports its formal dimension and a
+pending physical rank. Marginalization and products at the same occurrence
+have their own physical images.
+
+For fixed common-width Gaussian shell filters, factor out their common positive
+Gaussian and radial envelope. The remaining radial functions are
+`exp(a_s x) P_n(x)`, with distinct exponents for distinct shell centers and
+polynomials of successively increasing degree. These exponential-polynomial
+families are independent on the open radial interval. Softmax normalization
+adds a common positive denominator. The shell plan also checks exact
+nonsingularity of its serialized transform; sampled Gram checks separately
+measure conditioning and orthogonality. Joint shell transforms mix physical
+shell coordinates, so an occupation in raw shell coordinates requires transport
+of the selected subspace when expressed in transformed coordinates.
+
+The restriction and pairing conventions follow Frobenius reciprocity and
+Schur-Weyl duality. The Young-projector implementation follows the generator
+construction in [Vershik and Okounkov](https://arxiv.org/abs/math/0503040).
+
 ## Selecting tagged input contents
 
 The tagged catalogue accepts `source_contents_by_rank` to select particular

@@ -123,6 +123,7 @@ from ye3t.couplings.tagged_cauchy_carriers import (
 from ye3t.couplings.carrier_products import (
     carrier_product_request, carrier_product_count, compile_carrier_product,
     is_carrier_product_request, bind_carrier_product_torch,
+    is_carrier_product_inventory, carrier_product_inventory,
 )
 from ye3t.couplings.rank_additive_hidden_lineage import (
     rank_additive_hidden_lineage_request,
@@ -2169,12 +2170,32 @@ class CouplerPlan:
         if type(a) is not int or not 0 <= a < len(bindings):
             raise ValueError("a must index a valid fixed-content multiplicity coordinate.")
         payload = self.spec.to_dict()
+        payload["metadata"].pop("selected_typed_alphas", None)
         payload["metadata"] = {
             **dict(payload["metadata"]), "selected_typed_alpha": int(a),
         }
         selected = plan(payload)
         if tuple(selected.validation_report.get("alpha_bindings", ())) != bindings:
             raise ArithmeticError("Selecting a multiplicity changed the exact route inventory.")
+        return selected
+
+    def select_multiplicities(self, indices):
+        """Select complete independent copies in their original compiler order."""
+        indices = tuple(indices)
+        bindings = tuple(self.validation_report.get("alpha_bindings", ()))
+        if not bindings and self.spec.carrier != "ACE_density":
+            _, bindings = _typed_joint_routes(
+                self.spec, _input_Ls_from_spec(self.spec),
+                _target_partition(self.spec.target_permutation, len(self.spec.content)))
+        if (not indices or any(type(a) is not int or not 0 <= a < len(bindings) for a in indices)
+                or indices != tuple(sorted(set(indices)))):
+            raise ValueError("indices must be sorted unique indices of the exact multiplicity inventory")
+        payload = self.spec.to_dict()
+        payload["metadata"].pop("selected_typed_alpha", None)
+        payload["metadata"]["selected_typed_alphas"] = list(indices)
+        selected = plan(payload)
+        if tuple(selected.validation_report.get("alpha_bindings", ())) != bindings:
+            raise ArithmeticError("Selecting multiplicities changed the exact route inventory")
         return selected
 
     def to_dict(self):
@@ -2697,6 +2718,8 @@ def count(
 ):
     """Return valid labels and multiplicities for a fixed-content request."""
 
+    if is_carrier_product_inventory(request):
+        return carrier_product_inventory(request)
     if is_carrier_product_request(request):
         return carrier_product_count(request)
     if is_selected_scalar_vector_request(request):
@@ -2935,8 +2958,11 @@ def plan(
 ):
     """Return a coupling backend plan with multiplicity provenance."""
 
+    if is_carrier_product_inventory(request):
+        return carrier_product_inventory(request)
     if is_carrier_product_request(request):
-        return carrier_product_count(request)
+        from .carrier_products import carrier_product_plan
+        return carrier_product_plan(request)
     if is_selected_scalar_vector_request(request):
         return selected_scalar_vector_plan(request)
     if is_tagged_right_rank_growth_request(request):
@@ -2980,7 +3006,8 @@ def plan(
         "backend_plan_selected": backend_plan.selected_backend,
         "backend_plan_reason": backend_plan.reason,
     }
-    if spec.carrier != "ACE_density" and any(_input_Ls_from_spec(spec, input_Ls=input_Ls)):
+    if spec.carrier != "ACE_density" and (any(_input_Ls_from_spec(spec, input_Ls=input_Ls))
+                                         or "selected_typed_alphas" in spec.metadata):
         typed_blocks, alpha_bindings = _typed_joint_routes(
             spec,
             _input_Ls_from_spec(spec, input_Ls=input_Ls),
@@ -5030,7 +5057,23 @@ def compile(
         expected = int(coupler_plan.report.counts_by_target[target_L])
         materialized = len(coupler.alpha_labels())
         selected_alpha = coupler_plan.spec.metadata.get("selected_typed_alpha")
-        if selected_alpha is not None:
+        selected_alphas = coupler_plan.spec.metadata.get("selected_typed_alphas")
+        if selected_alphas is not None:
+            bindings = tuple(coupler_plan.validation_report.get("alpha_bindings", ()))
+            tables = tuple(coupler.factorized_coefficient_tables)
+            indices = tuple(selected_alphas)
+            if (selected_alpha is not None or not indices
+                    or any(type(a) is not int or not 0 <= a < expected for a in indices)
+                    or indices != tuple(sorted(set(indices))) or len(bindings) != expected):
+                raise ValueError("Selected typed multiplicity indices are invalid")
+            if (materialized != len(indices) or len(tables) != 1
+                    or tables[0].get("kind") != "typed_joint_factorized_v1"
+                    or tuple(tables[0].get("alpha_bindings", ())) != tuple(bindings[a] for a in indices)
+                    or tuple(tables[0].get("selected_full_alphas", ())) != indices
+                    or len(tables[0].get("routes", ())) != len(indices)
+                    or tables[0].get("full_target_count") != expected):
+                raise ValueError("Selected typed factorization differs from the exact multiplicity inventory")
+        elif selected_alpha is not None:
             bindings = tuple(coupler_plan.validation_report.get("alpha_bindings", ()))
             tables = tuple(coupler.factorized_coefficient_tables)
             if type(selected_alpha) is not int or not 0 <= selected_alpha < expected:
@@ -5145,8 +5188,10 @@ def compile(
         **dict(coupler_plan.validation_report),
         "selected_typed_alpha": coupler_plan.spec.metadata.get("selected_typed_alpha"),
         "selected_subspace_of_full_typed_inventory": bool(
-            "selected_typed_alpha" in coupler_plan.spec.metadata
+            "selected_typed_alpha" in coupler_plan.spec.metadata or "selected_typed_alphas" in coupler_plan.spec.metadata
         ),
+        **({"selected_typed_alphas": list(coupler_plan.spec.metadata["selected_typed_alphas"])}
+           if "selected_typed_alphas" in coupler_plan.spec.metadata else {}),
         "compiled_certificate_passed": bool(certificate.passed),
         "compiled_runtime_status": certificate.runtime_status,
         "compiled_checks": dict(certificate.checks),

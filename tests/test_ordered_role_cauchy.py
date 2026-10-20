@@ -19,6 +19,50 @@ def channel(l, radial):
             "source_family_id": "ordered_role_test"}
 
 
+@pytest.mark.parametrize("parent", ["trivial", "young:2,1", "sign"])
+def test_selected_copies_preserve_original_labels_values_and_full_derivatives(parent, monkeypatch):
+    from ye3t.couplings import ordered_role_cauchy as ordered
+    options = {"target_L": 1, "role_dimension": 2, "target_permutation": parent, "carrier": "ordered_role"}
+    full_request = covariant_cauchy_request((channel(1, 0),), (3,), **options)
+    full_count = count(full_request)
+    indices = tuple(sorted({0, full_count["multiplet_count"]//2, full_count["multiplet_count"]-1}))
+    selected_request = covariant_cauchy_request((channel(1, 0),), (3,), selected_multiplicities=indices, **options)
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Selected count must not construct Young or local coefficient maps")
+    with monkeypatch.context() as patch:
+        patch.setattr(ordered, "_young_table", forbidden)
+        patch.setattr(ordered, "compile_ordered_role_cauchy", forbidden)
+        selected_count = count(selected_request)
+    assert selected_count["available_multiplet_count"] == full_count["multiplet_count"]
+    assert selected_count["labels"] == tuple(full_count["labels"][i] for i in indices)
+    selected = compile(plan(selected_count))
+    assert tuple(row["multiplicity_index"] for row in selected["routes"]) == indices
+    assert selected["multiplet_count"] == len(indices)
+    full = compile(plan(full_count))
+    inputs = torch.randn(2, 3, 2, 3, dtype=torch.complex128, requires_grad=True)
+    expected = evaluate_covariant_cauchy(full, inputs, basis="complex_condon_shortley")[0][:, list(indices)]
+    actual = evaluate_covariant_cauchy(selected, inputs, basis="complex_condon_shortley")[0]
+    torch.testing.assert_close(actual, expected, rtol=3e-13, atol=3e-13)
+    first = [torch.autograd.grad(value.abs().square().sum(), inputs, create_graph=True)[0] for value in (actual, expected)]
+    torch.testing.assert_close(*first, rtol=4e-13, atol=4e-13)
+    second = [torch.autograd.grad(value.abs().square().sum(), inputs)[0] for value in first]
+    torch.testing.assert_close(*second, rtol=5e-13, atol=5e-12)
+    restored = json.loads(json.dumps(selected))
+    validate_ordered_role_cauchy(restored)
+    torch.testing.assert_close(evaluate_covariant_cauchy(restored, inputs, basis="complex_condon_shortley")[0],
+                               actual, rtol=0, atol=0)
+
+
+def test_ordered_role_copy_selection_fails_before_materialization():
+    options = {"target_L": 1, "role_dimension": 2, "carrier": "ordered_role"}
+    for indices in ([], [0, 0], [1, 0], [-1], [True]):
+        with pytest.raises(ValueError, match="selected_multiplicities"):
+            covariant_cauchy_request((channel(1, 0),), (3,), selected_multiplicities=indices, **options)
+    request = covariant_cauchy_request((channel(1, 0),), (3,), selected_multiplicities=[10000], **options)
+    with pytest.raises(ValueError, match="exact multiplicity inventory"):
+        count(request)
+
+
 def test_ordered_role_cauchy_full_dimension_identity_rank_two():
     # (W tensor V_1)^{tensor 2} has dimension (2*3)^2 = 36.  The exact
     # Young/O(3) inventory must account for every copy, tableau, and M.

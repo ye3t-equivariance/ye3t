@@ -76,3 +76,17 @@ def test_first_multiplicity_two_case_has_an_orthonormal_gauge():
 def test_mismatched_orders_are_rejected():
     with pytest.raises(ValueError, match="share one tensor order"):
         kronecker_multiplicity((2, 2), (3,), (2, 2))
+
+
+def test_empty_partition_is_the_identity_representation_of_S0():
+    from ye3t.execution_plan import YE3TCarrierKey, YE3T_O3_PRIMARY_CONVENTION
+    assert kronecker_multiplicity((), (), ()) == 1
+    result = exact_kronecker_intertwiners((), (), ())
+    assert result["multiplicity"] == 1
+    assert result["intertwiners"] == (sp.eye(1),)
+    key = YE3TCarrierKey(0, (), 0, YE3T_O3_PRIMARY_CONVENTION, 1)
+    assert key.is_totally_symmetric and key.is_totally_antisymmetric
+    assert key.tableau_dimension == 1
+    assert YE3TCarrierKey.from_dict(key.to_dict()) == key
+    with pytest.raises(ValueError, match="positive nonincreasing"):
+        kronecker_multiplicity((0,), (), ())

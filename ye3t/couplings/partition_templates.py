@@ -88,7 +88,12 @@ def _integer_choices(target, tolerance):
 
 
 def apportion_partition_template(rank, expressions, rounding_tolerance=0.5):
-    """Map rational target parts to one positive integer partition of ``rank``."""
+    """Resolve a symbolic partition at the degree of its acting group.
+
+    Equal-row families ``(N/k, ..., N/k)`` use balanced quotient/remainder
+    allocation. Other templates retain constrained apportionment within the
+    supplied tolerance. Exactly k positive rows require rank >= k.
+    """
 
     rank = int(rank)
     expressions = tuple(str(value) for value in tuple(expressions))
@@ -100,6 +105,35 @@ def apportion_partition_template(rank, expressions, rounding_tolerance=0.5):
     if tolerance < 0:
         raise ValueError("rounding_tolerance must be nonnegative")
     targets = tuple(evaluate_partition_expression(value, rank) for value in expressions)
+    # Recognize the equal-row syntax, rather than equality at sampled degrees:
+    # the general parser also accepts nonlinear rational expressions in N.
+    parts = len(expressions)
+    equal_row_forms = {ast.dump(ast.parse("N/" + str(parts), mode="eval"))}
+    if parts == 1:
+        equal_row_forms.add(ast.dump(ast.parse("N", mode="eval")))
+    balanced_family = all(ast.dump(ast.parse(
+        _IMPLICIT_N_PRODUCT.sub("*N", value.replace(" ", "")), mode="eval"
+    )) in equal_row_forms for value in expressions)
+    if balanced_family:
+        if rank < parts:
+            return {
+                "status": "inapplicable", "reason": "exactly k positive rows require N >= k",
+                "rank": rank, "expressions": list(expressions),
+                "raw_targets": [_fraction_text(value) for value in targets],
+                "partition": None, "deviations": None,
+            }
+        quotient, remainder = divmod(rank, parts)
+        allocated = (quotient + 1,) * remainder + (quotient,) * (parts - remainder)
+        deviations = tuple(abs(Fraction(value) - target)
+                           for value, target in zip(allocated, targets))
+        return {
+            "status": "selected", "reason": "balanced equal-row quotient/remainder",
+            "rank": rank, "expressions": list(expressions),
+            "raw_targets": [_fraction_text(value) for value in targets],
+            "allocated_parts_before_sort": list(allocated), "partition": list(allocated),
+            "deviations": [_fraction_text(value) for value in deviations],
+            "maximum_deviation": _fraction_text(max(deviations)),
+        }
     if any(value <= 0 for value in targets):
         return {
             "status": "inapplicable",
