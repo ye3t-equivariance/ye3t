@@ -169,6 +169,32 @@ def test_copy_index_exceeding_multiplicity_fails_during_count():
         couplings.count(request)
 
 
+def test_full_path_validation_releases_source_graph_without_cyclic_gc():
+    import gc
+    import sys
+    import weakref
+    if sys.implementation.name != "cpython":
+        pytest.skip("checks CPython reference-counted release between planner requests")
+    class Nodes(dict):
+        pass
+    key = YE3TCarrierKey(2, (2,), 1, YE3T_O3_PRIMARY_CONVENTION, -1)
+    layout = YE3TCarrierLayout(key, 1, 1, 3)
+    nodes = Nodes(x={"operation": "source", "inputs": [], "layout": layout.to_dict()})
+    reference = weakref.ref(nodes)
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        request = couplings.carrier_product_request(layout, layout, target_partition=(2,), target_L=0,
+            argument_ids=("x", "x"), full_path={"arguments": ["x", "x"], "nodes": nodes})
+        del nodes
+        assert reference() is None, "Recursive validation retained the complete input graph"
+        assert request["full_path"]["nodes"]["x"]["layout"] == layout.to_dict()
+    finally:
+        if enabled:
+            gc.enable()
+        gc.collect()
+
+
 def test_full_path_is_preserved_without_changing_maps_or_derivatives(monkeypatch):
     import copy
     import json

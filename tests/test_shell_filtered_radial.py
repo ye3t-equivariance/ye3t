@@ -17,6 +17,45 @@ SHELLS = {"kind": "softmax_gaussian", "centers": [0.25, 0.75], "width": 0.25}
 FAMILY = "shell_filtered_chebyshev_c2_v1"
 
 
+@pytest.mark.parametrize("coordinates", ["physical_shells", "orthogonal_channels"])
+def test_empty_neighbor_radial_arrays_preserve_width_and_derivatives(coordinates):
+    payload = shell_filtered_source_plan(FAMILY, 2, 2, SHELLS, evaluation_coordinates=coordinates)
+    x = torch.empty(0, dtype=torch.float64, requires_grad=True)
+    values = shell_filtered_radial_values(payload, x, 2)
+    assert values.shape == (4, 0)
+    derivative = torch.autograd.grad(values.sum(), x)[0]
+    assert derivative.shape == (0,)
+
+
+def test_weighted_qr_resolves_requested_shell_bank_without_changing_span_or_tolerance():
+    from ye3t.couplings.shell_filtered_radial import _quadrature
+    shells = {"kind": "softmax_gaussian", "centers": [.54, .77, .94], "width": .1}
+    payload = shell_filtered_source_plan(FAMILY, 4, 4, shells, evaluation_coordinates="physical_shells")
+    assert payload["orthogonalization"]["tolerance"] == 1e-8
+    assert payload["radial_count"] == 4 and payload["shell_count"] == 3
+    report = validate_shell_filtered_source_plan(payload, recompute=True)
+    assert report["passed"] and report["independent_radial_channels_per_l"] == 12
+    nodes, weights = _quadrature(1024)
+    for ell in range(5):
+        transform = _transform(payload, ell)
+        assert payload["diagnostics"][str(ell)]["transform_construction"] == "weighted_unpivoted_qr"
+        torch.testing.assert_close(transform, transform.tril(), rtol=0, atol=0)
+        assert bool((torch.diagonal(transform) > 0).all())
+        raw = shell_filtered_raw_values(payload, nodes, ell)
+        values = transform @ raw * (weights * nodes**(2*ell+2)).sqrt()
+        error = torch.linalg.matrix_norm(values @ values.T-torch.eye(12), ord=2)
+        assert error < payload["orthogonalization"]["tolerance"]
+        torch.testing.assert_close(shell_filtered_radial_values(payload, nodes, ell), raw, rtol=0, atol=0)
+
+
+def test_weighted_qr_and_cholesky_have_the_same_ordered_gauge():
+    from ye3t.couplings.shell_filtered_radial import _weighted_sample_transform
+    payload = shell_filtered_source_plan(FAMILY, 2, 1, SHELLS)
+    for ell in (0, 1):
+        actual = _weighted_sample_transform(payload, ell, payload["orthogonalization"])
+        torch.testing.assert_close(actual, _transform(payload, ell), rtol=3e-11, atol=1e-10)
+
+
 @pytest.mark.parametrize("factorization", ["cholesky", "lowdin"])
 def test_physical_occupation_uses_inverse_coordinate_transport_with_derivatives(factorization):
     options = {"factorization": factorization}

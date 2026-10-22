@@ -5798,9 +5798,13 @@ class YE3TSourceRealization:
             carrier_key = YE3TCarrierKey.from_dict(carrier_key)
         right_tags = self.kind == "tagged_cauchy_occurrence" and self.metadata.get("emitted_action") == "right_tags"
         empty_tags = self.kind == "ordinary_density" and self.metadata.get("emitted_action") == "trivial_S0"
+        shell_roles = self.kind == "lifted_density_roles" and self.metadata.get("emitted_action") == "shell_roles"
         if empty_tags and self.metadata.get("tag_count") != 0:
             raise ValueError("A trivial S0 source requires an empty physical tag set")
-        degree = 0 if empty_tags else self.metadata["tag_count"] if right_tags else self.rank
+        degree = (self.metadata.get("shell_role_degree") if shell_roles else
+                  0 if empty_tags else self.metadata["tag_count"] if right_tags else self.rank)
+        if shell_roles and (type(degree) is not int or degree < 1):
+            raise ValueError("Shell-role sources require a positive shell_role_degree")
         if int(carrier_key.rank) != int(degree):
             raise ValueError("source and carrier ranks must match")
         if carrier_key.permutation_blocks and self.kind in {"ordinary_density", "tagged_cauchy_occurrence"}:

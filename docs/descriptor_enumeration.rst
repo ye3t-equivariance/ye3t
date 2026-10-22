@@ -39,6 +39,29 @@ optionally charge axes. Physical materialization and models live in the
 separate ``ye3t-methods`` package; ``ye3t`` supplies their exact
 representation-side labels and coupling coefficients.
 
+Reusing enumeration and compiled maps
+------------------------------------
+
+Use ``ye3t.couplings.count``, ``plan`` and ``compile`` for the selected carrier.
+Their existing mathematical caches retain valid labels, Young/angular blocks
+and coupling paths. Tagged physical-coordinate maps and shell source maps also
+use the shared store, so extending a catalogue can reuse smaller compiled
+pieces. Applications do not need to enumerate their own labels or rerun the
+compiler during energy and force evaluation.
+
+The store defaults to ``~/.cache/ye3t`` (or the XDG cache directory), with
+``YE3T_CACHE_DIR`` as an override. ``YE3T_CACHE_MODE`` selects ``auto``,
+``read_only``, ``refresh`` or ``off``. Normal cache hits check stored integrity
+and request bindings. Unchanged files have bounded process-local reuse, with
+separate values returned to callers. General tagged-image independent validation
+is retained across processes by content and validator revision.
+
+For an explicit audit, set ``YE3T_CACHE_VERIFY=full``. This replays the relevant
+independent construction checks. A new compiler convention or validation rule
+must update its cache schema or producer revision. Digests serve internal cache
+and saved-model integrity; routine examples need only show the selected source,
+feature counts and evaluated results.
+
 Coupling Namespace
 ------------------
 

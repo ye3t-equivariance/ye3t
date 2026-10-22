@@ -4977,6 +4977,10 @@ def compile(
     External angular factors use complete local/CG/Young factorization.
     ``allow_dense_reference=True`` explicitly selects the bounded full orbit
     matrix for tests and independent comparisons.
+
+    Tagged/shell catalogue requests accept ``graph_options`` for their existing
+    carrier-graph lowering. With ``cache_dir``, exact source payloads are loaded
+    individually while constructing the same runtime maps and identities.
     """
 
     if is_carrier_product_request(request):
@@ -4992,6 +4996,10 @@ def compile(
     if is_rank_additive_hidden_lineage_request(request):
         return compile_rank_additive_hidden_lineage(request)
     if is_tagged_cauchy_carriers_request(request):
+        if kwargs.get("graph_options") is not None:
+            from .tagged_cauchy_carriers import _compile_tagged_graph
+            return _compile_tagged_graph(request, cache_dir=kwargs.get("cache_dir"),
+                                         graph_options=kwargs["graph_options"])
         return compile_tagged_cauchy_carriers(request, cache_dir=kwargs.get("cache_dir"))
     if isinstance(request, CompiledTaggedCauchyImage):
         _validate_tagged_cauchy_image_identity(request)

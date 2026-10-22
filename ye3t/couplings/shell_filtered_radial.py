@@ -14,8 +14,10 @@ orthonormal under the radial-volume measure ``x^{2l} x^2 dx`` on ``[0, 1]``
 (the ``x^{2l}`` carries the angular factor's radial part).  The Gram is
 integrated by a Gauss--Legendre rule and checked with an independent rule;
 ``ordered`` uses the Cholesky factor (lower-triangular ``T_l``, nested
-prefixes), ``symmetric`` the Loewdin inverse square root.  Scope
-``joint_source`` mixes every ``(s, n)``; ``shell_local`` mixes within each
+prefixes), ``symmetric`` the Loewdin inverse square root. The convention
+``ordered`` also admits positive-diagonal weighted QR when the Gram-based
+calculation misses its accuracy gate; the source span and ordering are fixed.
+Scope ``joint_source`` mixes every ``(s, n)``; ``shell_local`` mixes within each
 shell only and records the remaining cross-shell overlap.  No rank reduction,
 jitter or pseudoinverse is applied: a singular Gram is a compile error.
 
@@ -136,7 +138,7 @@ def shell_filtered_raw_values(plan, x, angular_l):
         ladder = shifted_jacobi_ladder_with_derivative(count - 1, 4, 2 * int(angular_l) + 2, x)[0]
     radial = torch.stack(ladder) * (1 - x) ** _ENVELOPE_POWER[base]
     windows = torch.movedim(shell_windows(x, plan["shells"]), -1, 0)
-    return (windows[:, None] * radial[None]).reshape((-1,) + tuple(x.shape))
+    return (windows[:, None] * radial[None]).reshape((int(plan["shell_count"]) * count,) + tuple(x.shape))
 
 
 def shell_filtered_radial_values(plan, x, angular_l, transform=None):
@@ -213,8 +215,12 @@ def _transform(plan, gram, orthogonalization):
 
 def _residuals(plan, transform, gram, orthogonalization):
     identity = transform @ gram @ transform.T
+    return _identity_residuals(plan, identity, orthogonalization)
+
+
+def _identity_residuals(plan, identity, orthogonalization):
     count = int(plan["radial_count"])
-    eye = torch.eye(len(gram), dtype=gram.dtype)
+    eye = torch.eye(len(identity), dtype=identity.dtype)
     if orthogonalization["scope"] == "joint_source":
         return {"identity_residual": float(torch.linalg.matrix_norm(identity - eye, ord=2)),
                 "cross_shell_overlap": 0.}
@@ -222,6 +228,35 @@ def _residuals(plan, transform, gram, orthogonalization):
                                 for shell in range(len(plan["shells"]["centers"]))))
     return {"identity_residual": float((blocks - eye).abs().max()),
             "cross_shell_overlap": float(torch.linalg.matrix_norm(identity - blocks, ord=2))}
+
+
+def _weighted_sample_transform(plan, angular_l, orthogonalization):
+    # Independent implementation of the ordered QR construction in
+    # YE3T_REORTHOGONALIZED_SHELL_BASIS_HANDOFF.md section 4.3, Eq. (9),
+    # and LAPACK Users' Guide, QR Factorization:
+    # https://netlib.org/lapack/lug/node40.html . For V=QR, G=R.T R
+    # and T=R^(-T). Positive R diagonal fixes the ordered Cholesky gauge.
+    nodes, weights = _quadrature(orthogonalization["construction_points"])
+    raw = shell_filtered_raw_values(plan, nodes, angular_l)
+    sampled = (raw * (weights * nodes ** (2*angular_l+2)).sqrt()).T
+    width = sampled.shape[1]
+    count = width if orthogonalization["scope"] == "joint_source" else plan["radial_count"]
+    transform = torch.zeros(width, width, dtype=sampled.dtype)
+    for begin in range(0, width, count):
+        _, upper = torch.linalg.qr(sampled[:, begin:begin+count], mode="reduced")
+        if upper.shape != (count, count) or bool((torch.diagonal(upper) == 0).any()):
+            raise ArithmeticError("Shell source is unresolved by the weighted QR construction")
+        upper = torch.sign(torch.diagonal(upper))[:, None] * upper
+        transform[begin:begin+count, begin:begin+count] = torch.linalg.solve_triangular(
+            upper.T, torch.eye(count, dtype=sampled.dtype), upper=False)
+    return transform
+
+
+def _sample_residuals(plan, transform, angular_l, points, orthogonalization):
+    nodes, weights = _quadrature(points)
+    raw = shell_filtered_raw_values(plan, nodes, angular_l)
+    values = (transform @ raw) * (weights * nodes ** (2*angular_l+2)).sqrt()
+    return _identity_residuals(plan, values @ values.T, orthogonalization)
 
 
 def shell_filtered_source_plan(family, radial_count, lmax, shells, orthogonalization=None, *,
@@ -259,6 +294,14 @@ def shell_filtered_source_plan(family, radial_count, lmax, shells, orthogonaliza
             construction = _residuals(plan, transform, gram, orthogonalization)
             check = _residuals(plan, transform, _gram(plan, angular_l, orthogonalization["check_points"]),
                                orthogonalization)
+            ordered_qr = (orthogonalization["factorization"] == "cholesky" and
+                max(construction["identity_residual"], check["identity_residual"]) > orthogonalization["tolerance"])
+            if ordered_qr:
+                transform = _weighted_sample_transform(plan, angular_l, orthogonalization)
+                construction = _sample_residuals(plan, transform, angular_l,
+                    orthogonalization["construction_points"], orthogonalization)
+                check = _sample_residuals(plan, transform, angular_l,
+                    orthogonalization["check_points"], orthogonalization)
             if max(construction["identity_residual"], check["identity_residual"]) > orthogonalization["tolerance"]:
                 raise ArithmeticError("Shell-filtered transform does not reach the requested orthogonality "
                                       "tolerance at l=" + str(angular_l) + ": " + repr(check))
@@ -269,6 +312,9 @@ def shell_filtered_source_plan(family, radial_count, lmax, shells, orthogonaliza
                 "identity_residual_construction": construction["identity_residual"],
                 "identity_residual_check": check["identity_residual"],
                 "cross_shell_overlap_check": check["cross_shell_overlap"]}
+            if ordered_qr:
+                plan["diagnostics"][key].update(transform_construction="weighted_unpivoted_qr",
+                    orthogonality_check="weighted_function_samples")
     if evaluation_coordinates == "physical_shells":
         plan["schema"] = "ye3t_shell_filtered_radial_source_plan_v2"
         plan["evaluation_coordinates"] = evaluation_coordinates
@@ -333,8 +379,12 @@ def validate_shell_filtered_source_plan(plan, *, recompute=False):
         with torch.no_grad():
             for key, rows in plan["transforms"].items():
                 transform = torch.tensor(rows, dtype=torch.float64)
-                residual = _residuals(plan, transform, _gram(plan, int(key), plan["quadrature"]["check_points"]),
-                                      plan["orthogonalization"])
+                if plan["diagnostics"][key].get("orthogonality_check") == "weighted_function_samples":
+                    residual = _sample_residuals(plan, transform, int(key), plan["quadrature"]["check_points"],
+                                                 plan["orthogonalization"])
+                else:
+                    residual = _residuals(plan, transform, _gram(plan, int(key), plan["quadrature"]["check_points"]),
+                                          plan["orthogonalization"])
                 if residual["identity_residual"] > plan["orthogonalization"]["tolerance"]:
                     raise ArithmeticError("Stored shell-filtered transform fails the independent Gram check at l=" + key)
                 report["residuals"][key] = residual

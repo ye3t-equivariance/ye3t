@@ -550,7 +550,7 @@ def compile_covariant_cauchy(request, *, _block_templates=None):
             "protected_axes": ("magnetic",),
         },
     }
-    payload["self_hash"] = _scalar._stable_hash(_scalar._freeze_json(payload))
+    payload["self_hash"] = _scalar._stable_record_hash(payload)
     return payload
 
 
@@ -562,7 +562,6 @@ def _canonical_complex_rows(label, request, block_templates, outer_template):
     expansion is the scalar compiler's own ``_combine_block_rows``.
     """
 
-    sp = _scalar._sympy()
     block_rows = []
     for block_index, (size, kappa, Lambda) in enumerate(
         zip(
@@ -611,7 +610,7 @@ def _canonical_complex_rows(label, request, block_templates, outer_template):
         }
         rows[int(record["M"])] = _scalar._coalesce_terms(
             {
-                coordinates: sp.simplify(factor * value)
+                coordinates: _scalar._simplified_scalar(factor * value)
                 for coordinates, value in _scalar._combine_block_rows(
                     block_rows, outer_terms
                 ).items()
@@ -666,14 +665,14 @@ def _real_rows(canonical, request, phase_exponent):
         row = {}
         for monomial, value in terms.items():
             if value not in simplified_values:
-                simplified = sp.simplify(sp.expand(value))
+                simplified = _scalar._simplified_scalar(sp.expand(value))
                 if simplified != 0:
-                    if sp.simplify(sp.im(simplified)) != 0:
+                    if _scalar._simplified_scalar(sp.im(simplified)) != 0:
                         raise RuntimeError(
                             "Real-form coefficient is not exactly real; the configured "
                             "pseudo-tensor phase does not realify this multiplet."
                         )
-                    simplified = sp.simplify(sp.re(simplified))
+                    simplified = _scalar._simplified_scalar(sp.re(simplified))
                 simplified_values[value] = simplified
             value = simplified_values[value]
             if value != 0:
@@ -692,7 +691,7 @@ def validate_covariant_cauchy(compiled):
     if compiled.get("schema") != COVARIANT_CAUCHY_SCHEMA:
         raise ValueError("Unknown covariant lifted-Cauchy schema.")
     body = {key: value for key, value in compiled.items() if key != "self_hash"}
-    if _scalar._stable_hash(_scalar._freeze_json(body)) != compiled.get("self_hash"):
+    if _scalar._stable_record_hash(body) != compiled.get("self_hash"):
         raise ValueError("Covariant lifted-Cauchy artifact failed its self hash.")
     for template in compiled["outer_templates"]:
         template_body = {

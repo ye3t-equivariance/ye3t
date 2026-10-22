@@ -13,7 +13,8 @@ compiler APIs; no external source code is adapted.
 """
 
 from collections import Counter, OrderedDict, defaultdict
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from dataclasses import field
 from functools import lru_cache
 from itertools import combinations_with_replacement, product
@@ -113,11 +114,61 @@ def _stable_hash(payload):
     return hashlib.sha256(_stable_json(payload).encode("utf-8")).hexdigest()
 
 
+def _stable_record_hash(payload):
+    """Hash canonical compiler JSON with one descriptor-sized temporary.
+
+    Preserve exactly _stable_hash(_freeze_json(payload)). Large source and
+    descriptor collections are traversed without copying the entire artifact.
+    """
+    digest = hashlib.sha256()
+    record_fields = {"sources", "descriptors", "block_templates", "outer_templates"}
+
+    def write_record(record):
+        fields = {str(key): value for key, value in record.items()}
+        digest.update(b"{")
+        for index, name in enumerate(sorted(fields)):
+            if index:
+                digest.update(b",")
+            digest.update(_stable_json(name).encode("utf-8"))
+            digest.update(b":")
+            value = fields[name]
+            if name in record_fields and isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+                digest.update(b"[")
+                for item_index, item in enumerate(value):
+                    if item_index:
+                        digest.update(b",")
+                    if isinstance(item, Mapping):
+                        write_record(item)
+                    else:
+                        digest.update(_stable_json(_freeze_json(item)).encode("utf-8"))
+                digest.update(b"]")
+            else:
+                digest.update(_stable_json(_freeze_json(value)).encode("utf-8"))
+        digest.update(b"}")
+
+    try:
+        write_record(payload)
+        return digest.hexdigest()
+    finally:
+        # Release the recursive closure immediately for large compiler payloads.
+        write_record = None
+
+
+_JSON_SCALAR_TYPES = (str, int, float, bool, type(None))
+
+
 def _freeze_json(value):
-    if isinstance(value, Mapping):
+    # Most leaves are built-in JSON scalars. Avoid an abstract Mapping check
+    # for every coefficient/exponent in large compiled catalogues.
+    kind = type(value)
+    if kind in _JSON_SCALAR_TYPES:
+        return value
+    if kind is dict:
         return {str(key): _freeze_json(item) for key, item in value.items()}
     if isinstance(value, (tuple, list)):
         return tuple(_freeze_json(item) for item in value)
+    if isinstance(value, Mapping):
+        return {str(key): _freeze_json(item) for key, item in value.items()}
     return value
 
 
@@ -137,11 +188,23 @@ def _require_exact_keys(payload, expected, label):
         )
 
 
+@lru_cache(maxsize=4096)
+def _simplified_scalar_cached(value):
+    # Repeated exact coefficients dominate shell-source serialization profiles.
+    # SymPy scalars are immutable; cache their simplification, while every
+    # serialized dictionary below remains a fresh object.
+    return _sympy().simplify(value)
+
+
+def _simplified_scalar(value):
+    return _simplified_scalar_cached(_sympy().sympify(value))
+
+
 def _exact_component_payload(value):
     component = (
         value
         if isinstance(value, ExactRadical)
-        else exact_scalar(_sympy().simplify(value))
+        else exact_scalar(_simplified_scalar(value))
     )
     return tuple(
         {
@@ -179,7 +242,13 @@ def _exact_scalar_payload(value):
             "imag": (),
             "binary64": (float(binary.real), float(binary.imag)),
         }
-    value = _sympy().simplify(value)
+    return deepcopy(_exact_sympy_scalar_payload_cached(_simplified_scalar(value)))
+
+
+@lru_cache(maxsize=4096)
+def _exact_sympy_scalar_payload_cached(value):
+    # Only immutable, already simplified SymPy scalars enter this cache.
+    # _exact_scalar_payload returns fresh nested records to callers.
     real, imag = value.as_real_imag()
     exact_real = _exact_component_payload(real)
     exact_imag = _exact_component_payload(imag)
@@ -195,6 +264,24 @@ def _exact_scalar_from_payload(payload):
     real = _exact_component_from_payload(payload.get("real", ()))
     imag = _exact_component_from_payload(payload.get("imag", ()))
     return real._sympy_() + _sympy().I * imag._sympy_()
+
+
+def _real_float_from_exact_payload(payload):
+    """Reuse the established exact-to-binary64 conversion of real coefficients."""
+    fields = ("radicand_numerator", "radicand_denominator",
+              "coefficient_numerator", "coefficient_denominator")
+    key = tuple(tuple(tuple(int(item[name]) for name in fields)
+                      for item in payload.get(part, ())) for part in ("real", "imag"))
+    return _real_float_from_exact_key(key)
+
+
+@lru_cache(maxsize=4096)
+def _real_float_from_exact_key(key):
+    fields = ("radicand_numerator", "radicand_denominator",
+              "coefficient_numerator", "coefficient_denominator")
+    payload = {part: tuple(dict(zip(fields, item)) for item in terms)
+               for part, terms in zip(("real", "imag"), key)}
+    return float(_exact_scalar_from_payload(payload))
 
 
 def _exact_matrix_payload(matrix):
@@ -344,8 +431,18 @@ def _validate_exact_scalar_payload(payload):
     return exact
 
 
-def _binary64_residual_report(payload):
+@lru_cache(maxsize=4096)
+def _binary64_scalar_residual(exact, binary):
+    # Coefficients recur throughout a compiled catalogue. Cache immutable
+    # scalar calculations; the report still visits every serialized entry.
     sp = _sympy()
+    delta = sp.simplify(exact - sp.Rational(binary.real) - sp.I * sp.Rational(binary.imag))
+    absolute = float(sp.Abs(delta).evalf(40))
+    magnitude = float(sp.Abs(exact).evalf(40))
+    return absolute, absolute / magnitude if magnitude else absolute
+
+
+def _binary64_residual_report(payload):
     maximum_absolute = 0.0
     maximum_relative = 0.0
     maximum_absolute_path = ()
@@ -363,14 +460,7 @@ def _binary64_residual_report(payload):
             if {"real", "imag", "binary64"}.issubset(keys):
                 exact = _exact_scalar_from_payload(value)
                 binary = _binary_coefficient(value)
-                delta = sp.simplify(
-                    exact
-                    - sp.Rational(binary.real)
-                    - sp.I * sp.Rational(binary.imag)
-                )
-                absolute = float(sp.Abs(delta).evalf(40))
-                exact_magnitude = float(sp.Abs(exact).evalf(40))
-                relative = absolute / exact_magnitude if exact_magnitude else absolute
+                absolute, relative = _binary64_scalar_residual(exact, binary)
                 scalar_count += 1
                 if absolute > maximum_absolute:
                     maximum_absolute = absolute
@@ -1978,7 +2068,7 @@ def _terms_from_records(records):
         terms[coordinates] += _exact_scalar_from_payload(record["coefficient"])
     result = {}
     for coordinates, coefficient in terms.items():
-        reduced = sp.simplify(coefficient)
+        reduced = _simplified_scalar(coefficient)
         if reduced != 0:
             result[coordinates] = reduced
     return result
@@ -3877,21 +3967,21 @@ def _physical_scalar_reality_report(payload):
             for channel, role, magnetic_index in coordinates:
                 matrix = channel_forms[int(channel)]
                 factors = {
-                    ((int(channel), int(role), int(real_index)),): sp.simplify(
+                    ((int(channel), int(role), int(real_index)),): _simplified_scalar(
                         matrix[int(magnetic_index), int(real_index)]
                     )
                     for real_index in range(matrix.cols)
-                    if sp.simplify(matrix[int(magnetic_index), int(real_index)]) != 0
+                    if _simplified_scalar(matrix[int(magnetic_index), int(real_index)]) != 0
                 }
                 terms = _multiply_polynomials(terms, factors)
             for physical_coordinates, value in terms.items():
                 physical[physical_coordinates] += value
         for physical_coordinates, coefficient in physical.items():
-            coefficient = sp.simplify(coefficient)
+            coefficient = _simplified_scalar(coefficient)
             if coefficient == 0:
                 continue
             transformed_coefficient_count += 1
-            imaginary = sp.simplify(coefficient.as_real_imag()[1])
+            imaginary = _simplified_scalar(coefficient.as_real_imag()[1])
             if imaginary != 0:
                 exactly_real = False
             magnitude = float(sp.Abs(imaginary).evalf(40))
@@ -5077,7 +5167,7 @@ def _coalesce_terms(terms):
     simplified_values, result = {}, {}
     for coordinates, coefficient in out.items():
         if coefficient not in simplified_values:
-            simplified_values[coefficient] = sp.simplify(coefficient)
+            simplified_values[coefficient] = _simplified_scalar(coefficient)
         value = simplified_values[coefficient]
         if value != 0:
             result[coordinates] = value
@@ -5229,7 +5319,7 @@ def _joint_synthesis_metric_dual(
             for local_right in range(local_left, block_size):
                 right_column = block_columns[local_right]
                 shared = set(left_column).intersection(right_column)
-                value = sp.simplify(
+                value = _simplified_scalar(
                     sum(
                         (
                             sp.conjugate(left_column[state])
@@ -5246,24 +5336,27 @@ def _joint_synthesis_metric_dual(
         for local_row in range(block_size):
             accumulated = defaultdict(lambda: sp.Integer(0))
             for local_column in range(block_size):
-                coefficient = sp.simplify(local_inverse[local_row, local_column])
+                coefficient = _simplified_scalar(local_inverse[local_row, local_column])
                 if coefficient == 0:
                     continue
                 synthesis_column = block_columns[local_column]
                 for state, value in synthesis_column.items():
                     accumulated[state] += coefficient * sp.conjugate(value)
-            analysis_rows[positions[local_row]] = {
-                state: sp.simplify(value)
-                for state, value in accumulated.items()
-                if sp.simplify(value) != 0
-            }
+            # Repeated words have identical immutable scalar expressions.
+            # Reuse their exact simplification and test each result once.
+            analysis = {}
+            for state, value in accumulated.items():
+                coefficient = _simplified_scalar(value)
+                if coefficient != 0:
+                    analysis[state] = coefficient
+            analysis_rows[positions[local_row]] = analysis
         for local_left, global_left in enumerate(positions):
             for local_right, global_right in enumerate(positions):
                 gram[global_left, global_right] = local_gram[local_left, local_right]
     for row, analysis in enumerate(analysis_rows):
         for column, synthesis in enumerate(synthesis_columns):
             shared = set(analysis).intersection(synthesis)
-            value = sp.simplify(
+            value = _simplified_scalar(
                 sum(analysis[state] * synthesis[state] for state in shared)
             )
             if value != int(row == column):
@@ -5295,7 +5388,7 @@ def _term_records(terms):
 
     records = []
     for coordinates, coefficient in sorted(terms.items()):
-        if _sympy().simplify(coefficient) == 0:
+        if _simplified_scalar(coefficient) == 0:
             continue
         normalized = tuple(coordinate_record(coordinate) for coordinate in coordinates)
         counts = Counter(normalized)
@@ -5340,7 +5433,7 @@ def _derivative_records(terms):
         for active, multiplicity in counts.items():
             remaining = list(coordinates)
             remaining.remove(active)
-            derivatives[(tuple(active), tuple(remaining))] += sp.simplify(
+            derivatives[(tuple(active), tuple(remaining))] += _simplified_scalar(
                 int(multiplicity) * coefficient
             )
     return tuple(
@@ -5350,10 +5443,10 @@ def _derivative_records(terms):
                 tuple(int(value) for value in coordinate)
                 for coordinate in remaining
             ),
-            "coefficient": _exact_scalar_payload(sp.simplify(coefficient)),
+            "coefficient": _exact_scalar_payload(_simplified_scalar(coefficient)),
         }
         for (active, remaining), coefficient in sorted(derivatives.items())
-        if sp.simplify(coefficient) != 0
+        if _simplified_scalar(coefficient) != 0
     )
 
 
@@ -6523,14 +6616,17 @@ def _multiply_polynomials(left, right):
     for left_coordinates, left_coefficient in left.items():
         for right_coordinates, right_coefficient in right.items():
             coordinates = tuple(sorted(left_coordinates + right_coordinates))
-            product_terms[coordinates] += sp.simplify(
+            product_terms[coordinates] += _simplified_scalar(
                 left_coefficient * right_coefficient
             )
-    return {
-        coordinates: sp.simplify(coefficient)
-        for coordinates, coefficient in product_terms.items()
-        if sp.simplify(coefficient) != 0
-    }
+    # Exact scalar values recur across monomials and realification terms. The
+    # existing bounded cache preserves simplify's result and zero selection.
+    result = {}
+    for coordinates, coefficient in product_terms.items():
+        coefficient = _simplified_scalar(coefficient)
+        if coefficient != 0:
+            result[coordinates] = coefficient
+    return result
 
 
 def _expand_factored_descriptor_dag(descriptor, block_by_id, shared_block_nodes):
@@ -6659,7 +6755,7 @@ def _combine_block_rows(block_rows, outer_terms):
                 for block_choice in choices
                 for coordinate in block_choice[0]
             )
-            coefficient = sp.simplify(
+            coefficient = _simplified_scalar(
                 outer_coefficient
                 * sp.prod(block_choice[1] for block_choice in choices)
             )

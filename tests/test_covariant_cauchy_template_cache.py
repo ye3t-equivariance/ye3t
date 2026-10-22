@@ -7,6 +7,72 @@ import pytest
 from ye3t.couplings import covariant_cauchy as core
 
 
+@pytest.mark.parametrize("target", [1, 2])
+def test_combined_real_source_matches_uncached_exact_simplification(target, monkeypatch):
+    import sympy as sp
+    request = core.covariant_cauchy_request([
+        {"neighbor_species": "Ni", "radial_channel": 0, "l": 1, "source_family_id": "independent"},
+        {"neighbor_species": "Ni", "radial_channel": 1, "l": 1, "source_family_id": "independent"}],
+        (2, 1), target_L=target, role_dimension=3)
+    core._scalar._simplified_scalar_cached.cache_clear()
+    cached = core.compile_covariant_cauchy(request)
+    assert core._scalar._simplified_scalar_cached.cache_info().hits > 0
+    with monkeypatch.context() as patch:
+        patch.setattr(core._scalar, "_simplified_scalar", sp.simplify)
+        uncached = core.compile_covariant_cauchy(request)
+    assert cached == uncached
+    assert core.validate_covariant_cauchy(cached)
+
+
+def test_coalesced_rows_share_only_immutable_exact_scalars(monkeypatch):
+    import sympy as sp
+    scalar = core._scalar
+    x, y = (0, 0, -1), (1, 1, 1)
+    terms = {(x, y): sp.sqrt(8), (y, x): -sp.sqrt(2),
+             (x, x): sp.sqrt(3)**2 - 3}
+    scalar._simplified_scalar_cached.cache_clear()
+    first = scalar._coalesce_terms(terms)
+    second = scalar._coalesce_terms(terms)
+    assert scalar._simplified_scalar_cached.cache_info().hits > 0
+    with monkeypatch.context() as patch:
+        patch.setattr(scalar, "_simplified_scalar", sp.simplify)
+        assert first == scalar._coalesce_terms(terms) == {(x, y): sp.sqrt(2)}
+    first.clear()
+    assert second == {(x, y): sp.sqrt(2)}
+
+
+@pytest.mark.parametrize("key", [(3, 2, (1, 1), 1, 1), (3, 3, (2, 1), 1, 1)])
+def test_metric_dual_scalar_cache_matches_uncached_complete_block(key, monkeypatch):
+    import sympy as sp
+    scalar = core._scalar
+    scalar._simplified_scalar_cached.cache_clear()
+    cached = scalar._build_block_template(key)
+    assert scalar._simplified_scalar_cached.cache_info().hits > 0
+    with monkeypatch.context() as patch:
+        patch.setattr(scalar, "_simplified_scalar", sp.simplify)
+        patch.setattr(scalar, "_exact_sympy_scalar_payload_cached",
+                      scalar._exact_sympy_scalar_payload_cached.__wrapped__)
+        uncached = scalar._build_block_template(key)
+    assert cached == uncached
+    scalar._validate_block_template(cached["payload"])
+
+
+def test_exact_scalar_simplification_cache_preserves_complex_values_and_payload_isolation():
+    import sympy as sp
+    scalar = core._scalar
+    value = (sp.sqrt(8) + sp.I*sp.sqrt(12))/3
+    scalar._simplified_scalar_cached.cache_clear()
+    scalar._exact_sympy_scalar_payload_cached.cache_clear()
+    first = scalar._exact_scalar_payload(value)
+    reference = copy.deepcopy(first)
+    assert sp.simplify(scalar._exact_scalar_from_payload(first)-value) == 0
+    first["real"][0]["coefficient_numerator"] = 999
+    first["binary64"] = (999., 999.)
+    assert scalar._exact_scalar_payload(value) == reference
+    assert scalar._simplified_scalar_cached.cache_info().hits > 0
+    assert scalar._exact_sympy_scalar_payload_cached.cache_info().hits > 0
+
+
 @pytest.mark.parametrize("spins,target", [((1, 1), 1), ((1, 2), 2), ((1, 1, 1), 1)])
 def test_outer_template_cache_matches_exact_builder_and_isolates_mutation(spins, target):
     expected = core._cached_outer_multiplet_template.__wrapped__(spins, target)

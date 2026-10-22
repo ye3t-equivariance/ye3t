@@ -5,7 +5,9 @@ must therefore use YE3T's existing exact-scalar JSON records; pickle and
 implicit ``repr`` serialization are deliberately unsupported.
 """
 
+from collections import OrderedDict
 from collections.abc import Mapping
+from copy import deepcopy
 import errno
 import hashlib
 from importlib import metadata
@@ -15,6 +17,7 @@ import os
 from pathlib import Path
 import re
 import time
+from threading import RLock
 import uuid
 
 
@@ -22,6 +25,13 @@ ARTIFACT_STORE_SCHEMA = "ye3t_content_addressed_artifact_v1"
 _ARTIFACT_COMPONENT = re.compile(r"^[A-Za-z0-9_.-]+$")
 _HASH = re.compile(r"^[0-9a-f]{64}$")
 _PROCESS_EVENTS = []
+# Parsed envelopes are private snapshots. Callers always receive fresh values.
+# File identity includes ctime so rewriting equal-size bytes and restoring mtime
+# cannot retain an earlier validation. Bound both memory and event history.
+_READ_CACHE = OrderedDict()
+_READ_CACHE_BYTES = 0
+_READ_CACHE_LIMIT = 32 * 1024 * 1024
+_READ_CACHE_LOCK = RLock()
 
 
 class ArtifactCacheError(RuntimeError):
@@ -43,6 +53,11 @@ def _canonical_value(value, path="$"):
         if not math.isfinite(value):
             raise ValueError(f"Non-finite float at {path} is not canonical JSON.")
         return value
+    if isinstance(value, (tuple, list)):
+        return [
+            _canonical_value(item, f"{path}[{index}]")
+            for index, item in enumerate(value)
+        ]
     if isinstance(value, Mapping):
         normalized = {}
         for key, item in value.items():
@@ -50,11 +65,6 @@ def _canonical_value(value, path="$"):
                 raise TypeError(f"Non-string mapping key at {path} is unsupported.")
             normalized[key] = _canonical_value(item, f"{path}.{key}")
         return normalized
-    if isinstance(value, (tuple, list)):
-        return [
-            _canonical_value(item, f"{path}[{index}]")
-            for index, item in enumerate(value)
-        ]
     raise TypeError(
         f"Unsupported canonical JSON value {type(value).__name__} at {path}."
     )
@@ -91,7 +101,7 @@ def default_artifact_cache_directory():
 
 
 def artifact_cache_events(clear=False):
-    """Return process-local hit/miss evidence without changing artifact identity."""
+    """Return the latest 4096 process events, optionally clearing that history."""
 
     events = tuple(dict(value) for value in _PROCESS_EVENTS)
     if clear:
@@ -145,7 +155,7 @@ def _minimum_certificate(certificate, required_checks):
 
 
 class YE3TArtifactStore:
-    """Resolve verified canonical-JSON artifacts from overlays and a user store."""
+    """Resolve canonical artifacts; ``events`` retains the latest 1024 entries."""
 
     def __init__(self, directory=None, mode=None, overlays=None, verify=None):
         self.directory = Path(
@@ -346,6 +356,7 @@ class YE3TArtifactStore:
                 identity,
                 validator,
                 required_certificate_checks,
+                semantic_validation=False,
             )
             self._event(
                 identity,
@@ -390,7 +401,39 @@ class YE3TArtifactStore:
             "envelope": envelope,
         }
 
-    def _read_and_validate(self, path, identity, validator, required_checks):
+    def _read_and_validate(self, path, identity, validator, required_checks,
+                           semantic_validation=True):
+        global _READ_CACHE_BYTES
+        # Full verification deliberately replays the semantic validator. Normal
+        # reuse avoids parsing and hashing an unchanged file more than once.
+        try:
+            stat = path.stat()
+        except OSError as error:
+            raise ArtifactCacheValidationError(
+                f"Artifact envelope cannot be read: {error}."
+            ) from error
+        fingerprint = (stat.st_dev, stat.st_ino, stat.st_size,
+                       stat.st_mtime_ns, stat.st_ctime_ns)
+        cache_key = (str(path.absolute()), identity["semantic_hash"])
+        with _READ_CACHE_LOCK:
+            cached = _READ_CACHE.get(cache_key)
+            if cached is not None and cached[0] == fingerprint:
+                _READ_CACHE.move_to_end(cache_key)
+                envelope = deepcopy(cached[1])
+            else:
+                envelope = None
+        if envelope is not None:
+            try:
+                if any(envelope.get(key) != value for key, value in identity.items()):
+                    raise ArtifactCacheValidationError("Artifact identity changed.")
+                _minimum_certificate(envelope.get("certificate"), required_checks)
+                if semantic_validation and self.verify == "full" and validator is not None:
+                    validator(envelope["payload"])
+            except (KeyError, TypeError, ValueError) as error:
+                raise ArtifactCacheValidationError(
+                    f"Artifact envelope failed semantic validation: {error}."
+                ) from error
+            return envelope
         try:
             encoded = path.read_bytes()
             envelope = json.loads(encoded.decode("utf-8"))
@@ -421,8 +464,26 @@ class YE3TArtifactStore:
             if envelope.get("payload_hash") != artifact_hash(payload):
                 raise ArtifactCacheValidationError("Artifact payload hash mismatch.")
             _minimum_certificate(envelope.get("certificate"), required_checks)
-            if self.verify == "full" and validator is not None:
+            if semantic_validation and self.verify == "full" and validator is not None:
                 validator(payload)
+            try:
+                after = path.stat()
+            except OSError:
+                after = None
+            if after is not None and (after.st_dev, after.st_ino, after.st_size,
+                    after.st_mtime_ns, after.st_ctime_ns) == fingerprint:
+                # JSON object overhead can exceed byte size substantially.
+                cost = max(1024, len(encoded) * 8)
+                with _READ_CACHE_LOCK:
+                    previous = _READ_CACHE.pop(cache_key, None)
+                    if previous is not None:
+                        _READ_CACHE_BYTES -= previous[2]
+                    if cost <= _READ_CACHE_LIMIT:
+                        while _READ_CACHE and _READ_CACHE_BYTES + cost > _READ_CACHE_LIMIT:
+                            _, old = _READ_CACHE.popitem(last=False)
+                            _READ_CACHE_BYTES -= old[2]
+                        _READ_CACHE[cache_key] = (fingerprint, deepcopy(envelope), cost)
+                        _READ_CACHE_BYTES += cost
             return envelope
         except ArtifactCacheValidationError:
             raise
@@ -455,6 +516,8 @@ class YE3TArtifactStore:
         }
         self.events.append(event)
         _PROCESS_EVENTS.append(dict(event))
+        del self.events[:-1024]
+        del _PROCESS_EVENTS[:-4096]
 
     def _quarantine(self, path):
         quarantine = path.with_name(path.name + ".invalid." + uuid.uuid4().hex)

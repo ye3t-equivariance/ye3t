@@ -17,6 +17,7 @@ from math import comb
 from threading import RLock
 
 from ye3t.core.cg import cg_exact_integer
+from ye3t.cache.artifacts import YE3TArtifactStore, ArtifactCacheMiss
 from ye3t.exact_scalars import ExactRadical, exact_scalar
 from ye3t.couplings.lifted_cauchy_scalar import (
     _exact_scalar_from_payload, _exact_scalar_payload, _freeze_json, _stable_hash,
@@ -446,8 +447,39 @@ def _supported_label(record):
     return all(occupancy[index] and len(tag_species[index]) == 1 for index in range(tag_count))
 
 
-def _general_compile(plan):
+def _compiled_general_coordinate(parent, tag_count):
+    """Reuse one canonical coupling and its exact physical lowering.
+
+    This key excludes catalogue order and feature caps: extending a catalogue
+    reuses its existing coordinates. Physical dependencies remain in the parent
+    request and role bindings. No labels are enumerated outside count/plan.
+    """
     from ye3t.couplings import compile, count, plan as make_plan
+    from ye3t.couplings.tagged_cauchy_image import _moment_term_map, _moment_term_records
+    bindings = tuple(("edge", index) for index in range(tag_count)) + (("density", 0),)
+
+    def build():
+        compiled = compile(make_plan(count(parent)))
+        rows, supported = _physical_image_rows(compiled, bindings)
+        if supported != (0,):
+            raise RuntimeError("Selected Cauchy coordinate lost its physical tag support.")
+        return {"parent": compiled.to_dict(), "row": _moment_term_records(rows[0])}
+
+    store = YE3TArtifactStore()
+    def validate(payload):
+        _moment_term_map(payload["row"])
+        if store.verify == "full" and _freeze_json(payload) != _freeze_json(build()):
+            raise ValueError("Tagged coordinate differs from independent compilation.")
+
+    result = store.resolve("tagged_image_coordinate", "tagged_image_coordinate_v1",
+        {"parent": parent, "bindings": bindings}, builder=build, validator=validate,
+        certificate={"passed": True, "checks": {"canonical_compile": True, "physical_support": True}},
+        required_certificate_checks=("canonical_compile", "physical_support"),
+        producer={"compiler_revision": 1})
+    return result["payload"]["parent"], _moment_term_map(result["payload"]["row"])
+
+
+def _general_compile(plan):
     from ye3t.couplings.tagged_cauchy_image import CompiledTaggedCauchyImage
     report = plan.report
     catalogue = report.request["catalogue"]
@@ -496,16 +528,12 @@ def _general_compile(plan):
                 parent = dict(component["request"])
                 parent.pop("family_ids", None)
                 parent["manual_labels"] = (record["label"],)
-                compiled = compile(make_plan(count(parent)))
                 tag_count = record["tag_count"]
-                bindings = tuple(("edge", index) for index in range(tag_count)) + (("density", 0),)
-                rows, supported = _physical_image_rows(compiled, bindings)
-                if supported != (0,):
-                    raise RuntimeError("Selected Cauchy coordinate lost its declared tag support.")
-                raw_rows.append(rows[0])
-                raw_labels.append({**record, "parent_artifact_hash": compiled.self_hash})
-                parent_artifacts[compiled.self_hash] = compiled.to_dict()
-                image.append(rows[0])
+                parent_artifact, row = _compiled_general_coordinate(parent, tag_count)
+                raw_rows.append(row)
+                raw_labels.append({**record, "parent_artifact_hash": parent_artifact["self_hash"]})
+                parent_artifacts[parent_artifact["self_hash"]] = parent_artifact
+                image.append(row)
                 if len(selected)-rank_start >= cap:
                     break
         if rank in named:
@@ -599,8 +627,7 @@ def _validate_general_certificate(value):
     )
     if not isinstance(value, CompiledTaggedCauchyImage):
         raise TypeError("Certificate loading requires a compiled tagged artifact.")
-    record = value.to_dict()
-    if value.self_hash != _stable_hash(_freeze_json({key: item for key, item in record.items() if key != "self_hash"})):
+    if value.self_hash != value._content_hash():
         raise ValueError("General tagged artifact hash mismatch.")
     with _CERTIFICATE_CHECK_LOCK:
         if value.self_hash in _CERTIFICATE_CHECKED_ARTIFACTS:
@@ -752,8 +779,7 @@ def _validate_general_certificate(value):
 def _validate_general(value):
     from ye3t.couplings.tagged_cauchy_image import (
         CompiledTaggedCauchyImage, TaggedCauchyImageCompilerPlan,
-        TaggedCauchyImageMultiplicityReport, _moment_term_map,
-        _validate_tagged_cauchy_real_schedule_core,
+        TaggedCauchyImageMultiplicityReport,
     )
     if isinstance(value, TaggedCauchyImageMultiplicityReport):
         request = value.request
@@ -768,59 +794,86 @@ def _validate_general(value):
         if value.to_dict() != _general_plan(value.report).to_dict():
             raise ValueError("General tagged compiler plan changed.")
     elif isinstance(value, CompiledTaggedCauchyImage):
-        record = value.to_dict()
-        if record["self_hash"] != _stable_hash(_freeze_json({key: item for key, item in record.items() if key != "self_hash"})):
+        if value.self_hash != value._content_hash():
             raise ValueError("General tagged artifact hash mismatch.")
         # Hash the complete current object before consulting this process-local
         # cache: mutations, including fully rehashed mutations, cannot reuse an
         # earlier semantic validation. Avoid replaying exact algebra at every
         # source/evaluator binding of the same immutable artifact bytes.
-        if value.self_hash in _VALIDATED_GENERAL_ARTIFACTS:
+        store = YE3TArtifactStore()
+        replay = store.verify == "full" or store.mode == "rebuild"
+        if not replay and value.self_hash in _VALIDATED_GENERAL_ARTIFACTS:
             _VALIDATED_GENERAL_ARTIFACTS.move_to_end(value.self_hash)
             return
-        _validate_general(value.plan)
-        payload = value.payload
-        body = {key: item for key, item in payload.items() if key not in
-                {"catalogue_hash", "real_schedule_core", "real_schedule_core_hash"}}
-        if payload["catalogue_hash"] != _stable_hash(_freeze_json(body)):
-            raise ValueError("General tagged catalogue hash mismatch.")
-        from ye3t.couplings.lifted_cauchy_scalar import CompiledLiftedCauchyScalar
-        known = {record["coordinate_id"]: record for record in value.plan.report.labels}
-        raw_rows = []
-        parents = {}
-        for record in payload["raw_labels"]:
-            identity = {key: item for key, item in record.items() if key != "parent_artifact_hash"}
-            if _freeze_json(identity) != _freeze_json(known.get(record["coordinate_id"])):
-                raise ValueError("General tagged coordinate is absent from its count report.")
-            parent_hash = record["parent_artifact_hash"]
-            if parent_hash not in parents:
-                parents[parent_hash] = CompiledLiftedCauchyScalar.from_dict(payload["parent_artifacts"][parent_hash])
-            parent = parents[parent_hash]
-            if parent.self_hash != parent_hash or len(parent.plan.report.labels) != 1 or (
-                _freeze_json(parent.plan.report.labels[0].to_dict()) != _freeze_json({**record["label"], "descriptor_index": 0})
-            ):
-                raise ValueError("General tagged parent coordinate binding changed.")
-            tag_count = record["tag_count"]
-            bindings = tuple(("edge", index) for index in range(tag_count)) + (("density", 0),)
-            rows, supported = _physical_image_rows(parent, bindings)
-            if supported != (0,):
-                raise ValueError("General tagged coordinate has invalid tag support.")
-            raw_rows.append(rows[0])
-        if set(parents) != set(payload["parent_artifacts"]):
-            raise ValueError("General tagged parent inventory has unused artifacts.")
-        selected, reconstruction = _exact_pivot_image(raw_rows)
-        expected = _general_payload(raw_rows, payload["raw_labels"], selected, reconstruction,
-                                    payload["parent_artifacts"])
-        if _freeze_json(payload) != _freeze_json(expected):
-            raise ValueError("General tagged physical lowering or reconstruction certificate changed.")
-        if value.validation_report != {"passed": True, "scope": "general_exact_physical_pivots",
-                                       "exact_image_dimension": len(selected)} or value.provenance != {
-                "api": "ye3t.couplings.compile", "coefficient_compiler": "tagged_cauchy_general"}:
-            raise ValueError("General tagged validation/provenance contract changed.")
-        _validate_tagged_cauchy_real_schedule_core(payload)
+        # The full artifact digest was checked above. Persist only the completed
+        # independent check, bound to this compiler revision and exact content.
+        # Larger catalogues still reuse the existing label/block/CG stores.
+        # Increment validator_revision when the independent check changes.
+        def validate_once():
+            _replay_general_artifact(value)
+            return {"passed": True}
+
+        if replay or store.mode == "off":
+            validate_once()
+        else:
+            try:
+                store.resolve("tagged_image_validation", "tagged_image_validation_v1",
+                    {"artifact": value.self_hash, "validator_revision": 1},
+                    builder=validate_once,
+                    certificate={"passed": True, "checks": {"independent_replay": True}},
+                    required_certificate_checks=("independent_replay",))
+            except ArtifactCacheMiss:
+                # Read-only stores remain usable for imported models: validate
+                # in memory without writing into the selected store.
+                validate_once()
         _VALIDATED_GENERAL_ARTIFACTS[value.self_hash] = True
         if len(_VALIDATED_GENERAL_ARTIFACTS) > 16:
             _VALIDATED_GENERAL_ARTIFACTS.popitem(last=False)
     else:
         raise TypeError("Expected a general tagged count, plan, or compiled artifact.")
     return True
+
+
+def _replay_general_artifact(value):
+    """Independent construction check, run once per artifact and revision."""
+    from ye3t.couplings.tagged_cauchy_image import _validate_tagged_cauchy_real_schedule_core
+    _validate_general(value.plan)
+    payload = value.payload
+    body = {key: item for key, item in payload.items() if key not in
+            {"catalogue_hash", "real_schedule_core", "real_schedule_core_hash"}}
+    if payload["catalogue_hash"] != _stable_hash(_freeze_json(body)):
+        raise ValueError("General tagged catalogue hash mismatch.")
+    from ye3t.couplings.lifted_cauchy_scalar import CompiledLiftedCauchyScalar
+    known = {record["coordinate_id"]: record for record in value.plan.report.labels}
+    raw_rows = []
+    parents = {}
+    for record in payload["raw_labels"]:
+        identity = {key: item for key, item in record.items() if key != "parent_artifact_hash"}
+        if _freeze_json(identity) != _freeze_json(known.get(record["coordinate_id"])):
+            raise ValueError("General tagged coordinate is absent from its count report.")
+        parent_hash = record["parent_artifact_hash"]
+        if parent_hash not in parents:
+            parents[parent_hash] = CompiledLiftedCauchyScalar.from_dict(payload["parent_artifacts"][parent_hash])
+        parent = parents[parent_hash]
+        if parent.self_hash != parent_hash or len(parent.plan.report.labels) != 1 or (
+            _freeze_json(parent.plan.report.labels[0].to_dict()) != _freeze_json({**record["label"], "descriptor_index": 0})
+        ):
+            raise ValueError("General tagged parent coordinate binding changed.")
+        tag_count = record["tag_count"]
+        bindings = tuple(("edge", index) for index in range(tag_count)) + (("density", 0),)
+        rows, supported = _physical_image_rows(parent, bindings)
+        if supported != (0,):
+            raise ValueError("General tagged coordinate has invalid tag support.")
+        raw_rows.append(rows[0])
+    if set(parents) != set(payload["parent_artifacts"]):
+        raise ValueError("General tagged parent inventory has unused artifacts.")
+    selected, reconstruction = _exact_pivot_image(raw_rows)
+    expected = _general_payload(raw_rows, payload["raw_labels"], selected, reconstruction,
+                                payload["parent_artifacts"])
+    if _freeze_json(payload) != _freeze_json(expected):
+        raise ValueError("General tagged physical lowering or reconstruction certificate changed.")
+    if value.validation_report != {"passed": True, "scope": "general_exact_physical_pivots",
+                                   "exact_image_dimension": len(selected)} or value.provenance != {
+            "api": "ye3t.couplings.compile", "coefficient_compiler": "tagged_cauchy_general"}:
+        raise ValueError("General tagged validation/provenance contract changed.")
+    _validate_tagged_cauchy_real_schedule_core(payload)

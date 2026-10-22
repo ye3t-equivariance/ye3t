@@ -3476,27 +3476,45 @@ class TaggedCauchyImageCompilerPlan:
 class CompiledTaggedCauchyImage:
     """Exact tagged physical-image artifact with compiler provenance."""
 
-    def to_dict(self):
-        body = {
+    def validate(self, compiler_validation="full"):
+        """Check current content and reuse completed compiler validation.
+
+        Set YE3T_CACHE_VERIFY=full to replay the independent construction.
+        Mutable payloads are checked by content before any cached result is used.
+        """
+        _validate_tagged_cauchy_image_identity(self, compiler_validation=compiler_validation)
+        return self
+
+    def _identity_body(self):
+        # Compiler records contain JSON dictionaries, tuples and scalar values.
+        # Hash these directly; exporting a caller-owned copy is a separate step.
+        return {
             "schema": (
                 "ye3t_linear_tagged_cauchy_image_v4"
                 if self.payload.get("coordinate_policy") == "exact_physical_pivots_v1"
                 else TAGGED_CAUCHY_IMAGE_SCHEMA
             ),
             "plan": self.plan.to_dict(),
-            "payload": _freeze_json(self.payload),
-            "validation_report": _freeze_json(self.validation_report),
-            "provenance": _freeze_json(self.provenance),
+            "payload": self.payload,
+            "validation_report": self.validation_report,
+            "provenance": self.provenance,
         }
-        return {**body, "self_hash": str(self.self_hash)}
+
+    def to_dict(self):
+        return {**_freeze_json(self._identity_body()), "self_hash": str(self.self_hash)}
+
+    def _content_hash(self):
+        return _tagged_artifact_content_hash(self._identity_body(), self.self_hash)
 
     @classmethod
     def from_dict(cls, payload, compiler_validation="full"):
-        """Load an artifact with full replay or trusted-certificate checks.
+        """Load an artifact with reusable full validation or stored checks.
 
         ``certificate`` retains integrity and executable-adjoint checks, but
-        trusts the stored V4 symmetry/physical-image proof. Use ``full`` to
-        independently reconstruct that proof. Hashes are not authentication.
+        trusts the stored V4 symmetry/physical-image proof. ``full`` performs
+        independent reconstruction on first use and reuses the result for the
+        same content and validator revision. Set YE3T_CACHE_VERIFY=full for
+        unconditional replay. Hashes are not authentication.
         """
         payload = dict(payload)
         _require_exact_keys(
@@ -3515,7 +3533,7 @@ class CompiledTaggedCauchyImage:
             raise ValueError("Unsupported tagged-Cauchy image artifact schema.")
         expected = str(payload["self_hash"])
         body = {key: value for key, value in payload.items() if key != "self_hash"}
-        if not expected or expected != _stable_hash(_freeze_json(body)):
+        if not expected or expected != _tagged_artifact_content_hash(body, expected):
             raise ValueError("Tagged-Cauchy image artifact hash mismatch.")
 
         plan_payload = dict(payload["plan"])
@@ -3585,6 +3603,17 @@ class CompiledTaggedCauchyImage:
         )
         _validate_tagged_cauchy_image_identity(compiled, compiler_validation=compiler_validation)
         return compiled
+
+
+def _tagged_artifact_content_hash(body, expected):
+    """Fast JSON-record hashing with legacy Mapping/key normalization preserved."""
+    try:
+        current = _stable_hash(body)
+    except TypeError:
+        current = None
+    if current is not None and current == expected:
+        return current
+    return _stable_hash(_freeze_json(body))
 
 
 def _canonical_n4_source_key(source_product_algebra, source_key):

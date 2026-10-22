@@ -83,7 +83,8 @@ def _source_action_binding(source, output_layouts, *, actual_action, constructio
     degrees = {YE3TCarrierKey.from_dict(layout["key"]).permutation_degrees for layout in layouts.values()}
     if len(degrees) != 1:
         raise ValueError("One source action binding must have one acting permutation degree")
-    expected_scope = ("auxiliary_roles" if source.kind == "selected_marginal" or
+    expected_scope = ("shell_roles" if source.kind == "lifted_density_roles" and source.metadata.get("emitted_action") == "shell_roles" else
+                      "auxiliary_roles" if source.kind == "selected_marginal" or
                       (source.kind == "tagged_cauchy_occurrence" and source.metadata.get("emitted_action") == "right_tags") else
                       "ordinary_density_trivial" if source.kind == "ordinary_density" else "formal_factors")
     expected_action = _carrier_action_spec(YE3TCarrierKey.from_dict(next(iter(layouts.values()))["key"]), expected_scope)
@@ -162,7 +163,7 @@ every stage, including auxiliary geometry, discrete indices and final results.
             raise ValueError("Every action identity requires a structured action specification")
         for carrier in stage["carriers"]:
             spec = binding["action_specs"][carrier["carrier_id"]]
-            if (spec.get("scope") not in {"formal_factors", "auxiliary_roles", "ordinary_density_trivial"}
+            if (spec.get("scope") not in {"formal_factors", "auxiliary_roles", "ordinary_density_trivial", "shell_roles"}
                     or spec != _carrier_action_spec(_complete_layout(carrier["carrier_layout"]).key, spec["scope"])):
                 raise ValueError("Action specification differs from its permutation carrier")
         options = binding.get("options", {})

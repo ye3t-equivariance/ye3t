@@ -21,7 +21,10 @@ def artifact():
     })))).to_dict()
 
 
-def test_certificate_load_skips_reconstruction_without_priming_full_cache(artifact, monkeypatch):
+def test_certificate_load_skips_reconstruction_without_priming_full_cache(artifact, monkeypatch, tmp_path):
+    # This test exercises the first independent validation. Prior processes may
+    # have validated the same fixture in the user's shared store.
+    monkeypatch.setenv("YE3T_CACHE_DIR", str(tmp_path))
     general._VALIDATED_GENERAL_ARTIFACTS.pop(artifact["self_hash"], None)
 
     def no_replay(*args, **kwargs):

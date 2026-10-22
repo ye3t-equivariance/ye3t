@@ -131,10 +131,15 @@ def _product_full_path(value, layouts, argument_ids):
         definition["inputs"] = [identities[child] for child in node["inputs"]]
         identities[name] = _hash(definition)
 
-    for name, layout in zip(arguments, layouts, strict=True):
-        visit(name)
-        if nodes[name].get("layout") != layout.to_dict():
-            raise ValueError("Product full_path argument layout differs from the requested carrier")
+    try:
+        for name, layout in zip(arguments, layouts, strict=True):
+            visit(name)
+            if nodes[name].get("layout") != layout.to_dict():
+                raise ValueError("Product full_path argument layout differs from the requested carrier")
+    finally:
+        # The recursive closure otherwise holds itself and the complete source
+        # graph until cyclic GC. Release it between large planning requests.
+        visit = None
     if (arguments[0] == arguments[1]) != (argument_ids[0] == argument_ids[1]):
         raise ValueError("Repeated arguments must use the same full_path node and canonical argument ID")
     if arguments[0] != arguments[1] and identities[arguments[0]] == identities[arguments[1]]:
