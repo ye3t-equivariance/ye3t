@@ -2,6 +2,25 @@ import numpy as np
 import pytest
 
 
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_symmetric_occupation_empty_batch_has_complete_derivatives(device):
+    import torch
+    from ye3t.couplings.factorized_typed import _symmetric_occupation_products
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("requires GPU")
+    values = torch.linspace(-.4, .7, 12, dtype=torch.float64, device=device).reshape(2, 2, 3).requires_grad_()
+    entries = (((-1, 0), 0, 1.0),)
+    observed = _symmetric_occupation_products((values[:, 0], values[:, 1]), 1, entries)
+    expected = (values[:, 0, 0]*values[:, 1, 1]+values[:, 0, 1]*values[:, 1, 0])[:, None]
+    torch.testing.assert_close(observed, expected, rtol=0, atol=1e-15)
+    empty = _symmetric_occupation_products((values[:0, 0], values[:0, 1]), 1, entries)
+    assert empty.shape == (0, 1)
+    gradient = torch.autograd.grad(empty.square().sum(), values, create_graph=True)[0]
+    second = torch.autograd.grad(gradient.square().sum(), values)[0]
+    torch.testing.assert_close(gradient, torch.zeros_like(values), rtol=0, atol=0)
+    torch.testing.assert_close(second, torch.zeros_like(values), rtol=0, atol=0)
+
+
 def _cosets(table):
     if table["coset_representatives"] is not None:
         return tuple(tuple(row) for row in table["coset_representatives"])
@@ -366,7 +385,7 @@ def test_general_schur_block_factorized_batch_and_second_derivatives():
         subduction_materialization_backend="exact",
     ).coupler
     table = coupler.factorized_coefficient_tables[0]
-    assert any(row["strategy"] == "general_sparse" for row in table["local_tables"])
+    assert any(row["strategy"] == "young_angular_paths" for row in table["local_tables"])
     factors = torch.tensor(
         [[[0.1, 0.4, -0.3, 0.7, -0.5],
           [0.2, -0.1, 0.6, 0.3, 0.8],
@@ -498,7 +517,9 @@ def test_selected_typed_route_matches_full_dense_reference_on_two_cosets():
     assert table["kind"] == "typed_joint_factorized_v1"
     assert selected_compiled.coupler.cache_key() == table["hash"]
     assert selected_compiled.coupler.component_inventory()["all_component_families_present"]
-    assert selected_compiled.coupler.certificate.checks["exact_projector_compared"]
+    # Production uses the qualified constructor. This test performs the
+    # independent dense comparison below instead of making compilation do it.
+    assert not selected_compiled.coupler.certificate.checks["exact_projector_compared"]
     assert table["selected_full_alpha"] == selected
     assert table["full_target_count"] == len(bindings)
     assert len(selected_compiled.coupler.alpha_labels()) == 1
@@ -580,6 +601,7 @@ def test_rank_eight_selected_phi_route_has_full_axes_and_s8_o3_covariance(tmp_pa
     assert not compiled.coupler.certificate.checks["exact_projector_compared"]
     assert table["kind"] == "typed_joint_factorized_v1"
     assert table["selected_full_alpha"] == 12
+    assert table["coordinate_convention"] == "young_orthogonal_adjacent_pair_projector_split_v3"
     assert table["shape"] == (70 * 3**8, 14 * 5)
     assert not compiled.coupler.sparse_coefficient_tables
     from ye3t.couplings.young_coset_transport import transported_young_slice
@@ -1347,9 +1369,13 @@ def test_cached_numeric_mixed_joint_projector_matches_exact_reference(tmp_path):
     retained = numeric.certificate.provenance["numeric_subduction_reports"]
     assert retained
     assert all(report["ok"] for report in retained)
-    assert all(report["rank_gap"] > 10 for report in retained)
-    assert all(report["exact_reference"]["projector_compared_to_exact"] for report in retained)
-    assert numeric.certificate.checks["numeric_rank_gap_and_projector_validated"]
+    assert all(report["backend"] == "canonical_numeric_split" for report in retained)
+    assert all(report["generic_solver"] is False for report in retained)
+    assert all("rank_gap" not in report for report in retained)
+    assert all(report["performed"] and report["exact_reference"]["coordinates_compared_to_exact"] for report in retained)
+    assert numeric.certificate.checks["trusted_canonical_numeric_constructor"]
+    assert numeric.certificate.checks["exact_canonical_coordinates_compared"]
+    assert not numeric.certificate.checks["numeric_rank_gap_and_projector_validated"]
     assert numeric.coupler.subduction_maps[0].source.as_dict()["numeric_validation_report"]
     assert numeric.coupler.sparse_coefficient_tables[0]["entry_format"] == "numeric_real"
     assert numeric.coupler.validate_sparse_coefficient_tables()[0]["passed"]

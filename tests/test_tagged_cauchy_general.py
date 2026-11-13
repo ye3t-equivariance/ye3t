@@ -1,6 +1,7 @@
 """Physical algebra checks independent of fitting data and numerical ranks."""
 
 import copy
+import json
 import math
 
 import pytest
@@ -77,6 +78,112 @@ def test_complete_channel_partitions_and_balanced_angular_patterns():
         assert all(0 <= channel["radial_channel"] < 2 and channel["l"] <= 2 for channel in row["channels"])
 
 
+def test_general_catalogue_limits_filter_real_precompiler_before_coefficients(monkeypatch):
+    import ye3t.couplings as couplings
+    import ye3t.couplings.tagged_cauchy_general as general
+    from ye3t.couplings import lifted_cauchy_scalar as scalar
+    from ye3t.cache import coefficient_arrays
+    from ye3t.cache.artifacts import YE3TArtifactStore
+    catalogue = {
+        "nmax_per_rank": {4: 2}, "lmax_per_rank": {4: 1},
+        "source_block_partitions_by_rank": {4: [[4], [2, 2]]},
+        "angular_patterns_by_rank": {4: [[0, 0, 0, 0], [0, 0, 1, 1], [1, 1, 1, 1]]},
+        "tag_counts_by_rank": {4: [0, 1, 2]}, "max_records_per_rank": 64,
+    }
+    def forbidden(*args, **kwargs):
+        pytest.fail("General source preplanning must not materialize or cache coefficients")
+    monkeypatch.setattr(couplings, "compile", forbidden)
+    monkeypatch.setattr(general, "_general_compile", forbidden)
+    monkeypatch.setattr(scalar, "_compile_block_template", forbidden)
+    monkeypatch.setattr(coefficient_arrays, "_resolve_coefficient_array", forbidden)
+    resolve = YE3TArtifactStore.resolve
+    cache_kinds = []
+    def count_inventory_only(store, kind, *args, **kwargs):
+        assert kind == "lifted_cauchy_basis_inventory", "Preplanning entered a coefficient artifact cache"
+        cache_kinds.append(kind)
+        return resolve(store, kind, *args, **kwargs)
+    monkeypatch.setattr(YE3TArtifactStore, "resolve", count_inventory_only)
+    broad = tagged_cauchy_image_request(species=["H", "O"], catalogue=catalogue)
+    limited = tagged_cauchy_image_request(species=["H", "O"], catalogue={**catalogue,
+        "eta_max_per_rank": {4: 1}, "retained_max_per_rank": {4: 0}})
+    before, after = list(_content_records(broad)), list(_content_records(limited))
+    assert len(after) < len(before)
+    assert after and all(len({(channel["neighbor_species"], channel["radial_channel"])
+                              for channel in row["channels"]}) == 1 for row in after)
+    assert any({channel["l"] for channel in row["channels"]} == {0, 1} for row in after)
+    assert any(channel["radial_channel"] == 1 for row in after for channel in row["channels"])
+    general._GENERAL_COUNT_CACHE.clear()
+    report = count(limited)
+    assert cache_kinds
+    assert plan(report).report.labels == report.labels
+    assert report.labels and all(row["tag_count"] == 0 for row in report.labels)
+    assert report.resource_report["coefficient_materialization_performed"] is False
+    saved = json.loads(json.dumps(limited))
+    assert tagged_cauchy_image_request(species=saved["species"], catalogue=saved["catalogue"]) == limited
+
+
+@pytest.mark.parametrize("field,value", [
+    ("eta_max_per_rank", {2: 0}), ("eta_max_per_rank", {2: 3}),
+    ("eta_max_per_rank", {2: 1, "2": 2}), ("eta_max_per_rank", {2: True}),
+    ("retained_max_per_rank", {2: -1}), ("retained_max_per_rank", {2: 3}),
+    ("retained_max_per_rank", {1: 0}),
+])
+def test_general_limits_reject_invalid_rank_maps(field, value):
+    with pytest.raises((TypeError, ValueError)):
+        tagged_cauchy_image_request(species=["H"], catalogue={
+            "nmax_per_rank": {2: 2}, "lmax_per_rank": {2: 0},
+            "source_block_partitions_by_rank": {2: [[2]]}, field: value})
+
+
+def test_general_limited_source_compiles_only_admitted_primitive_and_tag_contents():
+    request = tagged_cauchy_image_request(species=["H"], catalogue={
+        "nmax_per_rank": {2: 2}, "lmax_per_rank": {2: 0},
+        "source_block_partitions_by_rank": {2: [[2], [1, 1]]},
+        "tag_counts_by_rank": {2: [0, 1, 2]},
+        "eta_max_per_rank": {2: 1}, "retained_max_per_rank": {2: 1}})
+    report = count(request)
+    assert {component["tag_count"] for component in report.resource_report["components"]} == {0, 1}
+    assert all(len(component["request"]["channels"]) == 1
+               and all(tuple(block[0] for block in family["blocks"]) == (2,)
+                       for family in component["request"]["family_specs"])
+               for component in report.resource_report["components"])
+    compiled = compile(plan(report))
+    assert compiled.payload["image_rows"]
+    assert set(compiled.payload["selected_raw_tag_counts"]) <= {0, 1}
+
+
+def test_full_rank_one_through_eight_tagged_precompiler_preserves_unrestricted_eta_space(monkeypatch):
+    import ye3t.couplings as couplings
+    import ye3t.couplings.tagged_cauchy_general as general
+    def forbidden(*args, **kwargs):
+        pytest.fail("Rank-one-through-eight catalogue inspection must remain coefficient-free")
+    monkeypatch.setattr(couplings, "compile", forbidden)
+    monkeypatch.setattr(general, "_general_compile", forbidden)
+    # The full public tagged_descriptors scientific rank/angular schedule.
+    catalogue = {
+        "nmax_per_rank": {1: 4, 2: 3, 3: 2, 4: 2, 5: 1, 6: 1, 7: 1, 8: 1},
+        "lmax_per_rank": {1: 0, 2: 4, 3: 2, 4: 2, 5: 1, 6: 1, 7: 1, 8: 1},
+        "source_block_partitions_by_rank": {1: [[1]], 2: [[2], [1, 1]],
+            3: [[3], [2, 1]], 4: [[4], [2, 2]], 5: [[3, 2]], 6: [[4, 2]],
+            7: [[5, 2]], 8: [[6, 2]]},
+        "tag_counts_by_rank": {rank: [1 if rank == 1 else 2] for rank in range(1, 9)},
+        "angular_patterns_by_rank": {1: [[0]],
+            2: [[0, 0], [1, 1], [2, 2], [3, 3], [4, 4]],
+            3: [[0, 0, 0], [0, 1, 1], [0, 2, 2]],
+            4: [[0, 0, 0, 0], [0, 0, 1, 1], [1, 1, 1, 1], [0, 0, 2, 2]],
+            5: [[0, 0, 0, 1, 1]], 6: [[0, 0, 0, 0, 1, 1]],
+            7: [[0, 0, 0, 0, 0, 1, 1]], 8: [[0, 0, 0, 0, 0, 0, 1, 1]]},
+    }
+    legacy = tagged_cauchy_image_request(species=["Ni"], catalogue=catalogue)
+    compact = tagged_cauchy_image_request(species=["Ni"], catalogue={**catalogue,
+        "eta_max_per_rank": {rank: rank for rank in range(1, 9)}})
+    assert list(_content_records(compact)) == list(_content_records(legacy))
+    original, current = count(legacy), count(compact)
+    assert current.labels == original.labels
+    assert current.resource_report["components"] == original.resource_report["components"]
+    assert {row["tensor_order"] for row in current.labels} == set(range(1, 9))
+
+
 def test_sparse_pivots_keep_original_coordinates_and_exact_span():
     rows = [{("a",): 1, ("b",): sp.sqrt(2)},
             {("a",): 2, ("b",): 2*sp.sqrt(2)}, {}, {("b",): 1},
@@ -140,6 +247,8 @@ def test_exact_pivot_division_rationalizes_multiple_radicals(denominator):
 def test_general_compile_reduces_each_candidate_once(monkeypatch):
     import ye3t.couplings.tagged_cauchy_general as general
 
+    # Exercise construction itself; disk reuse has separate cold/warm tests.
+    monkeypatch.setenv("YE3T_CACHE_MODE", "off")
     calls = []
     original = general._ExactImagePivots.append
     def append(image, row):
@@ -170,6 +279,23 @@ def test_general_public_compiler_round_trip():
     assert compiled.payload["certificate"]["orthogonalization_performed"] is False
     restored = CompiledTaggedCauchyImage.from_dict(compiled.to_dict())
     assert restored.self_hash == compiled.self_hash
+    for mutation in ("coefficient", "duplicate", "pivot"):
+        from ye3t.couplings.lifted_cauchy_scalar import _exact_scalar_payload
+        from ye3t.exact_scalars import exact_scalar
+        changed = json.loads(json.dumps(compiled.to_dict()))
+        body = changed["payload"]
+        if mutation == "coefficient":
+            body["raw_from_image"][0][0]["coefficient"] = _exact_scalar_payload(exact_scalar(2))
+        elif mutation == "duplicate":
+            body["raw_from_image"][0].append(copy.deepcopy(body["raw_from_image"][0][0]))
+        else:
+            body["selected_raw_indices"][0] = body["selected_raw_indices"][1]
+        body["catalogue_hash"] = _stable_hash(_freeze_json({key: item for key, item in body.items()
+            if key not in {"catalogue_hash", "real_schedule_core", "real_schedule_core_hash"}}))
+        changed["self_hash"] = _stable_hash(_freeze_json({key: item for key, item in changed.items()
+                                                       if key != "self_hash"}))
+        with pytest.raises(ValueError, match="reconstruction|pivot inventory"):
+            CompiledTaggedCauchyImage.from_dict(changed)
     # A fully rehashed corrupt analytic source table must still fail semantic
     # replay. Hash consistency alone is not a mathematical certificate.
     corrupt = copy.deepcopy(compiled.to_dict())

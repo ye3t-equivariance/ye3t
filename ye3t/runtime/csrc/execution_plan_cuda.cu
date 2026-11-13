@@ -14,6 +14,26 @@
 
 namespace {
 
+void check_factorized_workspace_bound(
+    std::int64_t workspace_dimension,
+    std::int64_t node_count,
+    std::int64_t input_dimension,
+    std::int64_t coefficient_count) {
+  // A deduplicated physical bank can supply several angular factors. Its
+  // width bounds leaf nodes, but not their coupled intermediates. Every
+  // complete normalized CG output component has a nonzero coefficient;
+  // internal-node widths are therefore bounded by their disjoint packed
+  // coefficient segments, including after common-subtree sharing.
+  // Check W <= node_count * input_dimension + coefficient_count without
+  // integer overflow or a device-to-host metadata synchronization.
+  TORCH_CHECK(
+      workspace_dimension > 0 && node_count > 0 && input_dimension > 0 &&
+          (workspace_dimension <= coefficient_count ||
+           (workspace_dimension - coefficient_count - 1) / node_count
+               < input_dimension),
+      "factorized workspace_dimension is outside its certified bound");
+}
+
 void check_cuda_data_tensor(
     const torch::Tensor& tensor,
     const char* name) {
@@ -11541,10 +11561,9 @@ torch::Tensor factorized_angular_cuda(
       packed_slots.size(1) / source_dimension;
   const std::int64_t projection_dimension =
       projection_values.numel() / source_dimension;
-  TORCH_CHECK(
-      workspace_dimension > 0 &&
-          workspace_dimension <= node_count * input_dimension,
-      "factorized workspace_dimension is outside its certified bound");
+  check_factorized_workspace_bound(
+      workspace_dimension, node_count, input_dimension,
+      coefficient_values.numel());
   const std::int64_t root_block_count =
       root_nodes.numel() * projection_dimension;
   TORCH_CHECK(
@@ -11556,6 +11575,11 @@ torch::Tensor factorized_angular_cuda(
       output_dimension ==
           root_nodes.numel() * projection_dimension * root_dimension,
       "output_dimension does not match factorized roots and projection");
+  // An empty physical batch still passes the normal layout checks. The
+  // registered adjoint owns its autograd connection; no CUDA grid is needed.
+  if (packed_slots.size(0) == 0) {
+    return torch::empty({0, output_dimension}, packed_slots.options());
+  }
   c10::cuda::CUDAGuard device_guard(packed_slots.device());
   auto workspace = torch::empty(
       {
@@ -11729,10 +11753,9 @@ torch::Tensor factorized_angular_adjoint_cuda(
       packed_slots.size(1) / source_dimension;
   const std::int64_t projection_dimension =
       projection_values.numel() / source_dimension;
-  TORCH_CHECK(
-      workspace_dimension > 0 &&
-          workspace_dimension <= node_count * input_dimension,
-      "factorized workspace_dimension is outside its certified bound");
+  check_factorized_workspace_bound(
+      workspace_dimension, node_count, input_dimension,
+      coefficient_values.numel());
   const std::int64_t output_dimension =
       output_adjoint.size(1);
   const std::int64_t root_block_count =
@@ -11745,6 +11768,9 @@ torch::Tensor factorized_angular_adjoint_cuda(
   TORCH_CHECK(
       output_adjoint.size(1) == output_dimension,
       "output_adjoint width does not match factorized output");
+  if (packed_slots.size(0) == 0) {
+    return torch::empty_like(packed_slots);
+  }
   c10::cuda::CUDAGuard device_guard(packed_slots.device());
   auto workspace = torch::empty(
       {
@@ -11924,10 +11950,9 @@ FactorizedCudaDimensions factorized_cuda_dimensions(
       packed_slots.size(1) / source_dimension;
   const std::int64_t projection_dimension =
       projection_values.numel() / source_dimension;
-  TORCH_CHECK(
-      workspace_dimension > 0 &&
-          workspace_dimension <= node_count * input_dimension,
-      "factorized workspace_dimension is outside its certified bound");
+  check_factorized_workspace_bound(
+      workspace_dimension, node_count, input_dimension,
+      coefficient_values.numel());
   TORCH_CHECK(
       output_dimension > 0,
       "factorized output_dimension must be positive");
@@ -12051,10 +12076,9 @@ heterogeneous_factorized_cuda_dimensions(
       packed_slots.size(1) / source_dimension;
   const std::int64_t total_projection_dimension =
       projection_values.numel() / source_dimension;
-  TORCH_CHECK(
-      workspace_dimension > 0 &&
-          workspace_dimension <= node_count * input_dimension,
-      "factorized workspace_dimension is outside its certified bound");
+  check_factorized_workspace_bound(
+      workspace_dimension, node_count, input_dimension,
+      coefficient_values.numel());
   TORCH_CHECK(
       output_dimension > 0,
       "heterogeneous factorized output_dimension must be positive");
@@ -12121,6 +12145,9 @@ factorized_angular_double_backward_cuda(
       output_adjoint.size(0) == packed_slots.size(0) &&
           output_adjoint.size(1) == dimensions.output_dimension,
       "output_adjoint shape does not match factorized output");
+  if (packed_slots.size(0) == 0) {
+    return {torch::empty_like(output_adjoint), torch::empty_like(packed_slots)};
+  }
   c10::cuda::CUDAGuard device_guard(packed_slots.device());
   auto workspace = torch::empty(
       {
@@ -12284,6 +12311,9 @@ torch::Tensor factorized_angular_heterogeneous_cuda(
   auto output = torch::zeros(
       {packed_slots.size(0), dimensions.output_dimension},
       packed_slots.options());
+  if (packed_slots.size(0) == 0) {
+    return output;
+  }
   constexpr int threads = 32;
   const auto stream = at::cuda::getCurrentCUDAStream();
   AT_DISPATCH_FLOATING_AND_COMPLEX_TYPES(
@@ -12420,6 +12450,9 @@ factorized_angular_heterogeneous_adjoint_with_workspace_cuda(
       packed_slots.options());
   auto workspace_adjoint = torch::empty_like(workspace);
   auto packed_adjoint = torch::empty_like(packed_slots);
+  if (packed_slots.size(0) == 0) {
+    return std::make_tuple(packed_adjoint, workspace, workspace_adjoint);
+  }
   constexpr int threads = 32;
   const auto stream = at::cuda::getCurrentCUDAStream();
   AT_DISPATCH_FLOATING_AND_COMPLEX_TYPES(
@@ -12633,6 +12666,9 @@ factorized_angular_heterogeneous_double_backward_cuda(
       : torch::empty_like(workspace);
   auto output_tangent = torch::zeros_like(output_adjoint);
   auto packed_tangent = torch::empty_like(packed_slots);
+  if (packed_slots.size(0) == 0) {
+    return std::make_tuple(output_tangent, packed_tangent);
+  }
   constexpr int threads = 32;
   const auto stream = at::cuda::getCurrentCUDAStream();
   AT_DISPATCH_FLOATING_AND_COMPLEX_TYPES(
@@ -12812,6 +12848,9 @@ factorized_angular_heterogeneous_double_backward_from_workspace_cuda(
       : torch::empty_like(workspace);
   auto output_tangent = torch::zeros_like(output_adjoint);
   auto packed_tangent = torch::empty_like(packed_adjoint_tangent);
+  if (packed_adjoint_tangent.size(0) == 0) {
+    return std::make_tuple(output_tangent, packed_tangent);
+  }
   constexpr int threads = 32;
   const auto stream = at::cuda::getCurrentCUDAStream();
   AT_DISPATCH_FLOATING_AND_COMPLEX_TYPES(
@@ -13117,6 +13156,10 @@ torch::Tensor factorized_angular_segmented_cuda(
           workspace_dimension,
           output_dimension);
   c10::cuda::CUDAGuard device_guard(packed_slots.device());
+  // An empty physical batch has no CUDA work; a zero-block launch is invalid.
+  if (packed_slots.size(0) == 0) {
+    return torch::empty({0, output_dimension}, packed_slots.options());
+  }
   auto workspace = torch::empty(
       {packed_slots.size(0), workspace_dimension},
       packed_slots.options());
@@ -13294,6 +13337,9 @@ torch::Tensor factorized_angular_segmented_adjoint_cuda(
           workspace_dimension,
           output_dimension);
   c10::cuda::CUDAGuard device_guard(packed_slots.device());
+  if (packed_slots.size(0) == 0) {
+    return torch::empty_like(packed_slots);
+  }
   auto workspace = torch::empty(
       {packed_slots.size(0), workspace_dimension},
       packed_slots.options());
@@ -13483,6 +13529,9 @@ factorized_angular_segmented_double_backward_cuda(
           workspace_dimension,
           output_dimension);
   c10::cuda::CUDAGuard device_guard(packed_slots.device());
+  if (packed_slots.size(0) == 0) {
+    return {torch::empty_like(output_adjoint), torch::empty_like(packed_slots)};
+  }
   auto workspace = torch::empty(
       {packed_slots.size(0), workspace_dimension},
       packed_slots.options());

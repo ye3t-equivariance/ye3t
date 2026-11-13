@@ -37,6 +37,59 @@ def test_induction_grows_degree_and_counts_all_placements():
                for row in report["products"]) == 6
 
 
+@pytest.mark.parametrize("same", [False, True])
+def test_inventory_reuses_its_canonical_requests_and_public_entries_revalidate(same, monkeypatch):
+    import copy
+    from ye3t.couplings import carrier_products as core
+    key = YE3TCarrierKey(3, (2, 1), 2, YE3T_O3_PRIMARY_CONVENTION, 1)
+    layout = YE3TCarrierLayout(key, 3, 2, 5)
+    request = {"family": "complete_carrier_product_inventory", "left": layout.to_dict(),
+               "right": layout.to_dict(), "argument_ids": ["x", "x" if same else "y"]}
+    original = core._request
+    calls = []
+
+    def observed(value):
+        calls.append(value)
+        return original(value)
+
+    monkeypatch.setattr(core, "_request", observed)
+    inventory = couplings.count(request)
+    assert calls == [], "Inventory must not reconstruct each request immediately after canonical construction"
+    for row in inventory["products"]:
+        assert couplings.count(row) == row
+    assert len(calls) == len(inventory["products"]), "Public count still validates every supplied request"
+    changed = copy.deepcopy(inventory["products"][0])
+    changed["request"]["target"]["parity"] = -1
+    with pytest.raises(ValueError, match="identity or parity"):
+        couplings.count(changed)
+    assert couplings.count(request) == inventory
+
+
+def test_inventory_request_reuse_keeps_physical_graph_mutation_checks():
+    import copy
+    key = YE3TCarrierKey(2, (2,), 1, YE3T_O3_PRIMARY_CONVENTION, -1)
+    layout = YE3TCarrierLayout(key, 2, 1, 3)
+    path = {"arguments": ["x", "x"], "nodes": {"x": {
+        "operation": "source", "inputs": [], "layout": layout.to_dict(),
+        "value_scope": "propagated_hidden_state"}}}
+    request = {"family": "complete_carrier_product_inventory", "left": layout.to_dict(),
+               "right": layout.to_dict(), "argument_ids": ["x", "x"], "full_path": path}
+    inventory = couplings.count(request)
+    for row in inventory["products"]:
+        assert couplings.count(row) == row
+    damaged = copy.deepcopy(inventory["products"][0])
+    damaged["request"]["full_path"]["nodes"]["x"]["layout"]["channel_count"] += 1
+    for operation in (couplings.count, couplings.plan, couplings.compile):
+        with pytest.raises(ValueError, match="argument layout"):
+            operation(damaged)
+    # Returned requests remain independently owned, including their source graphs.
+    request["full_path"]["nodes"]["x"]["layout"]["channel_count"] += 1
+    assert all(row["request"]["full_path"]["nodes"]["x"]["layout"] == layout.to_dict()
+               for row in inventory["products"])
+    with pytest.raises(ValueError, match="argument layout"):
+        couplings.count(request)
+
+
 @pytest.mark.parametrize("transported", [False, True])
 def test_density_full_path_zero_checked_before_maps_and_cache_lookup(transported, monkeypatch):
     from ye3t.couplings import carrier_products
@@ -193,6 +246,33 @@ def test_full_path_validation_releases_source_graph_without_cyclic_gc():
         if enabled:
             gc.enable()
         gc.collect()
+
+
+def test_compilation_validates_full_path_once_and_rejects_mutation(monkeypatch):
+    import copy
+    from ye3t.couplings import carrier_products as core
+    key = YE3TCarrierKey(2, (2,), 1, YE3T_O3_PRIMARY_CONVENTION, -1)
+    layout = YE3TCarrierLayout(key, 2, 1, 3)
+    path = {"arguments": ["source", "source"], "nodes": {
+        "source": {"operation": "source", "inputs": [], "layout": layout.to_dict(),
+                   "source": {"content": [[1, 1], [1, 1]], "multiplicity_indices": [0, 1]}}}}
+    request = couplings.carrier_product_request(layout, layout, target_partition=(2,), target_L=0,
+        argument_ids=("x", "x"), full_path=path)
+    expected = core.compile_carrier_product(request)
+    original = core._product_full_path
+    calls = []
+
+    def observed(*args):
+        calls.append(True)
+        return original(*args)
+
+    monkeypatch.setattr(core, "_product_full_path", observed)
+    assert core.compile_carrier_product(request) == expected
+    assert len(calls) == 1, "One compile entry must not validate its complete source graph twice"
+    damaged = copy.deepcopy(request)
+    damaged["full_path"]["nodes"]["source"]["layout"]["channel_count"] += 1
+    with pytest.raises(ValueError, match="argument layout"):
+        core.compile_carrier_product(damaged)
 
 
 def test_full_path_is_preserved_without_changing_maps_or_derivatives(monkeypatch):

@@ -148,3 +148,52 @@ def test_catalogue_local_block_reuse_preserves_coefficients_and_source_identity(
     assert second == expected
     assert second["self_hash"] != first["self_hash"]
     assert core.validate_covariant_cauchy(second)
+
+
+@pytest.mark.parametrize("target", [0, 2])
+def test_source_rows_release_last_used_blocks_and_match_full_artifact(target, monkeypatch):
+    import weakref
+    monkeypatch.setenv("YE3T_CACHE_MODE", "off")
+    request = core.covariant_cauchy_request([
+        {"neighbor_species": "Ni", "radial_channel": 0, "l": 1,
+         "source_family_id": "independent"},
+        {"neighbor_species": "Ni", "radial_channel": 1, "l": 1,
+         "source_family_id": "independent"}],
+        (2, 2), target_L=target, role_dimension=2)
+    full = core.compile_covariant_cauchy(request)
+    compile_block = core._scalar._compile_block_template
+    blocks, payloads, releases_before_next_build = [], [], []
+
+    class Tracked(dict):
+        pass
+
+    def tracked_block(key, **kwargs):
+        releases_before_next_build.append(sum(ref() is None for ref in blocks))
+        block = Tracked(compile_block(key, **kwargs))
+        block["payload"] = Tracked(block["payload"])
+        blocks.append(weakref.ref(block))
+        payloads.append(weakref.ref(block["payload"]))
+        return block
+
+    shared = {"shell_role_rows": {"preserved": True}}
+    monkeypatch.setattr(core._scalar, "_compile_block_template", tracked_block)
+    compact = core.compile_covariant_cauchy(request, _block_templates=shared,
+                                           _source_rows_only=True)
+    assert compact["descriptors"] == full["descriptors"]
+    assert compact["request"] == full["request"]
+    assert compact["outer_templates"] == full["outer_templates"]
+    assert compact["real_forms"] == full["real_forms"]
+    assert compact["validation_report"] == full["validation_report"]
+    assert compact["block_template_references"] == tuple({
+        "template_id": row["template_id"], "template_hash": row["template_hash"],
+        "validation_report": row["validation_report"]} for row in full["block_templates"])
+    assert compact["block_templates"] == ()
+    assert compact["self_hash"] == core._scalar._stable_record_hash(
+        {key: value for key, value in compact.items() if key != "self_hash"})
+    assert all(ref() is None for ref in blocks + payloads)
+    assert shared == {"shell_role_rows": {"preserved": True}}
+    assert any(releases_before_next_build)
+    # The private source intermediate must never masquerade as an executable
+    # full factored artifact with its block rows embedded.
+    with pytest.raises(ValueError, match="Unknown covariant lifted-Cauchy schema"):
+        core.validate_covariant_cauchy(compact)

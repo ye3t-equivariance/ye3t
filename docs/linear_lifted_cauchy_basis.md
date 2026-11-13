@@ -129,6 +129,21 @@ performs no coordinate Gram, whitening, or dense change of basis. A dense Gram
 matrix or inverse remains a validation oracle, not part of fitting iterations
 or LAMMPS execution.
 
+Production block compilation evaluates one representative of each simultaneous
+role/angular permutation orbit. For orbit size \(w\), an invariant ordered
+synthesis coefficient \(c\) becomes \(\sqrt{w}c\) in normalized symmetric-power
+coordinates. The exact metric dual in these coordinates yields the raw
+monomial analysis coefficient after multiplication by \(\sqrt{w}\). Carrier
+intertwining and the invariant pairing establish that the synthesis coefficient
+is constant on the orbit. Explicit ordered-reference requests retain the
+ordered construction for coefficient comparisons.
+
+Occupation selection also limits which role-weight spaces are compiled.
+Within a required weight space, the compiler retains every copy needed to
+preserve its metric dual. The final descriptor list follows the requested
+multiplicity selection. Cache identities include the materialized weight-copy
+selection and whether ordered reference terms are stored.
+
 The required checks are exact dimension counts, diagonal coordinate
 Gram, completeness-projector rank for complete requests, unique valid labels,
 all multiplicity copies emitted once, and canonical/factored forward and VJP
@@ -453,6 +468,12 @@ coordinates and lower the selected model afterward, or transport the
 quadratic coefficient penalty by congruence.
 
 ## Validation checklist
+
+Large angular carrier tables use the same sparse basis-column format as role
+carriers. Their full state order and all selected columns remain explicit;
+only zero coefficient records are omitted. Cache requests distinguish this
+storage choice. Exact reconstruction, carrier actions, cross-copy Gram metrics
+and analysis coefficients are checked with the same mathematical requirements.
 
 Before fitting or native deployment, require:
 

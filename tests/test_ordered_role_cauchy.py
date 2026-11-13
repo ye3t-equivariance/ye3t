@@ -1,6 +1,7 @@
 """Ordered role Cauchy coordinates, copy axes, and factor symmetries."""
 
 import json
+from pathlib import Path
 from itertools import product
 import numpy as np
 import pytest
@@ -17,6 +18,42 @@ from ye3t.couplings.ordered_role_cauchy import validate_ordered_role_cauchy
 def channel(l, radial):
     return {"neighbor_species": "X", "radial_channel": radial, "l": l,
             "source_family_id": "ordered_role_test"}
+
+
+def test_pre_remediation_artifact_keeps_its_coordinates_without_recompilation(monkeypatch):
+    from ye3t.couplings import ordered_role_cauchy as ordered
+
+    path = Path(__file__).parent / "fixtures/coupling_compatibility/ordered_role_before_split_v2.json"
+    fixture = json.loads(path.read_text())
+    artifact = fixture["artifact"]
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("loading a saved schedule attempted to rebuild its paths or coefficients")
+
+    monkeypatch.setattr(ordered, "ordered_role_cauchy_count", forbidden)
+    monkeypatch.setattr(ordered, "compile_ordered_role_cauchy", forbidden)
+    monkeypatch.setattr(ordered, "_young_table", forbidden)
+    assert validate_ordered_role_cauchy(artifact)
+    actual, _ = evaluate_covariant_cauchy(
+        artifact, np.asarray(fixture["input"]), basis="complex_condon_shortley")
+    expected = np.asarray(fixture["output_real"]) + 1j * np.asarray(fixture["output_imag"])
+    np.testing.assert_allclose(actual, expected, atol=1e-12, rtol=1e-12)
+
+
+def test_new_ordered_young_table_uses_shared_coordinates_without_full_orbit_proof(monkeypatch):
+    from ye3t import global_coupler
+    from ye3t.couplings import ordered_role_cauchy as ordered
+    from ye3t.couplings.young_coset_transport import direct_restricted_young_values
+    from ye3t.representations.young_orthogonal import SPLIT_COORDINATE_CONVENTION
+
+    monkeypatch.setattr(global_coupler, "_build_young_subgroup_specht_coupling",
+                        lambda *args, **kwargs: pytest.fail("production expanded the Young orbit"))
+    table, cosets = ordered._young_table(((1,),) * 3, (2, 1), "balanced")
+    expected, copies = direct_restricted_young_values(((1,),) * 3, (2, 1))
+    assert table["coordinate_convention"] == SPLIT_COORDINATE_CONVENTION
+    assert table["restricted_values"] is expected
+    assert table["gamma_count"] == copies == 2
+    assert cosets is None
 
 
 @pytest.mark.parametrize("parent", ["trivial", "young:2,1", "sign"])

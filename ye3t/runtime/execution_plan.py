@@ -32,7 +32,7 @@ _NATIVE_CUDA_CARRIER_GATED_SCATTER_MIN_WORK_ITEMS = 1 << 18
 _NATIVE_CUDA_SEGMENTED_CARRIER_SCATTER_MIN_NODE_FEATURE_WORK = 1 << 20
 _NATIVE_CPU_CARRIER_CHANNEL_UPDATE_MAX_WORK_ITEMS = 1 << 15
 _NATIVE_CUDA_CARRIER_CHANNEL_UPDATE_MIN_WORK_ITEMS = 0
-_NATIVE_EXECUTION_PLAN_ABI = 40
+_NATIVE_EXECUTION_PLAN_ABI = 42
 
 
 def _enabled(name):
@@ -52,12 +52,9 @@ class _PackedConcatenateAdjoint(torch.autograd.Function):
         widths = tuple(int(width) for width in widths)
         ctx.widths = widths
         ctx.set_materialize_grads(False)
-        outputs = []
-        offset = 0
-        for width in widths:
-            outputs.append(output_adjoint.narrow(-1, offset, width))
-            offset += width
-        return tuple(outputs)
+        # One native partition returns the same disjoint strided views without
+        # a Python dispatch per producer during ordinary force evaluation.
+        return output_adjoint.split(widths, dim=-1)
 
     @staticmethod
     def backward(ctx, *part_tangents):
@@ -90,6 +87,8 @@ class _PackedConcatenate(torch.autograd.Function):
     def backward(ctx, output_adjoint):
         if output_adjoint is None:
             return (None,) + (None,) * len(ctx.widths)
+        if not torch.is_grad_enabled():
+            return (None,) + output_adjoint.split(ctx.widths, dim=-1)
         parts = _PackedConcatenateAdjoint.apply(
             output_adjoint,
             ctx.widths,
@@ -137,6 +136,85 @@ def packed_concatenate(parts):
             )
     widths = tuple(int(part.shape[-1]) for part in parts)
     return _PackedConcatenate.apply(widths, *parts)
+
+
+def _angular_input_gather(values, indices, width):
+    return values.index_select(-1, indices).reshape(-1, width).contiguous()
+
+
+def _angular_input_accumulate(values, indices, expanded):
+    return values.new_zeros(values.shape).index_add(
+        -1, indices, expanded.reshape(*values.shape[:-1], len(indices))
+    )
+
+
+class _GatheredAngular(torch.autograd.Function):
+    """Retain the shared bank across a fixed gather and angular operation."""
+
+    @staticmethod
+    def forward(ctx, values, indices, arguments, width, workspace, output_width):
+        ctx.save_for_backward(values, indices, *arguments)
+        ctx.sizes = width, workspace, output_width
+        return torch.ops.ye3t_runtime.factorized_angular(
+            _angular_input_gather(values, indices, width),
+            *arguments, 1, workspace, output_width
+        )
+
+    @staticmethod
+    def backward(ctx, cotangent):
+        values, indices, *arguments = ctx.saved_tensors
+        result = _GatheredAngularAdjoint.apply(
+            cotangent, values, indices, tuple(arguments), *ctx.sizes
+        )
+        return result, None, None, None, None, None
+
+
+class _GatheredAngularAdjoint(torch.autograd.Function):
+    """Reconstruct expanded chunk inputs only for their first/second adjoint."""
+
+    @staticmethod
+    def forward(ctx, cotangent, values, indices, arguments, width, workspace, output_width):
+        ctx.save_for_backward(cotangent, values, indices, *arguments)
+        ctx.sizes = width, workspace, output_width
+        expanded = torch.ops.ye3t_runtime.factorized_angular_adjoint(
+            cotangent.contiguous(), _angular_input_gather(values, indices, width),
+            *arguments, 1, workspace
+        )
+        return _angular_input_accumulate(values, indices, expanded)
+
+    @staticmethod
+    def backward(ctx, tangent):
+        if torch.is_grad_enabled():
+            raise RuntimeError("Gathered angular execution supports derivatives through order two")
+        cotangent, values, indices, *arguments = ctx.saved_tensors
+        width, workspace, _ = ctx.sizes
+        output_gradient, expanded = torch.ops.ye3t_runtime.factorized_angular_double_backward(
+            _angular_input_gather(tangent, indices, width), cotangent.contiguous(),
+            _angular_input_gather(values, indices, width), *arguments, 1, workspace
+        )
+        return (output_gradient, _angular_input_accumulate(values, indices, expanded),
+                None, None, None, None, None)
+
+
+def _gathered_factorized_angular(values, indices, arguments, width, workspace, output_width):
+    """Compose canonical angular derivatives with a fixed input gather.
+
+    The bound plan supplies every index and coefficient. First and second
+    derivatives reuse the existing native operations; the shared bank and
+    output cotangent remain connected to upstream and downstream parameters.
+    Expanded inputs/adjoints are temporary within each existing route chunk.
+    This adds no persistent state and preserves real/complex conventions.
+
+    The derivative boundary follows the existing repeated-block exact adjoint
+    and PyTorch's custom-function double-backward requirements:
+    https://docs.pytorch.org/tutorials/intermediate/custom_function_double_backward_tutorial.html
+    """
+    if not torch.is_grad_enabled() or not values.requires_grad:
+        return torch.ops.ye3t_runtime.factorized_angular(
+            _angular_input_gather(values, indices, width),
+            *arguments, 1, workspace, output_width
+        )
+    return _GatheredAngular.apply(values, indices, arguments, width, workspace, output_width)
 
 
 @lru_cache(maxsize=1)
@@ -202,7 +280,7 @@ def _load_extension():
     from torch.utils.cpp_extension import load
 
     extension = load(
-        name="ye3t_execution_plan_native_jit_v40",
+        name="ye3t_execution_plan_native_jit_v42",
         sources=[str(path) for path in sources],
         extra_include_paths=[str(sources[0].parent)],
         extra_cflags=["-O3", "-std=c++20"],
@@ -12259,6 +12337,51 @@ def symmetric_power_shared_monomial_batched_adjoint_reference(
     )
 
 
+def _shared_monomial_output_tables(
+    output_offsets,
+    coefficient_terms,
+    coefficient_outputs,
+    coefficient_values,
+    selected_outputs,
+):
+    """Prepare an execution chunk from existing compiler coefficient rows.
+
+    Return the original monomial indices followed by the restricted sparse
+    table. Rows and monomials retain their original order. A caller executing
+    all chunks retains the complete output; this preparation changes storage
+    and work within a chunk. Coefficients remain the compiler's fixed maps.
+    """
+    integers = (output_offsets, coefficient_terms, coefficient_outputs, selected_outputs)
+    if any(not isinstance(value, torch.Tensor) or value.ndim != 1
+           or value.dtype != torch.int64 for value in integers):
+        raise TypeError("Polynomial output selection requires one-dimensional int64 tables")
+    if coefficient_values.ndim != 1 or any(value.device != coefficient_values.device for value in integers):
+        raise ValueError("Polynomial output selection requires colocated one-dimensional tables")
+    if (output_offsets.numel() < 2 or output_offsets[0] != 0
+            or output_offsets[-1] != coefficient_terms.numel()
+            or coefficient_terms.numel() != coefficient_outputs.numel()
+            or coefficient_terms.numel() != coefficient_values.numel()
+            or bool((output_offsets[1:] < output_offsets[:-1]).any())):
+        raise ValueError("Polynomial output selection received inconsistent coefficient offsets")
+    if (selected_outputs.numel() == 0 or selected_outputs[0] < 0
+            or selected_outputs[-1] >= output_offsets.numel()-1
+            or bool((selected_outputs[1:] <= selected_outputs[:-1]).any())):
+        raise ValueError("Selected polynomial outputs must be nonempty, increasing and in range")
+    starts = output_offsets.index_select(0, selected_outputs)
+    ends = output_offsets.index_select(0, selected_outputs+1)
+    lengths = ends-starts
+    entries = torch.cat([torch.arange(begin, end, device=output_offsets.device)
+                         for begin, end in zip(starts.tolist(), ends.tolist())])
+    expected_outputs = torch.repeat_interleave(selected_outputs, lengths)
+    if not torch.equal(coefficient_outputs.index_select(0, entries), expected_outputs):
+        raise ValueError("Polynomial output rows disagree with their coefficient output indices")
+    monomials, terms = torch.unique(coefficient_terms.index_select(0, entries),
+                                   sorted=True, return_inverse=True)
+    offsets = torch.cat((output_offsets.new_zeros(1), lengths.cumsum(0)))
+    outputs = torch.repeat_interleave(torch.arange(len(selected_outputs), device=output_offsets.device), lengths)
+    return (monomials, offsets, terms, outputs, coefficient_values.index_select(0, entries))
+
+
 def symmetric_power_shared_monomial_batched_adjoint(
     output_adjoint,
     input,
@@ -13784,8 +13907,13 @@ def _pack_shared_physical_factorized_nodes(
     modules,
     physical_leaf_offsets,
     physical_input_dimension,
+    materialize=True,
 ):
-    """Pack exact cross-plan common subtrees over one physical source bank."""
+    """Pack exact common subtrees, or inspect their workspace without tables.
+
+    Both modes use the same operator and physical-leaf identities. Inspection
+    returns immutable host metadata and allocates no union coefficient tensors.
+    """
 
     first = modules[0]
     device = first.node_offsets.device
@@ -13848,7 +13976,9 @@ def _pack_shared_physical_factorized_nodes(
         local_to_global = []
         for local_node, dimension in enumerate(dimensions):
             leaf_offset = leaf_offsets[local_node]
-            operator_hash = module.node_operator_hashes[local_node]
+            operator_keys = getattr(module, "node_operator_keys", None)
+            operator = (operator_keys[local_node] if operator_keys is not None
+                        else str(module.node_operator_hashes[local_node]))
             if leaf_offset >= 0:
                 if leaf_offset not in physical_by_local_offset:
                     raise ValueError(
@@ -13858,7 +13988,7 @@ def _pack_shared_physical_factorized_nodes(
                 physical_offset = physical_by_local_offset[leaf_offset]
                 identity = (
                     "physical_leaf",
-                    str(operator_hash),
+                    operator,
                     int(physical_offset),
                 )
                 global_left = -1
@@ -13868,7 +13998,7 @@ def _pack_shared_physical_factorized_nodes(
                 global_right = local_to_global[right_nodes[local_node]]
                 identity = (
                     "merge",
-                    str(operator_hash),
+                    operator,
                     int(global_left),
                     int(global_right),
                 )
@@ -13887,15 +14017,16 @@ def _pack_shared_physical_factorized_nodes(
                 if leaf_offset < 0:
                     start = coefficient_offsets[local_node]
                     stop = coefficient_offsets[local_node + 1]
-                    coefficient_rows.append(
-                        module.coefficient_rows[start:stop]
-                    )
-                    coefficient_columns.append(
-                        module.coefficient_columns[start:stop]
-                    )
-                    coefficient_values.append(
-                        module.coefficient_values[start:stop]
-                    )
+                    if materialize:
+                        coefficient_rows.append(
+                            module.coefficient_rows[start:stop]
+                        )
+                        coefficient_columns.append(
+                            module.coefficient_columns[start:stop]
+                        )
+                        coefficient_values.append(
+                            module.coefficient_values[start:stop]
+                        )
                     node_coefficient_offsets.append(
                         node_coefficient_offsets[-1] + stop - start
                     )
@@ -13908,6 +14039,13 @@ def _pack_shared_physical_factorized_nodes(
         naive_node_count += len(dimensions)
         naive_workspace_dimension += int(module.workspace_dimension)
         local_to_global_by_module.append(tuple(local_to_global))
+
+    if not materialize:
+        return {
+            "node_dimensions": tuple(node_dimensions),
+            "local_to_global_by_module": tuple(local_to_global_by_module),
+            "workspace_dimension": int(workspace_dimension),
+        }
 
     def integer_tensor(values):
         return torch.tensor(
@@ -13950,6 +14088,42 @@ def _pack_shared_physical_factorized_nodes(
         ),
         "workspace_dimension": int(workspace_dimension),
     }
+
+
+def _bounded_physical_factorized_groups(modules, offsets, input_dimension, capacity):
+    """Group by exact shared workspace, keeping each complete required map.
+
+    A group may exceed capacity only for a single larger map already required
+    by the model; other members must fit within that map's shared workspace.
+    Capacity one preserves the explicit individual-map execution limit.
+    """
+    if capacity == 1 or len(modules) < 2:
+        return tuple((index,) for index in range(len(modules)))
+    if sum(module.workspace_dimension for module in modules) <= capacity:
+        return (tuple(range(len(modules))),)
+    metadata = _pack_shared_physical_factorized_nodes(
+        modules, offsets, input_dimension, materialize=False)
+    dimensions = metadata["node_dimensions"]
+    nodes = [frozenset(indices) for indices in metadata["local_to_global_by_module"]]
+    sizes = [sum(dimensions[index] for index in row) for row in nodes]
+    groups, unions, widths, limits = [], [], [], []
+    for index in sorted(range(len(modules)), key=lambda i: (-sizes[i], i)):
+        choices = []
+        for group, present in enumerate(unions):
+            extra = sum(dimensions[node] for node in nodes[index]-present)
+            if widths[group]+extra <= limits[group]:
+                choices.append((extra, group))
+        if choices:
+            extra, group = min(choices)
+            groups[group].append(index)
+            unions[group] = unions[group] | nodes[index]
+            widths[group] += extra
+        else:
+            groups.append([index])
+            unions.append(nodes[index])
+            widths.append(sizes[index])
+            limits.append(max(capacity, sizes[index]))
+    return tuple(tuple(sorted(group)) for group in groups)
 
 
 class _PackedFactorizedAngularPlanGroup(torch.nn.Module):
@@ -14192,7 +14366,7 @@ class _PackedFactorizedAngularPlanGroup(torch.nn.Module):
                     "magnetic_dimension": int(
                         module.magnetic_dimension
                     ),
-                    "plan_hash": str(module.plan_hash),
+                    "plan_hash": (str(module.plan_hash) if hasattr(module, "plan_hash") else None),
                 }
             )
             if shared_nodes is None:
@@ -14325,6 +14499,45 @@ class _PackedFactorizedAngularPlanGroup(torch.nn.Module):
             if shared_nodes is None
             else int(shared_nodes["naive_workspace_dimension"])
         )
+        if self.heterogeneous_roots:
+            if (
+                self.source_dimension <= 0
+                or self.projection_values.numel() % self.source_dimension
+            ):
+                raise ValueError("packed projection rows do not match source copies")
+            input_width = (
+                self.physical_input_dimension
+                if self.physical_input_dimension is not None
+                else sum(self.input_dimensions)
+            )
+            # The complete existing graph is one segment. These indices reuse
+            # every node/root/copy map and contain no coefficients or geometry.
+            metadata = (
+                ("source_offsets", (0, self.source_dimension)),
+                ("input_offsets", (0,)),
+                ("input_dimensions", (input_width,)),
+                ("workspace_offsets", (0,)),
+                ("workspace_dimensions", (self.workspace_dimension,)),
+                ("node_offsets", (0, self.node_offsets.numel())),
+                ("root_offsets", (0, self.root_nodes.numel())),
+                ("projection_offsets", (0,)),
+                ("projection_dimensions", (self.projection_values.numel() // self.source_dimension,)),
+                ("output_offsets", (0, self.output_dimension)),
+            )
+            self._segment_metadata_names = tuple("segment_" + name for name, _ in metadata)
+            self._segment_layout = (
+                self.source_dimension, self.workspace_dimension, self.output_dimension,
+                self.input_dimensions, self.physical_input_dimension,
+            )
+            # An inference warmup must leave ordinary immutable buffers usable
+            # by a later force-loss backward. Module transfers move them too.
+            with torch.inference_mode(False):
+                for name, values in metadata:
+                    self.register_buffer(
+                        "segment_" + name,
+                        torch.tensor(values, dtype=torch.int64, device=self.node_offsets.device),
+                        persistent=False,
+                    )
         self.last_backend = None
 
     def _native_arguments(self):
@@ -14350,7 +14563,25 @@ class _PackedFactorizedAngularPlanGroup(torch.nn.Module):
         return arguments + (self.projection_values,)
 
     def _evaluate_packed_output(self, packed_group):
-        if self.heterogeneous_roots:
+        if self.heterogeneous_roots and packed_group.is_cuda:
+            if self._segment_layout != (
+                self.source_dimension, self.workspace_dimension, self.output_dimension,
+                self.input_dimensions, self.physical_input_dimension,
+            ):
+                raise RuntimeError(
+                    "packed segment source_dimension, workspace_dimension, output_dimension "
+                    "or input dimensions changed after preparation; rebuild the group"
+                )
+            output = torch.ops.ye3t_runtime.factorized_angular_segmented(
+                packed_group,
+                *(getattr(self, name) for name in self._segment_metadata_names),
+                *self._native_arguments(),
+                self.source_dimension,
+                self.source_dimension * self.workspace_dimension,
+                self.output_dimension,
+            )
+            self.last_backend = "native_segmented_heterogeneous_root_factorized_angular"
+        elif self.heterogeneous_roots:
             output = (
                 torch.ops.ye3t_runtime.factorized_angular_heterogeneous(
                     packed_group,

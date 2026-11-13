@@ -173,12 +173,124 @@ def _rank4_two_block_factorized_role_plan(target_L):
     )[1]
 
 
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("dtype", [torch.float64, torch.complex128])
+@pytest.mark.parametrize("heterogeneous", [False, True])
+@pytest.mark.parametrize("share_subtrees", [False, True])
+def test_factorized_repeated_physical_bank_workspace(
+    device, dtype, heterogeneous, share_subtrees, monkeypatch,
+):
+    from ye3t.runtime.execution_plan import _PackedFactorizedAngularPlanGroup
+
+    monkeypatch.setenv("YE3T_ENABLE_EXECUTION_PLAN_JIT", "1")
+    if device == "cuda" and (
+        not torch.cuda.is_available() or not _load_extension().has_cuda()
+    ):
+        pytest.skip("requires native CUDA")
+    plans = tuple(_rank4_homogeneous_factorized_role_plan(target)
+                  for target in ((2, 4) if heterogeneous else (4,)))
+    native = tuple(YE3TFactorizedAngularModule(
+        plan, backend="native", dtype=dtype, device=device) for plan in plans)
+    reference = tuple(YE3TFactorizedAngularModule(
+        plan, backend="reference", dtype=dtype, device=device) for plan in plans)
+    group = _PackedFactorizedAngularPlanGroup(
+        native, tuple(range(len(native))),
+        physical_leaf_offsets=((0, 0, 0, 0),) * len(native),
+        physical_input_dimension=3, heterogeneous_roots=heterogeneous,
+        share_physical_subtrees=share_subtrees,
+    )
+    # One vector supplies four factors. The nine-component L=4 intermediate
+    # is wider than this bank; deduplication cannot bound coupled widths.
+    assert group.workspace_dimension > group.node_offsets.numel() * 3
+    assert group.workspace_dimension <= (
+        group.node_offsets.numel() * 3 + group.coefficient_values.numel())
+    generator = torch.Generator().manual_seed(1190)
+    bank = (torch.randn(2, native[0].source_dimension, 3,
+                        generator=generator, dtype=dtype) / 3).to(device)
+    bank = bank.reshape(2, -1).requires_grad_()
+    actual = group._evaluate_packed_output(bank)
+    factors = bank.reshape(2, native[0].source_dimension, 3)
+    expected = torch.cat(tuple(module((factors,) * 4).reshape(2, -1)
+                               for module in reference), dim=-1)
+    torch.testing.assert_close(actual, expected, rtol=2e-12, atol=2e-13)
+    weights = torch.linspace(.2, .8, actual.shape[-1], device=device,
+                             dtype=torch.float64).requires_grad_()
+    derivatives = []
+    for value in (actual, expected):
+        energy = (value.abs().square() * weights).sum()
+        force = torch.autograd.grad(energy, bank, create_graph=True)[0]
+        loss = .1 * energy + force.abs().square().sum()
+        derivatives.append(torch.autograd.grad(
+            loss, (bank, weights), retain_graph=True))
+    for value, control in zip(*derivatives):
+        torch.testing.assert_close(value, control, rtol=2e-10, atol=2e-12)
+    # Keep the allocation guard effective, including on empty batches.
+    bound = group.node_offsets.numel() * 3 + group.coefficient_values.numel()
+    group.workspace_dimension = int(bound + 1)
+    with pytest.raises(RuntimeError, match="workspace_dimension"):
+        group._evaluate_packed_output(bank[:0])
+
+
 def _rank3_nontrivial_child_tableau_plan():
     return algebraic_young_angular_plan(
         (1, 1, 1), (1, 1, 1), 2,
         target_partition=(2, 1), subgroup_partitions=((2, 1),),
         role_labels=("role_0", "role_1", "role_2"),
     )[1]
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_shared_factorized_workspace_planning_uses_metadata_only(device, monkeypatch):
+    from ye3t.runtime.execution_plan import (
+        _bounded_physical_factorized_groups, _pack_shared_physical_factorized_nodes,
+    )
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("requires CUDA")
+    modules = tuple(YE3TFactorizedAngularModule(_rank3_factorized_role_plan(target),
+        backend="native", dtype=torch.complex128, device=device) for target in (1, 2, 3))
+    offsets = ((0, 3, 8),)*3
+    packed = _pack_shared_physical_factorized_nodes(modules, offsets, 11)
+
+    def unexpected_table(*args, **kwargs):
+        pytest.fail("Workspace inspection materialized a union tensor")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(torch, "tensor", unexpected_table)
+        patch.setattr(torch, "cat", unexpected_table)
+        metadata = _pack_shared_physical_factorized_nodes(modules, offsets, 11, materialize=False)
+        groups = _bounded_physical_factorized_groups(modules, offsets, 11, 1024)
+    assert metadata["node_dimensions"] == tuple(packed["node_dimensions"].cpu().tolist())
+    assert metadata["local_to_global_by_module"] == packed["local_to_global_by_module"]
+    assert metadata["workspace_dimension"] == packed["workspace_dimension"]
+    assert groups == ((0, 1, 2),)
+    assert _bounded_physical_factorized_groups(modules, offsets, 11, 1) == ((0,), (1,), (2,))
+
+    # Identical operators on different physical arguments remain separate.
+    separated = _pack_shared_physical_factorized_nodes(modules+modules,
+        offsets+((11, 14, 19),)*3, 22, materialize=False)
+    assert separated["workspace_dimension"] == 2*metadata["workspace_dimension"]
+    left = set().union(*map(set, separated["local_to_global_by_module"][:3]))
+    right = set().union(*map(set, separated["local_to_global_by_module"][3:]))
+    assert left.isdisjoint(right)
+
+
+@pytest.mark.parametrize("capacity", [1, 32, 1024])
+def test_shared_factorized_grouping_keeps_complete_maps_within_workspace(capacity):
+    from ye3t.runtime.execution_plan import (
+        _bounded_physical_factorized_groups, _pack_shared_physical_factorized_nodes,
+    )
+    # One source supplies all four factors; several outputs share its prefixes.
+    modules = tuple(YE3TFactorizedAngularModule(_rank4_homogeneous_factorized_role_plan(target),
+        backend="native", dtype=torch.float64) for target in (0, 2, 4))
+    offsets = ((0, 0, 0, 0),)*3
+    individual = [_pack_shared_physical_factorized_nodes((module,), (offset,), 3, materialize=False)
+        ["workspace_dimension"] for module, offset in zip(modules, offsets, strict=True)]
+    groups = _bounded_physical_factorized_groups(modules, offsets, 3, capacity)
+    assert sorted(index for group in groups for index in group) == list(range(len(modules)))
+    for indices in groups:
+        selected = _pack_shared_physical_factorized_nodes([modules[index] for index in indices],
+            [offsets[index] for index in indices], 3, materialize=False)
+        assert selected["workspace_dimension"] <= max(capacity, max(individual[index] for index in indices))
 
 
 def test_native_extension_reports_factorized_abi():
@@ -6022,6 +6134,90 @@ def test_native_shared_symmetric_power_batched_adjoint(
     )
 
 
+@pytest.mark.parametrize("complex_values", [False, True])
+def test_native_batched_adjoint_broad_sparse_exponents_and_zero_inputs(complex_values):
+    dtype = torch.complex128 if complex_values else torch.float64
+    active = torch.tensor([[0., 0., .7], [0., -.4, .9], [.3, -.2, .8]], dtype=dtype)
+    if complex_values:
+        active = active*(1+.3j)
+    inputs = torch.zeros(3, 257, dtype=dtype)
+    inputs[:, [0, 17, 256]] = active
+    inputs.requires_grad_()
+    counts = torch.zeros(6, 257, dtype=torch.long)
+    counts[:, [0, 17, 256]] = torch.tensor([
+        [0, 0, 0], [1, 0, 0], [2, 1, 0], [1, 1, 1], [0, 0, 4], [0, 2, 0]])
+    offsets = torch.tensor([0, 3, 6, 9])
+    terms = torch.tensor([0, 1, 3, 1, 2, 4, 3, 4, 5])
+    outputs = torch.arange(3).repeat_interleave(3)
+    coefficients = torch.tensor([.2, -.3, .4, .7, -.2, .3, -.5, .6, .8], dtype=dtype)
+    if complex_values:
+        coefficients = coefficients*(1-.2j)
+    seeds = torch.arange(18, dtype=torch.float64).reshape(2, 3, 3).to(dtype)/19
+    seeds[0, :, 1:] = 0
+    seeds.requires_grad_()
+    arguments = (seeds, inputs, counts, offsets, terms, outputs, coefficients)
+    expected = symmetric_power_shared_monomial_batched_adjoint_reference(*arguments)
+    actual = symmetric_power_shared_monomial_batched_adjoint(*arguments, backend="native")
+    torch.testing.assert_close(actual, expected, rtol=2e-12, atol=2e-12)
+    derivatives = []
+    for value in (expected, actual):
+        first = torch.autograd.grad(value.abs().square().sum(), (inputs, seeds), create_graph=True)
+        second = torch.autograd.grad(sum(item.abs().square().sum() for item in first), (inputs, seeds))
+        derivatives.append((*first, *second))
+    for left, right in zip(*derivatives, strict=True):
+        torch.testing.assert_close(left, right, rtol=2e-10, atol=2e-10)
+
+
+@pytest.mark.parametrize("complex_values", [False, True])
+def test_selected_output_tables_preserve_batched_adjoint_and_second_derivatives(complex_values):
+    from ye3t.runtime.execution_plan import _shared_monomial_output_tables
+
+    dtype = torch.complex128 if complex_values else torch.float64
+    inputs = torch.tensor([[0., .4, -.3], [.2, 0., .7]], dtype=dtype, requires_grad=True)
+    counts = torch.tensor([[0, 0, 0], [1, 0, 0], [1, 1, 1], [0, 0, 2], [2, 1, 0]])
+    offsets = torch.tensor([0, 2, 3, 6])
+    terms = torch.tensor([0, 1, 4, 1, 2, 3])
+    outputs = torch.tensor([0, 0, 1, 2, 2, 2])
+    values = torch.tensor([.2, -.4, .3, .8, -.2, .5], dtype=dtype)
+    if complex_values:
+        values *= 1+.3j
+    selected = torch.tensor([0, 2])
+    reduced = _shared_monomial_output_tables(offsets, terms, outputs, values, selected)
+    assert reduced[0].tolist() == [0, 1, 2, 3]
+    assert torch.equal(reduced[-1], values[[0, 1, 3, 4, 5]])
+    seeds = torch.linspace(-.7, .8, 8).reshape(2, 2, 2).to(dtype).requires_grad_()
+    padded = seeds.new_zeros((2, 2, 3)).index_copy(2, selected, seeds)
+    expected = symmetric_power_shared_monomial_batched_adjoint(
+        padded, inputs, counts, offsets, terms, outputs, values, backend="native")
+    actual = symmetric_power_shared_monomial_batched_adjoint(
+        seeds, inputs, counts.index_select(0, reduced[0]), *reduced[1:], backend="native")
+    torch.testing.assert_close(actual, expected, rtol=2e-12, atol=2e-12)
+    derivatives = []
+    for value in (expected, actual):
+        first = torch.autograd.grad(value.abs().square().sum(), (inputs, seeds), create_graph=True)
+        second = torch.autograd.grad(sum(item.abs().square().sum() for item in first), (inputs, seeds))
+        derivatives.append((*first, *second))
+    for left, right in zip(*derivatives, strict=True):
+        torch.testing.assert_close(left, right, rtol=2e-10, atol=2e-10)
+
+
+@pytest.mark.parametrize("selected", [[], [-1], [3], [1, 1], [2, 0]])
+def test_selected_output_tables_reject_invalid_rows(selected):
+    from ye3t.runtime.execution_plan import _shared_monomial_output_tables
+
+    with pytest.raises(ValueError, match="nonempty, increasing and in range"):
+        _shared_monomial_output_tables(torch.arange(4), torch.arange(3), torch.arange(3),
+                                      torch.ones(3), torch.tensor(selected, dtype=torch.int64))
+
+
+def test_selected_output_tables_check_existing_coefficient_row_bindings():
+    from ye3t.runtime.execution_plan import _shared_monomial_output_tables
+
+    with pytest.raises(ValueError, match="output rows disagree"):
+        _shared_monomial_output_tables(torch.arange(4), torch.arange(3), torch.tensor([0, 2, 1]),
+                                      torch.ones(3), torch.tensor([1]))
+
+
 def test_native_shared_symmetric_power_batched_adjoint_coupled_seed_hessian(
     monkeypatch,
 ):
@@ -6530,6 +6726,75 @@ def test_factorized_angular_empty_batch_preserves_shapes_and_autograd(
     for slot in linear_slots:
         assert slot.grad is not None
         assert slot.grad.shape == slot.shape
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("dtype", [torch.float64, torch.complex128])
+def test_heterogeneous_angular_empty_batch_complete_derivatives(device, dtype):
+    from ye3t.runtime.execution_plan import _PackedFactorizedAngularPlanGroup
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("requires CUDA")
+    modules = tuple(YE3TFactorizedAngularModule(
+        _rank3_factorized_role_plan(target), backend="native", dtype=dtype, device=device)
+        for target in (1, 2))
+    group = _PackedFactorizedAngularPlanGroup(modules, (0, 1),
+        physical_leaf_offsets=((0, 3, 8), (0, 3, 8)),
+        physical_input_dimension=11, heterogeneous_roots=True)
+    x = torch.empty((0, 11*group.source_dimension), dtype=dtype,
+                    device=device, requires_grad=True)
+    # Call the native operator directly; a high-level empty shortcut cannot
+    # conceal a zero-grid launch in forward or either derivative operator.
+    y = group._evaluate_packed_output(x)
+    assert y.shape == (0, group.output_dimension)
+    seed = torch.empty_like(y, requires_grad=True)
+    first = torch.autograd.grad(y, x, seed, create_graph=True)[0]
+    second = torch.autograd.grad(first.real.sum(), (x, seed))
+    for actual, expected in zip(second, (x, seed)):
+        assert actual.shape == expected.shape
+        assert actual.dtype == expected.dtype and actual.device == expected.device
+        assert actual.numel() == 0
+    arguments = (*group._native_arguments(), group.source_dimension, group.workspace_dimension)
+    if device == "cpu":
+        # Saved native workspaces are a CUDA-only capability. CPU forward,
+        # adjoint and double backward above use the existing recomputed path.
+        with pytest.raises(NotImplementedError, match="CPU"):
+            torch.ops.ye3t_runtime.factorized_angular_heterogeneous_adjoint_with_workspace(
+                seed.detach(), x.detach(), *arguments)
+        return
+    direct, workspace, workspace_adjoint = (
+        torch.ops.ye3t_runtime.factorized_angular_heterogeneous_adjoint_with_workspace(
+            seed.detach(), x.detach(), *arguments))
+    cached = torch.ops.ye3t_runtime.factorized_angular_heterogeneous_double_backward_from_workspace(
+        torch.empty_like(x), seed.detach(), workspace, workspace_adjoint, *arguments)
+    assert direct.shape == x.shape
+    assert workspace.shape == (0, group.workspace_dimension)
+    assert workspace_adjoint.shape == workspace.shape
+    for actual, expected in zip(cached, (seed, x)):
+        assert actual.shape == expected.shape and actual.numel() == 0
+
+
+@pytest.mark.parametrize("device,policy",[("cpu","serial"),("cuda","serial"),("cuda","auto"),("cuda","warp")])
+@pytest.mark.parametrize("dtype",[torch.float64,torch.complex128])
+def test_segmented_angular_empty_batch_complete_derivatives(device,policy,dtype,monkeypatch):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("requires CUDA")
+    monkeypatch.setenv("YE3T_FACTORIZED_ANGULAR_SEGMENTED_CUDA_POLICY",policy)
+    modules = tuple(YE3TFactorizedAngularModule(plan,backend="native",dtype=dtype,device=device)
+                    for plan in (_rank3_factorized_plan(),_rank3_factorized_role_plan()))
+    group = _YE3TSegmentedFactorizedAngularModuleGroup(modules)
+    assert modules[0].source_dimension != modules[1].source_dimension
+    x = torch.empty((0,group.input_dimension),dtype=dtype,device=device,requires_grad=True)
+    # Exercise each registered native derivative directly, so a Python empty
+    # shortcut cannot conceal a zero-sized CUDA launch.
+    y = torch.ops.ye3t_runtime.factorized_angular_segmented(x,*group._native_arguments())
+    assert y.shape == (0,group.output_dimension)
+    seed = torch.empty_like(y,requires_grad=True)
+    first = torch.autograd.grad(y,x,seed,create_graph=True)[0]
+    second = torch.autograd.grad(first.real.sum(),(x,seed))
+    for actual,expected in zip((first,*second),(x,x,seed),strict=True):
+        assert actual.shape == expected.shape and actual.numel() == 0
+        assert actual.dtype == expected.dtype and actual.device == expected.device
 
 
 def test_native_factorized_linear_readout_opcheck_and_compile(monkeypatch):

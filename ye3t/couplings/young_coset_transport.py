@@ -16,6 +16,10 @@ arXiv:math/0503040.
 from collections import Counter
 from functools import lru_cache
 
+from ye3t.representations.young_orthogonal import (
+    direct_restricted_young_values, _direct_restricted_young_values_cached,
+)
+
 
 def canonical_factor_coset(factor_types, canonical_types):
     """Group each factor type in canonical order, preserving order within a block."""
@@ -27,54 +31,6 @@ def canonical_factor_coset(factor_types, canonical_types):
     return tuple(index for factor_type in dict.fromkeys(canonical_types)
                  for index, candidate in enumerate(factor_types)
                  if candidate == factor_type)
-
-
-def direct_restricted_young_values(child_partitions, target_partition):
-    """Compile the identity-coset map from exact subgroup-generator constraints.
-
-    This avoids the orbit-sized Young coefficient matrix. The returned gamma
-    order and signs follow the existing subduction-graph pivot convention.
-    """
-    import math
-    import sympy as sym
-
-    from ye3t.representations.generalized_irreps import Partition
-    from ye3t.representations.young_orthogonal import (
-        _constructive_subduction_graph_restricted_intertwiner_basis,
-        reduced_multiplicity_inner_product,
-        standard_tableaux,
-        young_nary_induced_multiplicity_by_character,
-    )
-
-    children = tuple(tuple(int(value) for value in row) for row in child_partitions)
-    target = tuple(int(value) for value in target_partition)
-    rank = sum(sum(row) for row in children)
-    orbit_count = math.factorial(rank)
-    for row in children:
-        orbit_count //= math.factorial(sum(row))
-    multiplicity = int(young_nary_induced_multiplicity_by_character(
-        tuple(Partition(row) for row in children), Partition(target)
-    ))
-    blocks = _constructive_subduction_graph_restricted_intertwiner_basis(
-        children, target, expected_multiplicity=multiplicity,
-    )
-    target_dim = len(standard_tableaux(target))
-    child_dim = int(blocks[0].rows) if blocks else 0
-    if not blocks or any(block.shape != (child_dim, target_dim) for block in blocks):
-        raise ArithmeticError("Direct Young subduction has inconsistent multiplicity axes.")
-    no_generators = all(sum(row) == 1 for row in children)
-    reduced = reduced_multiplicity_inner_product(blocks)
-    expected_gram = (sym.eye(multiplicity) / target_dim
-                     if no_generators else sym.eye(multiplicity))
-    if sym.simplify(reduced.gram_matrix - expected_gram) != sym.zeros(
-        multiplicity, multiplicity
-    ):
-        raise ArithmeticError("Direct Young reduced multiplicity Gram is invalid.")
-    scale = math.sqrt(target_dim / orbit_count) if no_generators else 1.0 / math.sqrt(orbit_count)
-    values = tuple(tuple(float(block[row, col] * scale)
-                         for block in blocks for col in range(target_dim))
-                   for row in range(child_dim))
-    return values, multiplicity
 
 
 def restricted_young_values(matrix, canonical_rows, canonical_columns,
@@ -132,15 +88,15 @@ def adjacent_generator_columns(target_partition):
         matrix = adjacent_transposition_representation_matrix(
             partition, generator_index
         )
-        diagonal, off_diagonal, partner = [], [], []
-        for column in range(width):
-            others = tuple(row for row in range(width)
-                           if row != column and matrix[row, column] != 0)
-            if len(others) > 1:
-                raise ArithmeticError("Young adjacent generator is not two-sparse.")
-            diagonal.append(float(matrix[column, column]))
-            off_diagonal.append(float(matrix[others[0], column]) if others else 0.0)
-            partner.append(int(others[0]) if others else column)
+        diagonal = [0.0] * width
+        off_diagonal = [0.0] * width
+        partner = list(range(width))
+        for (row, column), value in matrix.todok().items():
+            if row == column:
+                diagonal[column] = float(value)
+            else:
+                off_diagonal[column] = float(value)
+                partner[column] = row
         plans.append((tuple(diagonal), tuple(off_diagonal), tuple(partner)))
     return tuple(plans)
 

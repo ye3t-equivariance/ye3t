@@ -1,8 +1,27 @@
 """Small exact scalar kernels for runtime-free algebraic coefficients."""
 
+from collections import Counter
 from fractions import Fraction
 from functools import lru_cache
 from math import gcd
+
+
+def _radical_component_payload(component):
+    """Shared exact real-scalar record used by persistent coupling maps."""
+    return tuple({"radicand_numerator": int(r.numerator), "radicand_denominator": int(r.denominator),
+                  "coefficient_numerator": int(c.numerator), "coefficient_denominator": int(c.denominator)}
+                 for r, c in component.terms.items())
+
+
+def _radical_component_from_payload(payload):
+    terms = {}
+    for item in payload:
+        radicand = Fraction(int(item["radicand_numerator"]), int(item["radicand_denominator"]))
+        coefficient = Fraction(int(item["coefficient_numerator"]), int(item["coefficient_denominator"]))
+        if radicand in terms:
+            raise ValueError("Duplicate radical in an exact scalar record")
+        terms[radicand] = coefficient
+    return ExactRadical(terms)
 
 
 def _as_fraction(value):
@@ -45,6 +64,7 @@ def _squarefree_factor(value):
     return int(square), int(rest)
 
 
+@lru_cache(maxsize=4096)
 def _normalize_radicand(radicand):
     radicand = _as_fraction(radicand)
     if radicand < 0:
@@ -74,10 +94,14 @@ class ExactRadical:
             if coefficient == 0:
                 continue
             scale, normalized_radicand = _normalize_radicand(radicand)
-            coefficient *= scale
+            if scale != 1:
+                coefficient *= scale
             if coefficient == 0:
                 continue
-            cleaned[normalized_radicand] = cleaned.get(normalized_radicand, Fraction(0)) + coefficient
+            if normalized_radicand in cleaned:
+                cleaned[normalized_radicand] += coefficient
+            else:
+                cleaned[normalized_radicand] = coefficient
         self.terms = {
             radicand: coefficient
             for radicand, coefficient in sorted(cleaned.items(), key=lambda item: (item[0].numerator, item[0].denominator))
@@ -299,6 +323,59 @@ def exact_scalar(value):
         if exponent == 1:
             return exact_scalar(base)
     raise TypeError(f"Unsupported exact scalar value: {value!r}")
+
+
+def _exact_matrix_product(left, right):
+    """Exact sparse multiplication with bounded reuse of repeated radicals.
+
+    Shared by local metric construction and angular raising/lowering checks.
+    Unsupported scalar domains use the original symbolic matrix product.
+    """
+    from ye3t._optional_sympy import sp
+
+    if left.cols != right.rows:
+        raise ValueError("Exact product matrix dimensions do not align")
+    # Iterate the existing sparse DomainMatrix storage. todok() first copies
+    # every nonzero with a new (row, column) key; angular operators can have
+    # millions of entries although only a few output columns are requested.
+    index, radicals = {}, []
+    rows, columns = {}, {}
+    try:
+        for matrix, target, transpose in ((left, rows, False), (right, columns, True)):
+            sparse = matrix._rep.to_sparse()
+            convert = sparse.domain.to_sympy
+            for i, row in sparse.rep.items():
+                for j, item in row.items():
+                    value = convert(item)
+                    if value not in index:
+                        if value.has(sp.Float):
+                            raise TypeError("Preserve the original floating-point domain")
+                        index[value] = len(radicals)
+                        radicals.append(exact_scalar(value))
+                    outer, inner = (j, i) if transpose else (i, j)
+                    target.setdefault(outer, {})[inner] = index[value]
+    except (TypeError, ValueError):
+        return (left*right).applyfunc(sp.simplify)
+
+    @lru_cache(maxsize=16384)
+    def product(a, b):
+        return radicals[a]*radicals[b]
+
+    @lru_cache(maxsize=4096)
+    def dot(terms):
+        result = {}
+        for (a, b), count in terms:
+            for radical, value in product(a, b)._canonical_terms().items():
+                result[radical] = result.get(radical, 0)+count*value
+        return ExactRadical._from_normalized_terms(result)._sympy_()
+
+    result = (sp.SparseMatrix(left.rows, right.cols, {})
+              if left.rows*right.cols > 65536 else sp.zeros(left.rows, right.cols))
+    for i, row in rows.items():
+        for j, column in columns.items():
+            terms = Counter((a, column[k]) for k, a in row.items() if k in column)
+            result[i, j] = dot(tuple(sorted(terms.items())))
+    return result
 
 
 __all__ = ["ExactRadical", "exact_scalar"]

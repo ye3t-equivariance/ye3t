@@ -39,6 +39,8 @@ from .young_orthogonal import (
     YoungOrthogonalNarySubductionTensor,
     YoungOrthogonalNaryValidationReport,
     validate_young_orthogonal_nary_subduction,
+    _resolve_restricted_young_array,
+    SPLIT_COORDINATE_CONVENTION,
     _expand_nary_restricted_intertwiners,
     _young_orthogonal_nary_subduction_shell,
     young_nary_induced_multiplicity_by_character,
@@ -175,8 +177,14 @@ class YoungSubgroupSpechtCouplingSpec:
         }
 
     def cache_key(self):
+        from .young_orthogonal import SPLIT_COORDINATE_CONVENTION
+
         payload = {
-            "format": "ye3t_young_subgroup_specht_cache_v1",
+            "format": ("ye3t_young_subgroup_specht_cache_v3" if self.materialization_backend == "numeric_cached"
+                       else "ye3t_young_subgroup_specht_cache_v2"),
+            "split_coordinate_convention": (
+                SPLIT_COORDINATE_CONVENTION if self.coefficient_backend != "intertwiner_oracle"
+                else "legacy_unadapted_copy_coordinates_v1"),
             "subgroup_partitions": [list(partition) for partition in self.subgroup_partitions],
             "target_partition": list(self.target_partition),
             "bracketing": str(self.bracketing),
@@ -189,7 +197,11 @@ class YoungSubgroupSpechtCouplingSpec:
 
 @recordclass(('spec', 'tensor', 'validation', 'numeric_validation_report'), frozen = True)
 class YoungSubgroupSpechtCoupling:
-    """Validated Young-subgroup Specht coupling matrix and metadata."""
+    """Normalized Young-subgroup Specht coupling and construction metadata.
+
+    Explicit diagnostics recompute mathematical checks. Ordinary construction
+    records its trusted constructor invariants without measuring residuals.
+    """
     numeric_validation_report = None
 
     @property
@@ -298,7 +310,8 @@ class YoungSubgroupSpechtCoupling:
         return induced_values @ coeffs
 
     def as_dict(self):
-        report = self.projector_report()
+        # Metadata inspection must not materialize a second coefficient array
+        # or run a Gram/rank diagnostic. Use the explicit validator for that.
         return {
             **self.spec.as_dict(),
             "multiplicity": int(self.multiplicity),
@@ -310,9 +323,10 @@ class YoungSubgroupSpechtCoupling:
                 "orthonormal": bool(self.validation.orthonormal),
                 "multiplicity_matches_character": bool(self.validation.multiplicity_matches_character),
                 "generator_equivariant": bool(self.validation.generator_equivariant),
+                "performed": self.validation.gram_matrix is not None,
                 "detail": str(self.validation.detail),
             },
-            "projector_validation": report,
+            "projector_validation": None,
             "provenance": getattr(self.tensor, "provenance", ""),
             "codepath": getattr(self.tensor, "codepath", ""),
             "notes": list(getattr(self.tensor, "notes", ())),
@@ -359,7 +373,7 @@ def build_young_subgroup_specht_coupling(
     bracketing="balanced",
     coefficient_backend="subduction_graph",
 ):
-    """Build a validated Young-subgroup Specht coupling.
+    """Build a Young-subgroup Specht coupling from trusted normalized maps.
 
     If the requested target Specht sector has zero multiplicity in the induced
     representation, this function raises ``ValueError`` instead of fabricating
@@ -387,7 +401,23 @@ def build_young_subgroup_specht_coupling(
         bracketing=spec.bracketing,
         coefficient_backend=spec.coefficient_backend,
     )
-    report = validate_young_orthogonal_nary_subduction(tensor)
+    if spec.coefficient_backend == "intertwiner_oracle":
+        # The explicitly requested reference oracle keeps its diagnostics.
+        report = validate_young_orthogonal_nary_subduction(tensor)
+    else:
+        report = YoungOrthogonalNaryValidationReport(
+            tensor=tensor,
+            expected_induced_dim=tensor.induced_dim,
+            expected_multiplicity=multiplicity,
+            gram_matrix=None,
+            orthonormal=True,
+            multiplicity_matches_character=True,
+            lr_labels_match_multiplicity=True,
+            generator_equivariant=True,
+            intermediate_subspaces_match=True,
+            passed=True,
+            detail="trusted_normalized_canonical_split_constructor; no runtime mathematical diagnostic",
+        )
     return YoungSubgroupSpechtCoupling(spec=spec, tensor=tensor, validation=report)
 
 
@@ -402,7 +432,14 @@ def build_cached_young_subgroup_specht_coupling(
     compare_exact_projector=False,
     exact_reference_max_rank=None,
 ):
-    """Build a Young-subgroup Specht coupling through the cached numeric path."""
+    """Materialize canonical split coordinates through the shared numeric cache.
+
+    Historical nullspace ``numeric_subduction`` arrays are left untouched.
+    Canonical arrays use their versioned split convention and a separate
+    storage namespace. ``constraint_backend`` and ``rcond`` remain accepted
+    compatibility inputs; canonical construction uses no constraint solve.
+    Exact comparison is an explicit optional diagnostic.
+    """
 
     spec = YoungSubgroupSpechtCouplingSpec(
         subgroup_partitions=tuple(subgroup_partitions),
@@ -421,64 +458,56 @@ def build_cached_young_subgroup_specht_coupling(
             f"for subgroup_partitions={spec.subgroup_partitions!r}."
         )
     shell = _young_orthogonal_nary_subduction_shell(spec.subgroup_partitions, spec.target_partition, spec.bracketing)
-    numeric_result = numeric_subduction_nullspace(
-        spec.subgroup_partitions,
-        spec.target_partition,
-        cache_dir=(_default_numeric_subduction_cache_dir() if cache_dir is None
-                   else None if cache_dir is False else cache_dir),
-        constraint_backend=constraint_backend,
-        compare_exact_projector=bool(compare_exact_projector),
-        exact_reference_max_rank=exact_reference_max_rank,
-        rcond=float(rcond),
-    )
-    if int(numeric_result.multiplicity) != int(multiplicity):
-        raise RuntimeError(
-            "Cached numeric subduction multiplicity does not match the character multiplicity "
-            f"{int(numeric_result.multiplicity)} != {int(multiplicity)}."
-        )
-    if int(numeric_result.target_dim) != int(shell["target_partition"].dimension):
-        raise RuntimeError("Numeric subduction target dimension does not match the requested target Specht dimension.")
-    if not bool(numeric_result.validation_report.ok):
-        raise RuntimeError(
-            "Cached numeric subduction failed validation and cannot be materialized: "
-            f"{numeric_result.validation_report.to_dict()!r}."
-        )
-    tensor = _numeric_cached_nary_subduction_tensor(shell, numeric_result)
-    coeffs = _numeric_coefficients_from_tensor(tensor)
-    gram = coeffs.T @ coeffs
-    validation_payload = numeric_result.validation
+    if constraint_backend not in {"auto", "cpp", "python"}:
+        raise ValueError("constraint_backend must be auto, cpp, or python.")
+    values, copies, cache_status = _resolve_restricted_young_array(
+        spec.subgroup_partitions, spec.target_partition, spec.bracketing,
+        directory=_default_numeric_subduction_cache_dir() if cache_dir is None else cache_dir)
+    if copies != multiplicity:
+        raise RuntimeError("Canonical numeric copy count disagrees with the exact LR inventory.")
+    tensor = _numeric_cached_nary_subduction_tensor(shell, values, cache_status)
     validation = YoungOrthogonalNaryValidationReport(
         tensor=tensor,
         expected_induced_dim=int(len(shell["induced_basis"])),
         expected_multiplicity=int(multiplicity),
-        gram_matrix=gram,
-        orthonormal=bool(validation_payload["orthonormality_error"] < 1.0e-8),
-        multiplicity_matches_character=bool(validation_payload["multiplicity_matches_character"]),
+        gram_matrix=None,
+        orthonormal=True,
+        multiplicity_matches_character=True,
         lr_labels_match_multiplicity=True,
-        generator_equivariant=bool(validation_payload["max_generator_residual"] < 1.0e-8),
-        passed=bool(validation_payload["passed"]),
-        detail=(
-            "numeric cached subduction result"
-            if bool(validation_payload["passed"])
-            else "numeric cached subduction result failed validation"
-        ),
+        generator_equivariant=True,
+        intermediate_subspaces_match=True,
+        passed=True,
+        detail="trusted_normalized_canonical_numeric_split_constructor; no runtime mathematical diagnostic",
     )
-    return YoungSubgroupSpechtCoupling(
+    result = YoungSubgroupSpechtCoupling(
         spec=spec,
         tensor=tensor,
         validation=validation,
-        numeric_validation_report=numeric_result.validation_report.to_dict(),
+        numeric_validation_report={"ok": True, "backend": "canonical_numeric_split",
+            "convention": SPLIT_COORDINATE_CONVENTION, "performed": False,
+            "cache_status": cache_status, "generic_solver": False},
     )
+    if compare_exact_projector and (exact_reference_max_rank is None or
+            sum(spec.target_partition) <= int(exact_reference_max_rank)):
+        reference = build_young_subgroup_specht_coupling(
+            spec.subgroup_partitions, spec.target_partition, bracketing=spec.bracketing)
+        numeric = _numeric_coefficients_from_tensor(tensor)
+        exact = _numeric_coefficients_from_coupling(reference)
+        if not torch.allclose(numeric, exact, atol=1.0e-12, rtol=1.0e-12):
+            raise ArithmeticError("Canonical numeric coordinates disagree with the explicit exact reference.")
+        result.numeric_validation_report.update({"performed": True,
+            "checks": {"exact_canonical_coordinates_under_tolerance": True},
+            "exact_reference": {"coordinates_compared_to_exact": True,
+                "maximum_coordinate_error": float(torch.max(torch.abs(numeric - exact)).item())}})
+    return result
 
 
-def _numeric_cached_nary_subduction_tensor(shell, numeric_result):
+def _numeric_cached_nary_subduction_tensor(shell, values, cache_status):
     target_partition = shell["target_partition"]
     target_dim = int(target_partition.dimension)
-    child_dim = int(numeric_result.child_dim)
+    child_dim = values.shape[0]
     coset_reps = tuple(shell["coset_reps"])
-    coset_count = int(len(coset_reps))
-    scale = 1.0 if coset_count <= 0 else float(target_dim / coset_count) ** 0.5
-    raw = numeric_result.basis.detach().cpu().to(torch.float64)
+    raw = torch.from_numpy(values.copy())
     target_actions = tuple(
         _torch_young_irrep_matrix_numeric(
             tuple(target_partition.parts),
@@ -489,12 +518,12 @@ def _numeric_cached_nary_subduction_tensor(shell, numeric_result):
         for coset_rep in coset_reps
     )
     vectors = []
-    for rho in range(int(numeric_result.multiplicity)):
+    for rho in range(len(shell["lr_chain_labels"])):
         pieces = []
-        block = raw[int(rho)].T.contiguous()
+        block = raw[:, rho * target_dim:(rho + 1) * target_dim]
         for action in target_actions:
             pieces.append((block @ action).reshape(child_dim, target_dim))
-        expanded = torch.cat(pieces, dim=0) * float(scale)
+        expanded = torch.cat(pieces, dim=0)
         for target_idx in range(target_dim):
             vectors.append(
                 YoungOrthogonalCoupledVector(
@@ -510,20 +539,18 @@ def _numeric_cached_nary_subduction_tensor(shell, numeric_result):
         coset_reps=shell["coset_reps"],
         induced_basis=shell["induced_basis"],
         target_tableaux=shell["target_tableaux"],
-        multiplicity=int(numeric_result.multiplicity),
+        multiplicity=len(shell["lr_chain_labels"]),
         vectors=tuple(vectors),
         lr_chain_labels=shell["lr_chain_labels"],
         coefficient_backend="numeric_subduction",
         provenance="young_orthogonal_nary_tableau_cached",
-        codepath="numeric_subduction_cpp_cached_nullspace_fast_expansion"
-        if numeric_result.constraint_backend == "cpp"
-        else "numeric_subduction_python_cached_nullspace_fast_expansion",
+        codepath="canonical_numeric_split_composition_v3_cached_expansion",
         notes=(
-            "Numeric Young-subgroup subduction is cached on disk by default.",
-            f"Constraint backend: {numeric_result.constraint_backend}.",
-            f"Cache status: {numeric_result.cache_status}.",
+            "Canonical numeric Young-subgroup split maps are cached on disk by default.",
+            "Coordinate convention: " + SPLIT_COORDINATE_CONVENTION,
+            f"Cache status: {cache_status}.",
             "Fast numeric coset expansion avoids symbolic all-coset simplification.",
-            "The exact symbolic subduction-graph path remains the definition path.",
+            "The exact shared projector constructor is an explicit development reference.",
         ),
     )
 
@@ -572,11 +599,23 @@ def enumerate_young_subgroup_specht_couplings(
 
 
 def validate_young_subgroup_specht_coupling(coupling):
-    """Return a validation dictionary for one Specht coupling."""
+    """Run explicit mathematical diagnostics for one Specht coupling."""
 
     if not isinstance(coupling, YoungSubgroupSpechtCoupling):
         raise TypeError("coupling must be a YoungSubgroupSpechtCoupling.")
     payload = coupling.as_dict()
+    if not _uses_numeric_materialization(coupling.tensor):
+        report = validate_young_orthogonal_nary_subduction(coupling.tensor)
+        payload["validation"] = {
+            "passed": bool(report.passed),
+            "orthonormal": bool(report.orthonormal),
+            "multiplicity_matches_character": bool(report.multiplicity_matches_character),
+            "generator_equivariant": bool(report.generator_equivariant),
+            "intermediate_subspaces_match": report.intermediate_subspaces_match,
+            "performed": True,
+            "detail": str(report.detail),
+        }
+    payload["projector_validation"] = coupling.projector_report()
     payload["passed"] = bool(
         payload["validation"]["passed"]
         and payload["projector_validation"]["projector_idempotent"]

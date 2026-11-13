@@ -7922,7 +7922,7 @@ TORCH_LIBRARY_IMPL(ye3t_runtime, CPU, library) {
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
-  module.def("core_abi_version", []() { return 40; });
+  module.def("core_abi_version", []() { return 42; });
   module.def("has_cpu", []() { return true; });
   module.def("has_cuda", []() {
 #ifdef YE3T_HAS_CUDA

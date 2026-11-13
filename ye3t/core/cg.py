@@ -165,6 +165,34 @@ def cg_exact(j1, m1, j2, m2, j3, m3):
     return cg_exact_half_integer(*(_half_integer_fraction(value) for value in values))
 
 
+@lru_cache(maxsize=512)
+def _cg_table_exact(j1, j2, j3):
+    """Shared immutable nonzero CG table in the normalized Condon--Shortley basis.
+
+    Entries are (m1, m2, M, exact coefficient). Integer and half-integer
+    carriers use the same constructor. Selection uses exact zeros; numerical
+    consumers convert coefficients only when binding their execution arrays.
+    The table depends exclusively on the three representation labels.
+    """
+    j1, j2, j3 = (_half_integer_fraction(j) for j in (j1, j2, j3))
+    if min(j1, j2, j3) < 0:
+        raise ValueError("Angular momenta must be nonnegative")
+    if not _is_integral(j1 + j2 + j3) or not abs(j1-j2) <= j3 <= j1+j2:
+        return ()
+    entries = []
+    for i in range(int(2*j1)+1):
+        m1 = -j1+i
+        for k in range(int(2*j2)+1):
+            m2 = -j2+k
+            M = m1+m2
+            if abs(M) > j3:
+                continue
+            value = cg_exact(j1, m1, j2, m2, j3, M)
+            if value:
+                entries.append((m1, m2, M, value))
+    return tuple(entries)
+
+
 @lru_cache(maxsize=None)
 def cg_numeric_integer(j1, m1, j2, m2, j3, m3):
     """Return integer-angular-momentum CG coefficients as a Python complex."""

@@ -14,10 +14,10 @@ import uuid
 
 import torch
 from ye3t._record import recordclass
+from ye3t.cache.artifacts import default_artifact_cache_directory
 from ye3t.runtime.triton_config import configure_triton_c_compiler
 
-_cache_base = os.environ.get("XDG_CACHE_HOME") or tempfile.gettempdir()
-_default_runtime_root = Path(_cache_base) / "ye3t" / "triton_cg"
+_default_runtime_root = default_artifact_cache_directory() / "runtime"
 _runtime_root = Path(
     os.environ.get("YE3T_RUNTIME_DIR")
     or os.environ.get("GNE3_RUNTIME_DIR")

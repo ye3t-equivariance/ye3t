@@ -10,6 +10,87 @@ import pytest
 from ye3t.cache.artifacts import YE3TArtifactStore, ArtifactCacheValidationError
 
 
+@pytest.mark.parametrize("budget", [2048, 1024 * 1024])
+def test_serialized_cache_is_bounded_isolated_and_rechecks_large_bytes(tmp_path, monkeypatch, budget):
+    from collections import OrderedDict
+    from ye3t.cache import artifacts
+
+    monkeypatch.setattr(artifacts, "_READ_CACHE", OrderedDict())
+    monkeypatch.setattr(artifacts, "_READ_CACHE_BYTES", 0)
+    monkeypatch.setattr(artifacts, "_READ_CACHE_LIMIT", budget)
+    kwargs = dict(artifact_type="serialized", artifact_schema="v1", request={},
+                  builder=lambda: {"rows": [[1, 2, 3]] * 3000},
+                  certificate={"passed": True, "checks": {"valid": True}},
+                  required_certificate_checks=("valid",))
+    store = YE3TArtifactStore(tmp_path, mode="auto")
+    built = store.resolve(**kwargs)
+    path = Path(built["path"])
+    built["payload"]["rows"][0][0] = 42
+    entry, = artifacts._READ_CACHE.values()
+    assert entry[1] is None if budget == 2048 else isinstance(entry[1], bytes)
+    assert artifacts._READ_CACHE_BYTES <= budget
+    original = artifacts._hash_canonical_json
+    hashes = []
+
+    def hashed(value):
+        hashes.append(1)
+        return original(value)
+
+    monkeypatch.setattr(artifacts, "_hash_canonical_json", hashed)
+    loaded = store.resolve(**kwargs)
+    assert hashes == []
+    assert loaded["payload"]["rows"][0][0] == 1
+    loaded["payload"]["rows"][0][0] = 7
+    assert loaded["payload"]["rows"][1][0] == 1
+    assert store.resolve(**kwargs)["payload"]["rows"][0][0] == 1
+
+    # Full callbacks run on fresh values and cannot poison subsequent reads.
+    visits = []
+    def validate(payload):
+        visits.append(payload["rows"][0][0])
+        payload["rows"][0][0] = 99
+    full = YE3TArtifactStore(tmp_path, mode="read_only", verify="full")
+    assert full.resolve(**kwargs, validator=validate)["payload"]["rows"][0][0] == 99
+    assert full.resolve(**kwargs, validator=validate)["payload"]["rows"][0][0] == 99
+    assert visits == [1, 1]
+    assert store.resolve(**kwargs)["payload"]["rows"][0][0] == 1
+
+    # Even with an unchanged stat, large-entry reuse checks the actual reread
+    # bytes. Simulate a change between stat and read rather than weakening stat.
+    if budget == 2048:
+        read = Path.read_bytes
+        monkeypatch.setattr(Path, "read_bytes", lambda p: read(p).replace(b"[1,2,3]", b"[9,2,3]"))
+        with pytest.raises(ArtifactCacheValidationError, match="hash mismatch"):
+            YE3TArtifactStore(tmp_path, mode="read_only").resolve(**kwargs)
+        assert hashes
+        monkeypatch.setattr(Path, "read_bytes", read)
+
+    # Same-size rewrite plus restored mtime must invalidate both cache modes.
+    stat = path.stat()
+    path.write_bytes(path.read_bytes().replace(b"[1,2,3]", b"[9,2,3]"))
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    with pytest.raises(ArtifactCacheValidationError, match="hash mismatch"):
+        YE3TArtifactStore(tmp_path, mode="read_only").resolve(**kwargs)
+
+
+def test_serialized_cache_evicts_snapshots_and_large_verification_records(tmp_path, monkeypatch):
+    from collections import OrderedDict
+    from ye3t.cache import artifacts
+
+    monkeypatch.setattr(artifacts, "_READ_CACHE", OrderedDict())
+    monkeypatch.setattr(artifacts, "_READ_CACHE_BYTES", 0)
+    monkeypatch.setattr(artifacts, "_READ_CACHE_LIMIT", 4096)
+    store = YE3TArtifactStore(tmp_path)
+    for index in range(12):
+        result = store.resolve("bounded", "v1", {"index": index},
+            builder=lambda: {"rows": [[1, 2, 3]] * (1000 if index % 2 else 1)},
+            certificate={"passed": True, "checks": {}})
+        assert result["payload"]["rows"][0] == [1, 2, 3]
+        assert artifacts._READ_CACHE_BYTES == sum(entry[2] for entry in artifacts._READ_CACHE.values())
+        assert artifacts._READ_CACHE_BYTES <= 4096
+        assert len(artifacts._READ_CACHE) <= 4
+
+
 def test_diagnostic_history_is_bounded(tmp_path):
     from ye3t.cache.artifacts import artifact_cache_events
     artifact_cache_events(clear=True)
@@ -24,11 +105,14 @@ def test_diagnostic_history_is_bounded(tmp_path):
 
 
 def test_concurrent_catalogue_publication_has_private_temporary_files(tmp_path):
+    import hashlib
     from concurrent.futures import ThreadPoolExecutor
     from ye3t.couplings.tagged_cauchy_carriers import _write_compiled_cache
     path = tmp_path / "catalogue.json"
     def write(index):
-        _write_compiled_cache(path, {"values": [index] * 1000})
+        payload = {"values": [index] * 1000}
+        receipt = _write_compiled_cache(path, payload, with_fingerprint=True)
+        assert receipt == hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
     with ThreadPoolExecutor(max_workers=4) as pool:
         list(pool.map(write, range(12)))
     payload = json.loads(path.read_text())

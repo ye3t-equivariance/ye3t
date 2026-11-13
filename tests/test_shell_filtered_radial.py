@@ -17,6 +17,41 @@ SHELLS = {"kind": "softmax_gaussian", "centers": [0.25, 0.75], "width": 0.25}
 FAMILY = "shell_filtered_chebyshev_c2_v1"
 
 
+@pytest.mark.parametrize("scope", ["joint_source", "shell_local"])
+@pytest.mark.parametrize("coordinates", ["physical_shells", "orthogonal_channels"])
+def test_gaussian_shells_with_fixed_unfiltered_background(scope, coordinates):
+    shells = {**SHELLS, "kind": "gaussian"}
+    payload = shell_filtered_source_plan(FAMILY, 2, 2, shells, {"scope": scope},
+        evaluation_coordinates=coordinates, include_background=True)
+    assert payload["shell_count"] == payload["permuted_role_count"] == 2
+    assert payload["role_dimension"] == 3
+    report = validate_shell_filtered_source_plan(payload, recompute=True)
+    assert report["independent_radial_channels_per_l"] == 6
+    x = torch.tensor([.12, .31, .63, .89], dtype=torch.float64, requires_grad=True)
+    raw = shell_filtered_raw_values(payload, x, 1)
+    torch.testing.assert_close(raw[-2], (1-x)**3)
+    torch.testing.assert_close(raw[-1], (2*x-1)*(1-x)**3)
+    result = shell_filtered_radial_values(payload, x, 1)
+    transform = torch.tensor(payload["transforms"]["1"], dtype=torch.float64)
+    torch.testing.assert_close(result, raw if coordinates == "physical_shells" else transform@raw)
+    first = torch.autograd.grad(result.sum(), x, create_graph=True)[0]
+    second = torch.autograd.grad(first.sum(), x)[0]
+    assert torch.isfinite(second).all()
+    step = 1e-5
+    finite = (shell_filtered_radial_values(payload, x.detach()+step, 1).sum(0)
+              -shell_filtered_radial_values(payload, x.detach()-step, 1).sum(0))/(2*step)
+    torch.testing.assert_close(first, finite, rtol=2e-6, atol=1e-7)
+    empty = shell_filtered_radial_values(payload, torch.empty(0, dtype=torch.float64), 1)
+    assert empty.shape == (6, 0)
+
+
+def test_softmax_background_relation_is_rejected_before_gram(monkeypatch):
+    import ye3t.couplings.shell_filtered_radial as radial
+    monkeypatch.setattr(radial, "_gram", lambda *a: pytest.fail("Known source relation must precede Gram work"))
+    with pytest.raises(ValueError, match="A0=sum_s A_s"):
+        shell_filtered_source_plan(FAMILY, 2, 2, SHELLS, include_background=True)
+
+
 @pytest.mark.parametrize("coordinates", ["physical_shells", "orthogonal_channels"])
 def test_empty_neighbor_radial_arrays_preserve_width_and_derivatives(coordinates):
     payload = shell_filtered_source_plan(FAMILY, 2, 2, SHELLS, evaluation_coordinates=coordinates)

@@ -1,18 +1,20 @@
 
 """Exact small-``N`` permutation-projector utilities for the generalized path.
 
-These helpers are symbolic throughout:
+The small-carrier reference helpers use symbolic arithmetic:
 
 - irreducible symmetric-group characters are computed exactly
-- projector coefficients are exact rationals
+- projector coefficients are exact algebraic values
 - projector matrices are built as exact SymPy matrices
 
-Explicit permutation/projector materialization is a small-``N`` reference
-path.  Character evaluation itself uses the generic exact
+Explicit full-group permutation/projector materialization is a small-``N``
+reference path. The selected-column tableau construction uses sparse adjacent
+actions without enumerating the group. Character evaluation uses the exact
 Murnaghan--Nakayama recursion and is not rank-capped.
 
-Open follow-up:
-- add induction/restriction helpers between related Young subgroups
+Binary split and same-action constructors share the selected-column operation,
+with symbolic reference, rational seed preparation and numerical coefficient
+arithmetic using the same projector and tableau-transport schedules.
 """
 from functools import lru_cache
 from fractions import Fraction
@@ -252,7 +254,7 @@ def adjacent_transposition_representation_matrix(partition, index):
     tableaux = standard_tableaux(tuple(int(part) for part in partition))
     dim = len(tableaux)
     index = int(index)
-    matrix = sp.zeros(dim, dim)
+    matrix = sp.MutableSparseMatrix(dim, dim, {})
     tableau_index = {tableau: idx for idx, tableau in enumerate(tableaux)}
     for col, tableau in enumerate(tableaux):
         value_left = int(index) + 1
@@ -268,7 +270,7 @@ def adjacent_transposition_representation_matrix(partition, index):
         matrix[col, col] = sp.simplify(sp.Integer(1) / axial_distance)
         off_diag = sp.sqrt(sp.simplify(sp.Integer(1) - sp.Integer(1) / (axial_distance ** 2)))
         matrix[row, col] = off_diag
-    return matrix
+    return sp.ImmutableSparseMatrix(matrix)
 
 
 @lru_cache(maxsize=None)
@@ -319,6 +321,303 @@ def adjacent_transposition_representation_matrix_numeric(partition, index):
         matrix[col, col] = 1.0 / float(axial_distance)
         matrix[row, col] = sqrt(max(0.0, 1.0 - 1.0 / float(axial_distance * axial_distance)))
     return matrix
+
+
+TABLEAU_PROJECTOR_COPY_CONVENTION = "tableau_lex_positions_root2_triangular_v2"
+
+
+def _sparse_action_columns(matrix):
+    """Index existing exact generator entries by their input component."""
+    columns = {}
+    for (row, column), value in matrix.todok().items():
+        columns.setdefault(column, []).append((row, value))
+    return {column: tuple(values) for column, values in columns.items()}
+
+
+def _apply_sparse_action(action_columns, vectors, dimension):
+    """Apply stored entries only to nonzero input components.
+
+    This is ordinary exact sparse matrix multiplication. In the Young
+    orthogonal form each generator column has at most two entries. Iterating
+    the selected vector support avoids visiting all ambient tableau rows on
+    every projector/transport step. No coefficients or normalization change.
+    """
+    entries = {}
+    for (source, copy), coefficient in vectors.todok().items():
+        for target, value in action_columns.get(source, ()):
+            key = (target, copy)
+            entries[key] = entries.get(key, 0) + value * coefficient
+    return _sympy().MutableSparseMatrix(dimension, vectors.cols, entries)
+
+
+@lru_cache(maxsize=256)
+def _tableau_construction_schedule(partition):
+    """Reference tableau, interpolation factors and component transport edges.
+
+    Algorithmic reference: Doty, Lauve and Seelinger, *Canonical idempotents
+    of multiplicity-free families of algebras*, Theorem 3.8 and Section 4.
+    Independent implementation of the Jucys--Murphy interpolation formula.
+    The Young-orthogonal component order remains ``standard_tableaux``;
+    lexicographic positions choose the reference and the copy convention.
+    """
+    tableaux = standard_tableaux(partition)
+    positions = tuple(tableau_positions(t) for t in tableaux)
+    order = sum(partition)
+    priority = tuple(sorted(range(len(tableaux)), key=lambda i:
+                            tuple(positions[i][j] for j in range(1, order + 1))))
+    reference = priority[0]
+    shape = []
+    factors = []
+    for value in range(1, order + 1):
+        row, column = positions[reference][value]
+        content = column - row
+        addable = [width - r for r, width in enumerate(shape)
+                   if r == 0 or shape[r - 1] > width]
+        addable.append(-len(shape))
+        factors.extend((value, other, content - other)
+                       for other in addable if other != content)
+        if row == len(shape):
+            shape.append(1)
+        else:
+            shape[row] += 1
+    lookup = {t: i for i, t in enumerate(tableaux)}
+    seen = {reference}
+    queue = [reference]
+    edges = []
+    for source in queue:
+        for generator in range(order - 1):
+            swapped = _swap_tableau_entries(tableaux[source], generator + 1, generator + 2)
+            if swapped is None or lookup[swapped] in seen:
+                continue
+            target = lookup[swapped]
+            distance = (_tableau_content(tableaux[source], generator + 2)
+                        - _tableau_content(tableaux[source], generator + 1))
+            edges.append((source, target, generator, distance))
+            seen.add(target)
+            queue.append(target)
+    return reference, tuple(factors), tuple(edges), priority
+
+
+def _tableau_projector_columns(action, partitions, columns, *, arithmetic="symbolic"):
+    """Apply selected commuting tableau projectors without an ambient matrix.
+
+    ``action(f, i, columns)`` applies the i-th adjacent generator of factor f.
+    Only the specified reference-tableau polynomials are evaluated. There is
+    no group enumeration, coefficient solve, rank discovery or proof loop.
+    """
+    if arithmetic not in ("symbolic", "rational", "numeric"):
+        raise ValueError("Unknown tableau-projector arithmetic")
+    sp = _sympy() if arithmetic == "symbolic" else None
+    for factor, partition in enumerate(partitions):
+        for value, other, denominator in _tableau_construction_schedule(partition)[1]:
+            if arithmetic == "symbolic":
+                jm_columns = sp.MutableSparseMatrix(columns.rows, columns.cols, {})
+            elif arithmetic == "numeric":
+                jm_columns = np.zeros_like(columns)
+            else:
+                jm_columns = {}
+            for first in range(value - 1):
+                term = columns
+                # (first+1, value), written as a palindrome in adjacent swaps.
+                word = tuple(range(first, value - 1)) + tuple(range(value - 3, first - 1, -1))
+                for generator in word:
+                    term = action(factor, generator, term)
+                if arithmetic == "rational":
+                    for index, coefficient in term.items():
+                        jm_columns[index] = jm_columns.get(index, 0) + coefficient
+                else:
+                    jm_columns += term
+            if arithmetic == "rational":
+                for index, coefficient in columns.items():
+                    jm_columns[index] = jm_columns.get(index, 0) - other * coefficient
+                columns = {index: coefficient / denominator
+                           for index, coefficient in jm_columns.items() if coefficient}
+            else:
+                columns = (jm_columns - other * columns) / denominator
+                if arithmetic == "symbolic":
+                    columns = columns.applyfunc(sp.expand)
+    return columns
+
+
+@lru_cache(maxsize=128)
+def _binary_split_seed_priority(left_parts, target_parts):
+    """Omit parent tableaux killed by the first child's exact YY restriction."""
+    reference = _tableau_construction_schedule(left_parts)[0]
+    positions = tableau_positions(standard_tableaux(left_parts)[reference])
+    parent_positions = tuple(tableau_positions(t) for t in standard_tableaux(target_parts))
+    return tuple(i for i in _tableau_construction_schedule(target_parts)[3]
+                 if all(parent_positions[i][j] == value for j, value in positions.items()))
+
+
+def _selected_projector_frame(projector_columns, dimension, multiplicity, priority):
+    """Selected normalized copies in the approved local copy convention.
+
+    The multiplicity is supplied by LR or Kronecker counting. Lexicographic
+    positive principal minors choose coordinates of that known space; they
+    do not infer its rank. Only candidate columns are materialized. For two
+    copies, use the explicit positive inverse square root of a 2-by-2 matrix,
+    as approved in the YE3T returned handoff Appendix A. At higher multiplicity
+    use G=B B^T with positive diagonal and Q=P E_I B^(-T), through explicit
+    scalar Cholesky recurrences (Higham, Cholesky Factorization, 2009).
+    The user approved this higher-copy convention on 2026-11-12. It changes
+    only the local copy coordinates, never the already known multiplicity.
+
+    Return the selected columns and their local normalization separately.
+    Tableau transport and repeated-child exchange share this operation.
+    """
+    sp = _sympy()
+    if multiplicity == 0:
+        return sp.MutableSparseMatrix(dimension, 0, {}), sp.zeros(0)
+    selected = []
+    vectors = []
+    triangular = []
+    gram = None
+    for index in priority:
+        unit = sp.MutableSparseMatrix(dimension, 1, {(index, 0): 1})
+        vector = projector_columns(unit)
+        if multiplicity > 2:
+            row = []
+            for j in range(len(selected)):
+                value = vector[selected[j], 0] - sum(
+                    triangular[j][k] * row[k] for k in range(j))
+                row.append(sp.simplify(value / triangular[j][j]))
+            determinant = sp.simplify(vector[index, 0] - sum(value**2 for value in row))
+        elif not selected:
+            determinant = sp.simplify(vector[index, 0])
+        else:
+            determinant = sp.simplify(
+                gram[0, 0] * vector[index, 0] - vector[selected[0], 0] ** 2)
+        if determinant == 0:
+            continue
+        if determinant.is_positive is not True:
+            raise ArithmeticError("Tableau-projector coordinate minor has unresolved positive sign")
+        selected.append(index)
+        vectors.append(vector)
+        if multiplicity > 2:
+            triangular.append(row + [sp.sqrt(determinant)])
+        gram = sp.Matrix(len(selected), len(selected), lambda i, j: vectors[j][selected[i], 0])
+        if len(selected) == multiplicity:
+            break
+    if len(selected) != multiplicity:
+        raise ArithmeticError("Tableau-projector construction exhausted coordinates for the supplied multiplicity")
+    if multiplicity == 1:
+        normalization = sp.Matrix([[1 / sp.sqrt(gram[0, 0])]])
+    elif multiplicity == 2:
+        delta = sp.sqrt(sp.expand(gram[0, 0] * gram[1, 1] - gram[0, 1] * gram[1, 0]))
+        a, b, c, d = gram[0, 0] + delta, gram[0, 1], gram[1, 0], gram[1, 1] + delta
+        normalization = (sp.sqrt(a + d) / sp.expand(a * d - b * c)
+                         * sp.Matrix([[d, -b], [-c, a]]))
+    else:
+        inverse = sp.zeros(multiplicity)
+        for j in range(multiplicity):
+            for i in range(j, multiplicity):
+                value = int(i == j) - sum(triangular[i][k] * inverse[k, j]
+                                          for k in range(j, i))
+                inverse[i, j] = sp.simplify(value / triangular[i][i])
+        normalization = inverse.T
+    # Rationalizing a denominator can expose another denestable square root.
+    # Canonicalize this small copy matrix before transporting/combining its
+    # complete components, keeping exact radical arithmetic available there.
+    normalization = normalization.applyfunc(
+        lambda value: sp.expand(sp.sqrtdenest(sp.expand(sp.radsimp(sp.sqrtdenest(value))))))
+    return sp.MutableSparseMatrix.hstack(*vectors), sp.MutableSparseMatrix(normalization)
+
+
+def _tableau_projector_copies(action, partitions, dimension, multiplicity, priority,
+                            *, seed_indices=None):
+    """Compose the shared normalized reference frame with tableau transport.
+
+    Q_swap = (rho(s_i) Q - a Q) / sqrt(1-a*a). Complete-copy orthonormality
+    and intertwining are development-test invariants of this construction.
+    """
+    if multiplicity == 0:
+        return ()
+    numeric = seed_indices is not None
+    sp = None if numeric else _sympy()
+    if numeric:
+        if len(seed_indices) != multiplicity or len(set(seed_indices)) != multiplicity:
+            raise ValueError("Numerical tableau recipe must select the known copy count")
+        columns = np.zeros((dimension, multiplicity), dtype=np.float64)
+        columns[list(seed_indices), np.arange(multiplicity)] = 1
+        columns = _tableau_projector_columns(action, partitions, columns, arithmetic="numeric")
+        normalization = _numeric_copy_normalization(columns[list(seed_indices), :])
+    else:
+        columns, normalization = _selected_projector_frame(
+            lambda unit: _tableau_projector_columns(action, partitions, unit),
+            dimension, multiplicity, priority)
+    # Component transport acts on ambient rows; copy normalization acts on
+    # columns. They commute. Keep the small inverse root factored until the
+    # final maps, avoiding nested normalization radicals in every action.
+    components = {(): columns}
+    for factor, partition in enumerate(partitions):
+        reference, _, edges, _ = _tableau_construction_schedule(partition)
+        expanded = {}
+        for prefix, seed in components.items():
+            local = {reference: seed}
+            for source, target, generator, distance in edges:
+                a = 1.0 / distance if numeric else sp.Rational(1, distance)
+                local[target] = ((action(factor, generator, local[source]) - a * local[source])
+                                 / (sqrt(1 - a*a) if numeric else sp.sqrt(1 - a*a)))
+                if not numeric:
+                    local[target] = local[target].applyfunc(sp.expand)
+            expanded.update((prefix + (index,), value) for index, value in local.items())
+        components = expanded
+    if numeric:
+        result = tuple(np.empty((dimension, len(components)), dtype=np.float64)
+                       for _ in range(multiplicity))
+        for component, key in enumerate(sorted(components)):
+            block = components.pop(key) @ normalization
+            for copy, matrix in enumerate(result):
+                matrix[:, component] = block[:, copy]
+        for matrix in result:
+            if not np.isfinite(matrix).all():
+                raise ArithmeticError("Nonfinite numerical tableau coefficients")
+            matrix.flags.writeable = False
+        return result
+    ordered = [(components[key] * normalization).applyfunc(sp.expand)
+               for key in sorted(components)]
+    entries = [{} for _ in range(multiplicity)]
+    for component, block in enumerate(ordered):
+        for (row, copy), value in block.todok().items():
+            entries[copy][row, component] = value
+    # Freeze each complete copy once. Repeated immutable column joins would
+    # reconstruct and sort all preceding component entries at every join.
+    return tuple(sp.ImmutableSparseMatrix(dimension, len(ordered), values)
+                 for values in entries)
+
+
+def _numeric_copy_normalization(gram):
+    """Evaluate the approved local copy convention, without a solver or pivoting.
+
+    The discrete recipe has already selected independent coordinates. A failed
+    positive square root is an arithmetic failure; it never changes that recipe.
+    This is coefficient construction, not a runtime orthogonality diagnostic.
+    """
+    count = len(gram)
+    if count == 1:
+        if not gram[0, 0] > 0:
+            raise ArithmeticError("Nonpositive numerical copy norm")
+        return np.array([[1.0 / sqrt(gram[0, 0])]])
+    if count == 2:
+        determinant = gram[0, 0]*gram[1, 1] - gram[0, 1]*gram[1, 0]
+        if not determinant > 0:
+            raise ArithmeticError("Nonpositive numerical two-copy determinant")
+        delta = sqrt(determinant)
+        a, b, c, d = gram[0, 0]+delta, gram[0, 1], gram[1, 0], gram[1, 1]+delta
+        return sqrt(a+d)/(a*d-b*c) * np.array([[d, -b], [-c, a]])
+    lower = np.zeros_like(gram)
+    for i in range(count):
+        for j in range(i):
+            lower[i, j] = (gram[i, j] - lower[i, :j] @ lower[j, :j])/lower[j, j]
+        diagonal = gram[i, i] - lower[i, :i] @ lower[i, :i]
+        if not diagonal > 0:
+            raise ArithmeticError("Nonpositive numerical copy normalization pivot")
+        lower[i, i] = sqrt(diagonal)
+    inverse = np.zeros_like(lower)
+    for j in range(count):
+        for i in range(j, count):
+            inverse[i, j] = ((i == j) - lower[i, j:i] @ inverse[j:i, j])/lower[i, i]
+    return inverse.T
 
 
 @lru_cache(maxsize=None)

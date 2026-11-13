@@ -27,9 +27,6 @@ from itertools import combinations_with_replacement, product
 import copy
 import math
 
-from ye3t.representations.builder import GeneralizedExactSymbolicLabeler
-from ye3t.representations.generalized_irreps import Partition
-
 from . import lifted_cauchy_scalar as _scalar
 
 
@@ -120,8 +117,10 @@ def covariant_cauchy_request(
     if kappa_policy not in {"trivial", "all"}:
         raise ValueError("kappa_policy must be trivial or all_valid.")
     angular_basis_backend = str(angular_basis_backend)
-    if angular_basis_backend not in {"legacy_exact", "exact_weight_space_v1"}:
-        raise ValueError("angular_basis_backend must be legacy_exact or exact_weight_space_v1.")
+    if angular_basis_backend not in {"legacy_exact", "exact_weight_space_v1", "normalized_cg_paths_v1"}:
+        raise ValueError("Unknown angular_basis_backend.")
+    if angular_basis_backend == "normalized_cg_paths_v1" and carrier == "ordered_role":
+        raise ValueError("Normalized Cauchy occupation reduction requires commuting role multiplets; ordered factors use the general carrier constructor.")
     content_parity = math.prod(
         int(channel.get("parity", (-1) ** int(channel["l"]))) ** size
         for size, channel in zip(block_sizes, channels, strict=True)
@@ -202,7 +201,9 @@ def covariant_cauchy_request(
             "L": target_L,
             "o3_parity": int(content_parity),
         },
-        "convention_id": COVARIANT_CAUCHY_CONVENTION,
+        "convention_id": ("normalized_role_subduction_paired_angular_paths_v1"
+                          if angular_basis_backend == "normalized_cg_paths_v1"
+                          else COVARIANT_CAUCHY_CONVENTION),
         **occupation_selection,
         **selection,
     }
@@ -304,7 +305,7 @@ def covariant_cauchy_count(request):
                         "outer_copy_index": int(outer_copy),
                         "target_L": target_L,
                         "target_parity": request["target"]["o3_parity"],
-                        "convention_id": COVARIANT_CAUCHY_CONVENTION,
+                        "convention_id": request["convention_id"],
                     }
                 )
     available_count = len(labels)
@@ -351,29 +352,52 @@ def _cached_outer_multiplet_template(block_Ls, target_L):
             raise ValueError("A single block reaches only its own angular momentum.")
         rows = {(0, M): {(M,): sp.Integer(1)} for M in magnetic}
         gram = sp.eye(1)
+    elif len(block_Ls) == 2:
+        # Unique two-block angular coupling, using YE3T's exact CG routine.
+        # Reference: NIST DLMF 34.1.1 (CG convention), 34.3.1 (scalar case).
+        # The existing builder sets the first nonzero highest-weight entry
+        # to one. If that entry of normalized CG is p, synthesis is CG/p,
+        # its Gram is 1/p**2, and the analysis row is p*CG. This preserves
+        # the complete existing payload and gauge without a raw projector.
+        from ye3t.core.cg import _cg_table_exact
+
+        left, right = block_Ls
+        if not abs(left-right) <= target_L <= left+right:
+            raise ValueError("The outer angular product has no requested target L.")
+        coefficients = _cg_table_exact(left, right, target_L)
+        pivot = next(sp.sympify(value) for _, _, M, value in coefficients if M == target_L)
+        gram = sp.Matrix([[sp.simplify(1/pivot**2)]])
+        rows = {}
+        for M in magnetic:
+            terms = {}
+            for m1, m2, output_M, coefficient in coefficients:
+                if output_M == M:
+                    terms[(int(m1), int(m2))] = sp.simplify(pivot*sp.sympify(coefficient))
+            rows[(0, M)] = terms
     else:
-        data = GeneralizedExactSymbolicLabeler(
-            tuple(range(len(block_Ls))),
-            block_Ls,
-            spatial_symmetry="O3",
-        ).sector_for_partitions(tuple(Partition((1,)) for _ in block_Ls))
-        copy_count = int(data.joint_multiplicity_by_L.get(target_L, 0))
+        # Outer blocks have distinct factor identities and singleton Young
+        # actions. Their projector is identity. Reuse the exact requested-
+        # weight machinery, keeping the same ordered nullspace/pivot gauge as
+        # the full projector builder; construct only this target's multiplets.
+        from ye3t.representations.builder import (
+            _exact_domain_nullspace, _pivot_normalize_vector, _weight_raising_matrix)
+
+        copy_count = _scalar._outer_counts(block_Ls, target_L)
         if copy_count <= 0:
             raise ValueError("The outer angular product has no requested target L.")
-        states = tuple(product(*[range(-value, value + 1) for value in block_Ls]))
+        weights = {M: [] for M in range(-target_L, target_L+2)}
+        for state in product(*[range(-value, value+1) for value in block_Ls]):
+            weight = sum(state)
+            if weight in weights:
+                weights[weight].append(state)
+        raising = _weight_raising_matrix(block_Ls, weights[target_L], weights[target_L+1])
+        highest = tuple(_pivot_normalize_vector(vector) for vector in _exact_domain_nullspace(raising))
+        if len(highest) != copy_count:
+            raise ArithmeticError("Outer highest-weight copies differ from the exact angular multiplicity.")
+        synthesis = sp.Matrix.hstack(*highest)
         rows = {}
         gram = None
-        for M in magnetic:
-            synthesis = sp.Matrix.hstack(
-                *[
-                    sp.Matrix(
-                        data.lowered_multiplets_by_L[target_L][
-                            (copy, tuple(0 for _ in block_Ls))
-                        ][M]
-                    )
-                    for copy in range(copy_count)
-                ]
-            )
+        for M in range(target_L, -target_L-1, -1):
             component_gram, analysis = _scalar._metric_dual_analysis(synthesis)
             if gram is None:
                 gram = component_gram
@@ -384,9 +408,13 @@ def _cached_outer_multiplet_template(block_Ls, target_L):
             for copy in range(copy_count):
                 rows[(copy, M)] = {
                     tuple(int(value) for value in state): sp.simplify(analysis[copy, column])
-                    for column, state in enumerate(states)
+                    for column, state in enumerate(weights[M])
                     if sp.simplify(analysis[copy, column]) != 0
                 }
+            if M > -target_L:
+                lowering = _weight_raising_matrix(block_Ls, weights[M-1], weights[M]).T
+                scale = sp.sqrt((target_L+M)*(target_L-M+1))
+                synthesis = (lowering*synthesis/scale).applyfunc(sp.simplify)
     payload = {
         "input_Ls": block_Ls,
         "target_L": target_L,
@@ -414,8 +442,11 @@ def _cached_outer_multiplet_template(block_Ls, target_L):
     return payload
 
 
-def compile_covariant_cauchy(request, *, _block_templates=None):
+def compile_covariant_cauchy(request, *, _block_templates=None, _source_rows_only=False,
+                             _factorized_only=False):
     """Compile exact factored coordinates for every label of the request."""
+    if _factorized_only and _source_rows_only:
+        raise ValueError("Factorized compilation cannot request expanded source rows.")
     if request.get("request", request).get("carrier") == "ordered_role":
         from .ordered_role_cauchy import compile_ordered_role_cauchy
 
@@ -423,8 +454,14 @@ def compile_covariant_cauchy(request, *, _block_templates=None):
 
     report = covariant_cauchy_count(request)
     request = report["request"]
+    if request.get("angular_basis_backend") == "normalized_cg_paths_v1":
+        from .cauchy_paths import compile_cauchy_paths
+
+        return compile_cauchy_paths(report)
     target_L = request["target"]["L"]
     block_templates = {}
+    block_references = {}
+    shared_keys = {}
     # One catalogue can reuse validated local maps across source contents and
     # target L. The caller owns this compilation-local pool; no validation or
     # cache policy is carried into a later independent compilation.
@@ -443,6 +480,9 @@ def compile_covariant_cauchy(request, *, _block_templates=None):
         )
         % 2
     )
+    resolved_labels = []
+    required_role_copies = {}
+    last_block_use = {}
     for label in report["labels"]:
         coefficient_label = label
         if "block_role_contents" in label:
@@ -455,7 +495,17 @@ def compile_covariant_cauchy(request, *, _block_templates=None):
                 candidates = [copy for copy, (_, content) in enumerate(metadata) if tuple(content) == tuple(weight)]
                 role_copies.append(candidates[index])
             coefficient_label = {**label, "role_copy_indices": tuple(role_copies)}
+        resolved_labels.append((label, coefficient_label))
+        for block_index, (size, kappa, Lambda) in enumerate(zip(
+                label["block_sizes"], label["block_kappas"], label["block_Lambdas"], strict=True)):
+            key = (request["role_dimension"], int(size), tuple(kappa),
+                int(request["channels"][block_index]["l"]), int(Lambda))
+            required_role_copies.setdefault(key, set()).add(
+                int(coefficient_label["role_copy_indices"][block_index]))
+            last_block_use[key] = len(resolved_labels) - 1
+    for label_index, (label, coefficient_label) in enumerate(resolved_labels):
         template_ids = []
+        used_keys = set()
         for block_index, (size, kappa, Lambda) in enumerate(
             zip(
                 label["block_sizes"],
@@ -471,20 +521,34 @@ def compile_covariant_cauchy(request, *, _block_templates=None):
                 int(request["channels"][block_index]["l"]),
                 int(Lambda),
             )
+            used_keys.add(key)
             if key not in block_templates:
                 backend = request.get("angular_basis_backend", "legacy_exact")
-                shared_key = (key, "legacy_exact" if key[4] == 0 else backend)
+                copies = _scalar._block_role_copies(key, tuple(sorted(required_role_copies[key])))
+                shared_key = (key, "legacy_exact" if key[4] == 0 else backend,
+                    "factorized" if _factorized_only else "symmetric_power", copies)
                 if shared_key not in shared_blocks:
                     shared_blocks[shared_key] = _scalar._compile_block_template(
-                        key, angular_basis_backend=backend)
+                        key, angular_basis_backend=backend, emit_ordered_reference=False,
+                        role_copy_indices=copies, compact=_factorized_only,
+                        decode_rows=not _factorized_only)
                 block_templates[key] = shared_blocks[shared_key]
+                shared_keys[key] = shared_key
+                if _source_rows_only:
+                    payload = block_templates[key]["payload"]
+                    block_references[key] = {
+                        "template_id": payload["template_id"],
+                        "template_hash": payload["template_hash"],
+                        "validation_report": dict(payload["validation_report"]),
+                    }
+                    del payload
             template_ids.append(str(block_templates[key]["payload"]["template_id"]))
         Lambdas = tuple(label["block_Lambdas"])
         if Lambdas not in outer_templates:
             outer_templates[Lambdas] = _outer_multiplet_template(Lambdas, target_L)
-        canonical = _canonical_complex_rows(
+        canonical = (None if _factorized_only else _canonical_complex_rows(
             coefficient_label, request, block_templates, outer_templates[Lambdas]
-        )
+        ))
         descriptors.append(
             {
                 "label": label,
@@ -493,6 +557,7 @@ def compile_covariant_cauchy(request, *, _block_templates=None):
                 "parent_factor": _scalar._exact_scalar_payload(
                     _scalar._parent_factor(label["block_sizes"])
                 ),
+                **({"coefficient_label": coefficient_label} if _factorized_only else {
                 "canonical_terms_by_M": tuple(
                     {"M": int(M), "terms": _scalar._term_records(canonical[M])}
                     for M in range(-target_L, target_L + 1)
@@ -502,9 +567,17 @@ def compile_covariant_cauchy(request, *, _block_templates=None):
                     for component, terms in enumerate(
                         _real_rows(canonical, request, phase_exponent)
                     )
-                ),
+                )}),
             }
         )
+        if _source_rows_only:
+            # Physical-source assembly consumes the exact expanded rows. Its
+            # provenance refers to the validated canonical block artifact;
+            # carrier proof workspaces can be released after their last use.
+            for key in used_keys:
+                if last_block_use[key] == label_index:
+                    del block_templates[key]
+                    shared_blocks.pop(shared_keys.pop(key), None)
     parity_exponent = sum(
         size * channel["l"]
         for size, channel in zip(
@@ -512,11 +585,15 @@ def compile_covariant_cauchy(request, *, _block_templates=None):
         )
     )
     payload = {
-        "schema": COVARIANT_CAUCHY_SCHEMA,
+        "schema": ("ye3t_covariant_cauchy_factorized_v1" if _factorized_only else "ye3t_covariant_cauchy_source_rows_v1"
+                   if _source_rows_only else COVARIANT_CAUCHY_SCHEMA),
         "request": request,
         "block_templates": tuple(
-            block_templates[key]["payload"] for key in sorted(block_templates)
-        ),
+            ({name: block_templates[key]["payload"][name] for name in (
+                "template_id", "template_hash", "role_dimension", "size", "kappa",
+                "input_l", "output_Lambda", "analysis_rows", "validation_report")}
+             if _factorized_only else block_templates[key]["payload"])
+            for key in sorted(block_templates)),
         "outer_templates": tuple(
             outer_templates[key] for key in sorted(outer_templates)
         ),
@@ -544,13 +621,25 @@ def compile_covariant_cauchy(request, *, _block_templates=None):
             "passed": True,
             "complete_multiplets": True,
             "block_templates_from_scalar_compiler": True,
-            "canonical_monomials_from_factored_rows_exact": True,
-            "real_schedule_coefficients_exactly_real": True,
+            "canonical_monomials_from_factored_rows_exact": not _factorized_only,
+            "real_schedule_coefficients_exactly_real": not _factorized_only,
+            **({"factorized_blocks_and_outer_maps": True} if _factorized_only else {}),
             "learned_axes": ("multiplicity",),
             "protected_axes": ("magnetic",),
         },
     }
-    payload["self_hash"] = _scalar._stable_record_hash(payload)
+    if _source_rows_only:
+        # This private intermediate is consumed by the physical-source
+        # compiler. Its distinct schema prevents use as a full factored
+        # Cauchy artifact, whose default payload remains unchanged.
+        payload["block_template_references"] = tuple(
+            block_references[key] for key in sorted(block_references))
+    if not _factorized_only:
+        payload["self_hash"] = _scalar._stable_record_hash(payload)
+    # This private factorized assembly is consumed immediately by the shell
+    # compiler. Its blocks already have verified cache identities, and the
+    # resulting execution schedule receives its own persistent identity.
+    # Hashing the entire transient assembly repeats traversal of all local maps.
     return payload
 
 
@@ -619,6 +708,22 @@ def _canonical_complex_rows(label, request, block_templates, outer_template):
     return rows
 
 
+@lru_cache(maxsize=256)
+def _real_monomial_substitution(options):
+    """Exact commutative substitution using the established real-form entries.
+
+    Coalesce after each factor so repeated inputs do not produce separate
+    ordered terms. The bounded cache holds immutable rows, without source
+    coefficients or source identities. This is the same unitary substitution
+    used by _real_rows, with the scalar compiler's polynomial arithmetic.
+    """
+    terms = {(): _scalar._sympy().Integer(1)}
+    for choices in options:
+        terms = _scalar._multiply_polynomials(
+            terms, {(coordinate,): value for coordinate, value in choices})
+    return tuple(sorted(terms.items()))
+
+
 def _real_rows(canonical, request, phase_exponent):
     """Exactly realify a complex multiplet; every coefficient must be real.
 
@@ -649,9 +754,8 @@ def _real_rows(canonical, request, phase_exponent):
                         if form[magnetic, real_index] != 0
                     )
                 )
-            for choice in product(*options):
-                monomial = tuple(sorted(item[0] for item in choice))
-                weight = coefficient * sp.prod(item[1] for item in choice)
+            for monomial, transform in _real_monomial_substitution(tuple(options)):
+                weight = coefficient * transform
                 for component in range(2 * target_L + 1):
                     if projector[component, column] != 0:
                         components[component][monomial] += (
@@ -688,6 +792,16 @@ def validate_covariant_cauchy(compiled):
         from .ordered_role_cauchy import validate_ordered_role_cauchy
 
         return validate_ordered_role_cauchy(compiled)
+    if compiled.get("schema") == "ye3t_normalized_cauchy_paths_v1":
+        body = {key: value for key, value in compiled.items() if key != "self_hash"}
+        if _scalar._stable_record_hash(body) != compiled.get("self_hash"):
+            raise ValueError("Normalized Cauchy path artifact failed its self hash")
+        report = covariant_cauchy_count(compiled["request"])
+        if (_scalar._freeze_json(report["labels"]) != _scalar._freeze_json(
+                [row["label"] for row in compiled["descriptors"]]) or
+                len(compiled["path_schedule"]["routes"]) != report["multiplet_count"]):
+            raise ValueError("Normalized Cauchy routes differ from the exact count")
+        return True
     if compiled.get("schema") != COVARIANT_CAUCHY_SCHEMA:
         raise ValueError("Unknown covariant lifted-Cauchy schema.")
     body = {key: value for key, value in compiled.items() if key != "self_hash"}
@@ -717,10 +831,11 @@ def validate_covariant_cauchy(compiled):
 
 
 def covariant_cauchy_orthogonal_output_plan(compiled):
-    """Exact Gram-Schmidt over multiplicity copies, acting as ``R (x) I_{2L+1}``.
+    """Multiplicity-coordinate orthogonalization, acting as ``R (x) I_{2L+1}``.
 
-    The Gram matrix uses the inverse-orbit-size monomial metric of the scalar
-    standard. It is certified identical for every ``M`` and exactly zero
+    Normalized shared-path maps already have identity metric on the abstract
+    complete-factor carrier. Legacy maps use the inverse-orbit-size monomial
+    metric of the scalar standard. That metric is identical for every ``M`` and zero
     between different strict ``(kappa, Lambda)`` sectors, so ``R`` mixes only
     copies inside one multiplicity space and never magnetic components.
     Orthogonal coordinates are ``O = R B``; a readout transforms as
@@ -731,6 +846,25 @@ def covariant_cauchy_orthogonal_output_plan(compiled):
     sp = _scalar._sympy()
     target_L = int(compiled["request"]["target"]["L"])
     count = len(compiled["descriptors"])
+    if compiled.get("schema") == "ye3t_normalized_cauchy_paths_v1":
+        # Normalized role/angular pairing, normalized outer CG trees and the
+        # complete-content shuffle embedding are all isometries. No physical
+        # sample metric or monomial workspace is required to restate this.
+        plan = {
+            "schema": "ye3t_covariant_cauchy_orthogonal_output_v1",
+            "compiled_self_hash": str(compiled["self_hash"]),
+            "transform": _scalar._exact_matrix_payload(sp.eye(count)),
+            "diagonal": tuple(_scalar._exact_scalar_payload(sp.Integer(1)) for _ in range(count)),
+            "validation_report": {
+                "passed": True, "gram_independent_of_M_exact": True,
+                "gram_diagonal_exact": True, "acts_on_multiplicity_index_only": True,
+                "coordinate_transform": "O=R*B", "readout_lowering": "theta_B=R^T*theta_O",
+                "metric": "abstract_complete_factor", "normalized_shared_maps": True,
+                "physical_sample_orthogonality": False,
+            },
+        }
+        plan["plan_hash"] = _scalar._stable_hash(_scalar._freeze_json(plan))
+        return plan
     rows = tuple(
         {
             int(record["M"]): {
@@ -823,6 +957,11 @@ def covariant_cauchy_flat_real_plan(compiled):
     import numpy as np
 
     validate_covariant_cauchy(compiled)
+    if compiled.get("schema") == "ye3t_normalized_cauchy_paths_v1":
+        raise ValueError(
+            "A normalized CG-path artifact retains factorized couplings. "
+            "Use evaluate_covariant_cauchy or its stored path_schedule; "
+            "the flat monomial exporter accepts legacy polynomial artifacts.")
     request = compiled["request"]
     width = 2 * int(request["target"]["L"]) + 1
     offsets = {}
@@ -1261,6 +1400,10 @@ def evaluate_covariant_cauchy(
         )
     if factor_types is not None:
         raise ValueError("factor_types applies only to ordered_role Cauchy inputs.")
+    if "path_schedule" in compiled:
+        from .cauchy_paths import evaluate_cauchy_paths
+
+        return evaluate_cauchy_paths(compiled, values, upstream=upstream, basis=basis)
 
     import numpy as np
 

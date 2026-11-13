@@ -19,7 +19,7 @@ cfg_ye3t = {
         "parent": {"young_lambda": "(N)", "L": 0, "parity": "even"},
         "factorization": "cauchy", "subspace": "full",
         "uncoupled_factor_inputs": {
-            "eta_count_per_rank": {4: 2}, "l_max_per_rank": {4: 1},
+            "eta_max_per_rank": {4: 4}, "l_max_per_rank": {4: 1},
         },
         "intermediates": {"young_kappa": "all_valid", "block_rotation": {"policy": "all_valid"}},
     },

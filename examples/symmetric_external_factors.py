@@ -19,7 +19,7 @@ cfg_ye3t = {
         "parent": {"young_lambda": "(N)", "L": 1, "parity": None},
         "factorization": "standard_split", "subspace": "full",
         "uncoupled_factor_inputs": {
-            "eta_count_per_rank": {2: 2, 3: 2, 4: 2, 5: 2, 6: 2, 7: 2, 8: 2},
+            "eta_max_per_rank": {2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8},
             "l_max_per_rank": {2: 2, 3: 2, 4: 2, 5: 2, 6: 2, 7: 2, 8: 2},
         },
         "intermediates": {

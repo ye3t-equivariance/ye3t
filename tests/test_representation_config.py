@@ -35,6 +35,46 @@ def test_public_representation_is_immutable_and_rank_resolved():
         rep.parent_partition(4)
 
 
+def test_subspace_products_share_intermediate_resolution_and_are_immutable():
+    from ye3t import YE3TRepresentation
+    config = _config()
+    config.update(subspace="primitive", subspace_products=[{
+        "target": "rank3_scalar", "products": [{"left": "rank1_vector", "right": "rank2_vector",
+        "left_intermediates": {"young_kappa": "symmetric_only"},
+        "right_intermediates": {"block_rotation": {"policy": "capped", "Lambda_block_max_per_rank": {2: 1, 3: 2}}}}]}])
+    rep = YE3TRepresentation.from_config(config)
+    canonical = rep.to_dict()
+    assert YE3TRepresentation.from_config(json.loads(json.dumps(canonical))) == rep
+    assert hash(YE3TRepresentation.from_config(canonical)) == hash(rep)
+    config["subspace_products"][0]["products"][0]["left"] = "changed"
+    assert rep.to_dict() == canonical
+    canonical["subspace_products"][0]["products"].clear()
+    assert rep.to_dict()["subspace_products"][0]["products"]
+
+
+@pytest.mark.parametrize("entries", [{}, [{"target": "a"}], [{"target": "a", "products": None}],
+    [{"target": "a", "products": [{"left": "b", "right": "c", "unknown": 1}]}],
+    [{"target": "a", "products": []}, {"target": "a", "products": []}],
+    [{"target": "a", "products": [{"left": "b", "right": "c", "left_intermediates": {"bad": 1}}]}]])
+def test_invalid_subspace_controls_fail_during_config_resolution(entries):
+    from ye3t import YE3TRepresentation
+    with pytest.raises((TypeError, ValueError)):
+        YE3TRepresentation.from_config(dict(_config(), subspace_products=entries))
+
+
+def test_output_sector_selection_roundtrips_without_changing_source_parents():
+    from ye3t import YE3TRepresentation
+    original = _config()
+    expected = YE3TRepresentation.from_config(original)
+    original["output_sectors"] = {"young_lambda": ["(N)", "(N-1,1)"], "L": [1, 2], "parity": "all"}
+    selected = YE3TRepresentation.from_config(original)
+    assert selected.parent_partitions == expected.parent_partitions
+    assert selected.L == expected.L
+    assert selected.source_sectors == selected.hidden_sectors == None
+    assert selected == YE3TRepresentation.from_config(json.loads(json.dumps(selected.to_dict())))
+    assert dict(selected.output_sectors)["L"] == (1, 2)
+
+
 def test_public_representation_count_uses_compiler_and_natural_parity(monkeypatch):
     from ye3t import YE3TRepresentation
     from ye3t.couplings import count

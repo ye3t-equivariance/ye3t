@@ -1,5 +1,6 @@
 
 from ye3t._record import recordclass
+from ye3t._coupling_tree import COUPLING_TREE_CONVENTION, coupling_tree_split
 
 
 @recordclass(('idx', 'n', 'l'), frozen = True)

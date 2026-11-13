@@ -64,6 +64,36 @@ def test_exact_radical_mutated_public_terms_reenter_normalization_boundary():
     assert value * ExactRadical.sqrt(2) == ExactRadical.rational(4)
 
 
+def test_warm_radical_normalization_preserves_merging_cancellation_and_ownership():
+    from ye3t.exact_scalars import _normalize_radicand
+
+    _normalize_radicand.cache_clear()
+    terms = {Fraction(8): Fraction(3), Fraction(2): Fraction(-6),
+             Fraction(9, 4): Fraction(2), Fraction(0): Fraction(99)}
+    first = ExactRadical(terms)
+    assert first == ExactRadical.rational(3)
+    first.terms[Fraction(1)] = Fraction(100)
+    second = ExactRadical(terms)
+    assert second == ExactRadical.rational(3)
+    assert terms[Fraction(9, 4)] == 2
+    assert _normalize_radicand.cache_info().hits > 0
+    for _ in range(2):
+        with pytest.raises(ValueError, match="negative radical"):
+            ExactRadical({Fraction(-2): Fraction(1)})
+
+
+def test_radical_normalization_cache_is_bounded_and_eviction_preserves_values():
+    from ye3t.exact_scalars import _normalize_radicand
+
+    _normalize_radicand.cache_clear()
+    expected = ExactRadical.sqrt(Fraction(12, 5))
+    for value in range(1, 4200):
+        normalized_scale, normalized_radicand = _normalize_radicand(Fraction(value))
+        assert normalized_scale**2 * normalized_radicand == value
+    assert _normalize_radicand.cache_info().currsize <= 4096
+    assert ExactRadical.sqrt(Fraction(12, 5)) == expected
+
+
 def test_exact_radical_payload_uses_the_existing_exact_schema_directly():
     from ye3t.couplings.lifted_cauchy_scalar import (
         _exact_scalar_from_payload,

@@ -47,7 +47,7 @@ def test_angular_cg_cache_keeps_no_filter_parity_labels_distinct(tmp_path):
     assert len(tuple(Path(tmp_path).glob("artifacts/angular_cg_map/*.json"))) == 2
 
 
-def test_angular_cg_full_verification_reconstructs_complete_nary_paths(
+def test_angular_cg_storage_verification_preserves_complete_nary_paths(
     tmp_path, monkeypatch
 ):
     from ye3t.global_coupler import AngularCGMap
@@ -58,6 +58,27 @@ def test_angular_cg_full_verification_reconstructs_complete_nary_paths(
 
     assert first.factorized_paths
     assert second.factorized_paths == first.factorized_paths
+
+
+def test_cold_build_and_warm_load_use_trusted_coefficients_without_proof_loops(tmp_path, monkeypatch):
+    import pytest
+    from ye3t import global_coupler as module
+
+    # Independent coefficient diagnostics remain available to development tests.
+    diagnostic = module._factorized_angular_paths_validation
+    dense_diagnostic = module._dense_angular_table_validation
+    def forbidden(*args, **kwargs):
+        pytest.fail("Ordinary angular construction/reload invoked a mathematical proof loop")
+    monkeypatch.setenv("YE3T_CACHE_VERIFY", "full")
+    monkeypatch.setattr(module, "_dense_angular_table_validation", forbidden)
+    monkeypatch.setattr(module, "_factorized_angular_paths_validation", forbidden)
+    first = module.AngularCGMap.build((1, 2, 1), 2, cache_dir=tmp_path)
+    assert first.coefficient_validation["diagnostics_executed"] is False
+    monkeypatch.setattr(module, "_angular_factorized_paths", forbidden)
+    second = module.AngularCGMap.build((1, 2, 1), 2, cache_dir=tmp_path)
+    assert first.factorized_paths == second.factorized_paths
+    monkeypatch.setattr(module, "_dense_angular_table_validation", dense_diagnostic)
+    assert diagnostic(first.factorized_paths)["passed"] is True
 
 
 def test_angular_factorized_resource_guard_fails_before_rank9_materialization():

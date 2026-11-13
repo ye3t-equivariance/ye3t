@@ -3507,14 +3507,20 @@ class CompiledTaggedCauchyImage:
         return _tagged_artifact_content_hash(self._identity_body(), self.self_hash)
 
     @classmethod
-    def from_dict(cls, payload, compiler_validation="full"):
+    def from_dict(cls, payload, compiler_validation="full", *, _consume=False):
         """Load an artifact with reusable full validation or stored checks.
 
+        ``integrity`` consumes trusted stored numerical schedules without
+        coefficient reconstruction; it checks identity and supported format.
         ``certificate`` retains integrity and executable-adjoint checks, but
         trusts the stored V4 symmetry/physical-image proof. ``full`` performs
         independent reconstruction on first use and reuses the result for the
         same content and validator revision. Set YE3T_CACHE_VERIFY=full for
         unconditional replay. Hashes are not authentication.
+
+        ``_consume`` is reserved for exclusively owned file-decoded trees.
+        Public calls preserve their input; owned file readers can normalize
+        existing containers without retaining a second compiler payload.
         """
         payload = dict(payload)
         _require_exact_keys(
@@ -3567,8 +3573,8 @@ class CompiledTaggedCauchyImage:
             "count-report",
         )
         report = TaggedCauchyImageMultiplicityReport(
-            request=_freeze_json(report_payload["request"]),
-            labels=_freeze_json(report_payload["labels"]),
+            request=_freeze_json(report_payload["request"], consume=_consume),
+            labels=_freeze_json(report_payload["labels"], consume=_consume),
             raw_label_count=int(report_payload["raw_label_count"]),
             image_dimension_upper_bound=int(
                 report_payload["image_dimension_upper_bound"]
@@ -3578,28 +3584,28 @@ class CompiledTaggedCauchyImage:
                 if report_payload["exact_image_dimension"] is None
                 else int(report_payload["exact_image_dimension"])
             ),
-            resource_report=_freeze_json(report_payload["resource_report"]),
+            resource_report=_freeze_json(report_payload["resource_report"], consume=_consume),
             schema=str(report_payload["schema"]),
             convention_hash=str(report_payload["convention_hash"]),
-            validation_report=_freeze_json(report_payload["validation_report"]),
-            provenance=_freeze_json(report_payload["provenance"]),
+            validation_report=_freeze_json(report_payload["validation_report"], consume=_consume),
+            provenance=_freeze_json(report_payload["provenance"], consume=_consume),
         )
         plan = TaggedCauchyImageCompilerPlan(
             report=report,
             materialization_steps=_freeze_json(
-                plan_payload["materialization_steps"]
+                plan_payload["materialization_steps"], consume=_consume
             ),
             schema=str(plan_payload["schema"]),
             convention_hash=str(plan_payload["convention_hash"]),
-            validation_report=_freeze_json(plan_payload["validation_report"]),
-            provenance=_freeze_json(plan_payload["provenance"]),
+            validation_report=_freeze_json(plan_payload["validation_report"], consume=_consume),
+            provenance=_freeze_json(plan_payload["provenance"], consume=_consume),
         )
         compiled = cls(
             plan=plan,
-            payload=_freeze_json(payload["payload"]),
+            payload=_freeze_json(payload["payload"], consume=_consume),
             self_hash=expected,
-            validation_report=_freeze_json(payload["validation_report"]),
-            provenance=_freeze_json(payload["provenance"]),
+            validation_report=_freeze_json(payload["validation_report"], consume=_consume),
+            provenance=_freeze_json(payload["provenance"], consume=_consume),
         )
         _validate_tagged_cauchy_image_identity(compiled, compiler_validation=compiler_validation)
         return compiled
@@ -4335,8 +4341,8 @@ def compile_tagged_cauchy_image(request):
 
 
 def _validate_tagged_cauchy_image_identity(value, compiler_validation="full"):
-    if compiler_validation not in {"full", "certificate"}:
-        raise ValueError("compiler_validation must be full or certificate.")
+    if compiler_validation not in {"full", "certificate", "integrity"}:
+        raise ValueError("compiler_validation must be full or certificate or integrity.")
     request = (
         value.request if isinstance(value, TaggedCauchyImageMultiplicityReport)
         else value.report.request if isinstance(value, TaggedCauchyImageCompilerPlan)
@@ -4344,7 +4350,10 @@ def _validate_tagged_cauchy_image_identity(value, compiler_validation="full"):
         else {}
     )
     if request.get("schema") == "ye3t_tagged_cauchy_general_request_v1":
-        from ye3t.couplings.tagged_cauchy_general import _validate_general, _validate_general_certificate
+        from ye3t.couplings.tagged_cauchy_general import (
+            _validate_general, _validate_general_certificate, _validate_general_integrity)
+        if compiler_validation == "integrity":
+            return _validate_general_integrity(value)
         if compiler_validation == "certificate":
             return _validate_general_certificate(value)
         return _validate_general(value)

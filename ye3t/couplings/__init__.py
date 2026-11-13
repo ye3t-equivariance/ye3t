@@ -125,6 +125,12 @@ from ye3t.couplings.carrier_products import (
     is_carrier_product_request, bind_carrier_product_torch,
     is_carrier_product_inventory, carrier_product_inventory,
 )
+from ye3t.couplings.shared_permutation_factors import (
+    is_shared_permutation_request, shared_permutation_count, compile_shared_permutation,
+)
+from ye3t.couplings.carrier_subspaces import (
+    is_carrier_subspace_request, carrier_subspace_plan, compile_carrier_subspace,
+)
 from ye3t.couplings.rank_additive_hidden_lineage import (
     rank_additive_hidden_lineage_request,
     rank_additive_hidden_lineage_count,
@@ -2718,6 +2724,10 @@ def count(
 ):
     """Return valid labels and multiplicities for a fixed-content request."""
 
+    if is_carrier_subspace_request(request):
+        return carrier_subspace_plan(request)
+    if is_shared_permutation_request(request):
+        return shared_permutation_count(request)
     if is_carrier_product_inventory(request):
         return carrier_product_inventory(request)
     if is_carrier_product_request(request):
@@ -2936,6 +2946,10 @@ def count(
         "backend": backend_plan.selected_backend,
         "labels": [_report_label_payload(label) for label in labels_by_target.get(target_L, ())],
     }
+    if spec.carrier != "ACE_density":
+        from ye3t.representations.young_orthogonal import SPLIT_COORDINATE_CONVENTION
+        convention_payload["coordinate_convention"] = SPLIT_COORDINATE_CONVENTION
+        provenance["coordinate_convention"] = SPLIT_COORDINATE_CONVENTION
     return MultiplicityReport(
         spec=spec,
         counts_by_target=counts_by_target,
@@ -2958,6 +2972,10 @@ def plan(
 ):
     """Return a coupling backend plan with multiplicity provenance."""
 
+    if is_carrier_subspace_request(request):
+        return carrier_subspace_plan(request)
+    if is_shared_permutation_request(request):
+        return shared_permutation_count(request)
     if is_carrier_product_inventory(request):
         return carrier_product_inventory(request)
     if is_carrier_product_request(request):
@@ -3026,7 +3044,7 @@ def plan(
             "typed_blocks": typed_blocks,
             "alpha_bindings": alpha_bindings,
             "alpha_binding_count": len(alpha_bindings),
-            "alpha_binding_convention": "typed_joint_kappa_Lambda_xi_gamma_beta_v1",
+            "alpha_binding_convention": "typed_joint_canonical_split_kappa_Lambda_xi_gamma_beta_v2",
         })
     provenance = {
         **dict(report.provenance),
@@ -4981,8 +4999,15 @@ def compile(
     Tagged/shell catalogue requests accept ``graph_options`` for their existing
     carrier-graph lowering. With ``cache_dir``, exact source payloads are loaded
     individually while constructing the same runtime maps and identities.
+    ``stream_sources=True`` returns a catalogue with individually loaded
+    sources for subsequent canonical schedule construction. It requires a
+    cache directory; cache-off mode keeps eager in-memory construction.
     """
 
+    if is_carrier_subspace_request(request):
+        return compile_carrier_subspace(request)
+    if is_shared_permutation_request(request):
+        return compile_shared_permutation(request)
     if is_carrier_product_request(request):
         return compile_carrier_product(request)
     if is_selected_scalar_vector_request(request):
@@ -5000,7 +5025,8 @@ def compile(
             from .tagged_cauchy_carriers import _compile_tagged_graph
             return _compile_tagged_graph(request, cache_dir=kwargs.get("cache_dir"),
                                          graph_options=kwargs["graph_options"])
-        return compile_tagged_cauchy_carriers(request, cache_dir=kwargs.get("cache_dir"))
+        return compile_tagged_cauchy_carriers(request, cache_dir=kwargs.get("cache_dir"),
+                                              stream_sources=kwargs.get("stream_sources", False))
     if isinstance(request, CompiledTaggedCauchyImage):
         _validate_tagged_cauchy_image_identity(request)
         return request
@@ -8018,6 +8044,18 @@ def execution_plan_from_compiled_coupler(
     representation for saved-plan compatibility and reference checks.
     """
 
+    if is_shared_permutation_request(compiled_coupler):
+        if source_realization is not None or source_assembly is not None:
+            raise ValueError("Bind shared-action physical factors through the source object after compilation")
+        from .shared_permutation_factors import lower_shared_factors
+        if "records" in compiled_coupler:
+            if (isinstance(table_index, bool) or not isinstance(table_index, int)
+                    or not 0 <= table_index < len(compiled_coupler["records"])):
+                raise ValueError("table_index must select an available shared-action sector")
+            return lower_shared_factors(compiled_coupler["records"][table_index]["compiled"])
+        if int(table_index) != 0:
+            raise ValueError("A single shared-action target has table_index=0")
+        return lower_shared_factors(compiled_coupler)
     if not isinstance(compiled_coupler, CompiledCoupler):
         raise TypeError("compiled_coupler must be a CompiledCoupler")
     target_rotation = dict(compiled_coupler.target.get("rotation", {}))

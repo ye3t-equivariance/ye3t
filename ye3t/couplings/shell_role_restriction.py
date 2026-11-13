@@ -46,7 +46,7 @@ def _schur_cycle_trace(partition, cycle_type, weighted):
     return sp.expand(table.det())
 
 
-def _closed_occupations(role_count, rank, occupations):
+def _closed_occupations(role_count, rank, occupations, permuted_role_count=None):
     if occupations is None:
         return None
     weights = tuple(sorted(set(tuple(row) for row in occupations)))
@@ -56,7 +56,7 @@ def _closed_occupations(role_count, rank, occupations):
     chosen = set(weights)
     # Adjacent generators suffice for closure; avoid enumerating the group.
     for row in weights:
-        for i in range(role_count - 1):
+        for i in range((role_count if permuted_role_count is None else permuted_role_count) - 1):
             moved = list(row)
             moved[i], moved[i+1] = moved[i+1], moved[i]
             if tuple(moved) not in chosen:
@@ -64,35 +64,81 @@ def _closed_occupations(role_count, rank, occupations):
     return weights
 
 
-def shell_role_multiplicities(role_count, block_partitions, occupations=None):
-    """Multiplicity of each S_role_count type in the selected paired role space.
+def shell_role_multiplicities(role_count, block_partitions, occupations=None, *, permuted_role_count=None):
+    """Multiplicity of each active shell type in the selected paired role space.
 
     The input is tensor_b Schur_(kappa_b)(C**role_count). Angular multiplicities
     and outer angular paths are supplied separately by the Cauchy compiler.
     Occupations constrain the total weight across blocks and must be closed
-    under the role action. Every returned multiplicity is exact.
+    under the role action. The leading permuted_role_count roles carry S_q;
+    remaining axes are fixed, for example an independent background density.
+    The default permutes all roles. Every returned multiplicity is exact.
     """
     if type(role_count) is not int or role_count < 1:
         raise ValueError("Shell-role count must be a positive integer")
+    active = role_count if permuted_role_count is None else permuted_role_count
+    if type(active) is not int or not 1 <= active <= role_count:
+        raise ValueError("permuted_role_count must be an integer between one and role_dimension")
     blocks = tuple(tuple(kappa) for kappa in block_partitions)
     if not blocks or any(not kappa or tuple(sorted(kappa, reverse=True)) != kappa
                          or any(type(n) is not int or n < 1 for n in kappa) for kappa in blocks):
         raise ValueError("Paired block Young types must be partitions")
-    weights = _closed_occupations(role_count, sum(map(sum, blocks)), occupations)
-    return dict(_shell_role_multiplicities(role_count, blocks, weights))
+    weights = _closed_occupations(role_count, sum(map(sum, blocks)), occupations, active)
+    if (role_count == active+1 and weights is not None and len(weights) == 1
+            and weights[0][:active] == (1,)*active):
+        # Exact singleton occupation: reuse LR induction followed by invariants
+        # of the fixed pooled role. This is a property of the role module,
+        # independent of whether its values come from tags or other sources.
+        result = {}
+        for shape in integer_partitions(active):
+            partition = tuple(shape)
+            copies = sum(n for _, n in _singleton_role_restriction(blocks, partition, weights[0][-1]))
+            if copies:
+                result[partition] = copies
+        return result
+    return dict(_shell_role_multiplicities(role_count, blocks, weights, active))
+
+
+@lru_cache(maxsize=512)
+def _singleton_role_restriction(block_kappas, retained_partition, pooled_degree):
+    """Existing LR count for singleton roles and one fixed pooled factor group.
+
+    m_tau = sum_lambda c_(kappa_1,...,kappa_B)^lambda
+                         c_(tau,(N-s))^lambda.
+    Returns parent partitions with their exact contributions. No role or
+    angular coefficients are constructed. See tensor_product_math_update.md
+    (28)--(29), Frobenius reciprocity and the Schur-functor product rule.
+    """
+    from ye3t.representations.young_orthogonal import young_nary_induced_multiplicity_by_character
+
+    rank = sum(map(sum, block_kappas))
+    restricted = tuple(part for part in (retained_partition, (pooled_degree,) if pooled_degree else ()) if part)
+    contributions = []
+    for partition in integer_partitions(rank):
+        partition = tuple(partition)
+        restriction = young_nary_induced_multiplicity_by_character(restricted, partition)
+        if restriction:
+            copies = restriction * young_nary_induced_multiplicity_by_character(block_kappas, partition)
+            if copies:
+                contributions.append((partition, int(copies)))
+    return tuple(contributions)
 
 
 @lru_cache(maxsize=2048)
-def _shell_role_multiplicities(role_count, blocks, weights):
+def _shell_role_multiplicities(role_count, blocks, weights, active):
     import sympy as sp
 
     if any(len(kappa) > role_count for kappa in blocks):
         return ()
-    classes = tuple(tuple(row) for row in integer_partitions(role_count))
+    classes = tuple(tuple(row) for row in integer_partitions(active))
     traces = {}
     variables = sp.symbols("x:" + str(role_count))
     for cycle_type in classes:
-        value = sp.prod(_schur_cycle_trace(kappa, cycle_type, weights is not None) for kappa in blocks)
+        # Restrict the Schur trace to diag(P_sigma, I_fixed). Group averaging
+        # remains over S_active; fixed axes contribute one-cycles only to the
+        # trace. Their variables follow the active variables for fixed weights.
+        trace_cycles = cycle_type + (1,) * (role_count - active)
+        value = sp.prod(_schur_cycle_trace(kappa, trace_cycles, weights is not None) for kappa in blocks)
         if weights is not None:
             polynomial = sp.Poly(sp.expand(value), *variables)
             value = sum(polynomial.coeff_monomial(weight) for weight in weights)
@@ -103,13 +149,13 @@ def _shell_role_multiplicities(role_count, blocks, weights):
     for shape in classes:
         value = sp.Rational(sum(_cycle_type_class_size(cycle) * traces[cycle]
                                * symmetric_group_character(Partition(shape), cycle)
-                               for cycle in classes), factorial(role_count))
+                               for cycle in classes), factorial(active))
         if not value.is_Integer or value < 0:
             raise ArithmeticError("Shell-role multiplicity is not a nonnegative integer")
         if value:
             result.append((shape, int(value)))
     dimension = sum(Partition(shape).dimension * count for shape, count in result)
-    if dimension != traces[(1,) * role_count]:
+    if dimension != traces[(1,) * active]:
         raise ArithmeticError("Shell-role irreducible dimensions do not recover the source dimension")
     return tuple(result)
 
@@ -121,6 +167,7 @@ def shell_role_inventory(base_report):
     request = base_report["request"]
     coupling = request["coupling_request"]
     degree = coupling["role_dimension"]
+    active = request.get("permuted_role_count", degree)
     families = {}
     keys = ("block_sizes", "block_kappas", "block_Lambdas", "angular_copy_indices",
             "outer_copy_index", "target_L", "target_parity", "convention_id", "rank", "formal_parent")
@@ -131,14 +178,18 @@ def shell_role_inventory(base_report):
     labels = []
     for identity, row in families.items():
         family = row["family"]
-        counts = shell_role_multiplicities(degree, family["block_kappas"], coupling.get("role_occupations"))
+        counts = shell_role_multiplicities(degree, family["block_kappas"], coupling.get("role_occupations"),
+                                          permuted_role_count=active)
         for partition, count in counts.items():
             for copy in range(count):
-                label = {**family, "shell_role_degree": degree, "shell_partition": partition,
+                label = {**family, "shell_role_degree": active, "shell_partition": partition,
                     "shell_tableau_count": int(Partition(partition).dimension), "shell_role_copy": copy,
                     "shell_family_id": identity, "tag_count": 0, "tag_partition": (),
                     "tag_tableau_count": 1, "tag_character": 1, "basis_coordinates": "formal_cauchy",
                     "descriptor_index": len(labels)}
+                if active != degree:
+                    label["role_dimension"] = degree
+                    label["fixed_role_indices"] = tuple(range(active, degree))
                 label["coordinate_id"] = "shell_role_" + scalar._stable_hash(scalar._freeze_json(
                     {"request": {key: value for key, value in request.items() if key != "selected_coordinates"}, "label": label}))
                 labels.append(label)
@@ -147,7 +198,8 @@ def shell_role_inventory(base_report):
     return labels, families
 
 
-def compile_shell_role_rows(base_payload, base_report, selected_coordinates=None, *, _role_templates=None):
+def compile_shell_role_rows(base_payload, base_report, selected_coordinates=None, *, _role_templates=None,
+                            _consume_source=False):
     """Apply exact Young matrix units to sparse Cauchy coefficient rows.
 
     Work is restricted to one already independent angular/copy family at a time.
@@ -162,12 +214,14 @@ def compile_shell_role_rows(base_payload, base_report, selected_coordinates=None
 
     labels, families = shell_role_inventory(base_report)
     degree = base_report["request"]["coupling_request"]["role_dimension"]
+    active = base_report["request"].get("permuted_role_count", degree)
     # Shell IDs are bound inside each base channel, with shell varying fastest.
     # shell_cauchy._request stores channel = base_channel * degree + shell.
-    source = {row["label"]["coordinate_id"]: tuple({
-                  tuple((channel // degree, channel % degree, magnetic) for channel, _, magnetic in word): value
-                  for word, value in scalar._terms_from_records(component["terms"]).items()}
-              for component in row["real_terms_by_component"]) for row in base_payload["descriptors"]}
+    source = {row["label"]["coordinate_id"]: row for row in base_payload["descriptors"]}
+    if _consume_source:
+        # The caller owns this intermediate and only needs its identity after
+        # projection. Release each serialized family as its rows are decoded.
+        base_payload["descriptors"] = ()
 
     def combine(rows, weights):
         result = {}
@@ -191,6 +245,18 @@ def compile_shell_role_rows(base_payload, base_report, selected_coordinates=None
         family_labels = [label for label in labels if label["shell_family_id"] == family_id]
         if selected_coordinates is not None:
             family_labels = [label for label in family_labels if label["coordinate_id"] in selected_coordinates]
+        if not family_labels:
+            continue
+        inputs = []
+        for coordinate in family["input_coordinates"]:
+            record = source.pop(coordinate)
+            inputs.append(tuple({
+                tuple((channel // degree, channel % degree, magnetic) for channel, _, magnetic in word): value
+                for word, value in scalar._terms_from_records(component["terms"]).items()}
+                for component in record["real_terms_by_component"]))
+            del record
+        inputs = tuple(inputs)
+        input_units = sum(len(word)+1 for components in inputs for row in components for word in row)
         for partition in dict.fromkeys(tuple(label["shell_partition"]) for label in family_labels):
             selected = [label for label in family_labels if tuple(label["shell_partition"]) == partition]
             needed = max(label["shell_role_copy"] for label in selected) + 1
@@ -198,13 +264,14 @@ def compile_shell_role_rows(base_payload, base_report, selected_coordinates=None
             # Radial/species identities do not change a map when its complete
             # ordered coefficient rows agree. Reuse only that exact equality,
             # within this compilation; retain all convention and gauge checks.
-            inputs = tuple(source[coordinate] for coordinate in family["input_coordinates"])
-            template_key = (degree, partition, needed, tuple(
+            # Bound both template keys and values. Large exact rows remain
+            # local to this family instead of living for the whole catalogue.
+            template_key = None if input_units > 4096 else (degree, active, partition, needed, tuple(
                 tuple(tuple(sorted(row.items())) for row in components) for components in inputs))
-            if template_key not in templates:
+            if template_key is None or template_key not in templates:
                 copies = []
                 for components in inputs:
-                    rows = _project_tag_rows(components, degree, partition, 0)[0]
+                    rows = _project_tag_rows(components, active, partition, 0)[0]
                     for previous in copies:
                         overlap = inner(previous[0][0], rows[0])
                         rows = tuple(combine((row, old), (1, -overlap))
@@ -215,7 +282,7 @@ def compile_shell_role_rows(base_payload, base_report, selected_coordinates=None
                             raise ArithmeticError("Shell projection rank differs between magnetic components")
                         continue
                     rows = tuple(combine((row,), (1/sp.sqrt(norm),)) for row in rows)
-                    multiplet = _project_tag_rows(rows, degree, partition, 0)
+                    multiplet = _project_tag_rows(rows, active, partition, 0)
                     # E_t0 uses the canonical product couplings' Young gauge.
                     for components in multiplet:
                         for row in components:
@@ -226,8 +293,15 @@ def compile_shell_role_rows(base_payload, base_report, selected_coordinates=None
                         break
                 if len(copies) != needed:
                     raise ArithmeticError("Shell-role projector image differs from the precompiled multiplicity count")
-                templates[template_key] = tuple(copies)
-            copies = templates[template_key]
+                copies = tuple(copies)
+                output_units = sum(len(word)+1 for multiplet in copies
+                    for components in multiplet for row in components for word in row)
+                if template_key is not None and input_units + output_units <= 4096:
+                    while len(templates) >= 8:
+                        templates.pop(next(iter(templates)))
+                    templates[template_key] = copies
+            else:
+                copies = templates[template_key]
             for label in selected:
                 multiplet = copies[label["shell_role_copy"]]
                 components = [{tuple((channel * degree + role, 0, magnetic)

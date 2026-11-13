@@ -26,6 +26,31 @@ def _channel(angular_l=1, species="Ni", n=0):
             "source_family_id": "orthogonal_shifted_jacobi_origin_regular_v1"}
 
 
+@pytest.mark.parametrize("field", [
+    "nmax_per_rnak", "shell_occuapncies_by_rank", "intermediate_selections",
+])
+def test_catalogue_rejects_unknown_scientific_settings_before_planning(monkeypatch, field):
+    import ye3t.couplings.tagged_cauchy_carriers as sources
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Invalid input reached source planning")
+    monkeypatch.setattr(sources, "validate_shell_filtered_source_plan", forbidden)
+    cfg = {"ranks": [4, 6], "nmax": 3, "lmax": 2,
+           "tag_counts": [0, 2], field: {4: 1, 6: 2}}
+    with pytest.raises(ValueError, match="catalogue has unsupported fields.*"+field) as caught:
+        tagged_cauchy_carriers_request(catalogue=cfg, species=["Cu", "Ni"])
+    assert "Nearby supported fields" in str(caught.value)
+
+
+def test_catalogue_normalized_serialized_request_preserves_controls():
+    import json
+    cfg = {"ranks": [4, 6], "nmax": 3, "lmax": 2, "tag_counts": [0, 2],
+           "angular_basis_backend": "normalized_cg_paths_v1", "max_source_blocks": 2,
+           "kappa_policy": "all", "tag_sectors": "all", "max_features_per_rank": None}
+    request = tagged_cauchy_carriers_request(catalogue=cfg, species=["Cu", "Ni"])
+    saved = json.loads(json.dumps(request))
+    assert tagged_cauchy_carriers_request(catalogue=saved["catalogue"], species=saved["species"]) == request
+
+
 @pytest.mark.parametrize("tags", [0, 1])
 def test_rank_one_graph_source_complete_s1_multiplets_through_octupole(tags):
     from ye3t.couplings import tagged_cauchy_marginal_graph_records

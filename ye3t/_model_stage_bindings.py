@@ -83,7 +83,8 @@ def _source_action_binding(source, output_layouts, *, actual_action, constructio
     degrees = {YE3TCarrierKey.from_dict(layout["key"]).permutation_degrees for layout in layouts.values()}
     if len(degrees) != 1:
         raise ValueError("One source action binding must have one acting permutation degree")
-    expected_scope = ("shell_roles" if source.kind == "lifted_density_roles" and source.metadata.get("emitted_action") == "shell_roles" else
+    expected_scope = ("shared_factor_groups" if source.metadata.get("emitted_action") == "shared_factor_groups" else
+                      "shell_roles" if source.kind == "lifted_density_roles" and source.metadata.get("emitted_action") == "shell_roles" else
                       "auxiliary_roles" if source.kind == "selected_marginal" or
                       (source.kind == "tagged_cauchy_occurrence" and source.metadata.get("emitted_action") == "right_tags") else
                       "ordinary_density_trivial" if source.kind == "ordinary_density" else "formal_factors")
@@ -99,6 +100,8 @@ def _source_action_binding(source, output_layouts, *, actual_action, constructio
     elif not parents or not fixed_maps:
         raise ValueError("Selected marginals require construction parents and exact restriction maps")
     maps = copy.deepcopy(list(fixed_maps))
+    if expected_scope == "shared_factor_groups" and not maps:
+        raise ValueError("Shared factor actions require their compiler-owned analysis maps")
     for record in maps:
         if (set(record) != {"plan_hash", "map_name", "orientation"}
                 or len(record["plan_hash"]) != 64
@@ -135,6 +138,7 @@ every stage, including auxiliary geometry, discrete indices and final results.
         return
     previous = {}
     row_count_producers = {}
+    validated_products = {}
     for stage in stages:
         binding = stage["compiler_metadata"].get("operation_binding")
         if not isinstance(binding, dict):
@@ -163,7 +167,7 @@ every stage, including auxiliary geometry, discrete indices and final results.
             raise ValueError("Every action identity requires a structured action specification")
         for carrier in stage["carriers"]:
             spec = binding["action_specs"][carrier["carrier_id"]]
-            if (spec.get("scope") not in {"formal_factors", "auxiliary_roles", "ordinary_density_trivial", "shell_roles"}
+            if (spec.get("scope") not in {"formal_factors", "auxiliary_roles", "ordinary_density_trivial", "shell_roles", "shared_factor_groups"}
                     or spec != _carrier_action_spec(_complete_layout(carrier["carrier_layout"]).key, spec["scope"])):
                 raise ValueError("Action specification differs from its permutation carrier")
         options = binding.get("options", {})
@@ -175,13 +179,22 @@ every stage, including auxiliary geometry, discrete indices and final results.
                 key not in row_count_producers for key in carrier_rows.values())):
             raise ValueError("Each physical carrier domain requires its earlier topology row-count producer")
         if any(item["producer_kind"] == "complete_carrier_product" for item in stage["carriers"]):
-            from ye3t import couplings
+            from ye3t.couplings.carrier_products import _validated_carrier_product
             raw = options.get("product_plan")
             if raw is None:
                 raise ValueError("Carrier products require their canonical product plan")
-            compiled = couplings.compile(raw)
+            # Layers may reuse one immutable fixed map. Equality checks the
+            # entire map before reusing this call's canonical validation;
+            # argument/action bindings below are still checked for every stage.
+            compiled = validated_products.get(raw.get("self_hash"))
+            if compiled is None or compiled != raw:
+                try:
+                    compiled = _validated_carrier_product(raw)
+                except ValueError as error:
+                    raise ValueError("Product maps differ from the canonical compiler") from error
             if compiled != raw or compiled["self_hash"] not in binding["fixed_map_hashes"]:
                 raise ValueError("Product maps differ from the canonical compiler")
+            validated_products[compiled["self_hash"]] = raw
             if len(stage["carriers"]) != 1 or _complete_layout(stage["carriers"][0]["carrier_layout"]) != _complete_layout(compiled["output_layout"]):
                 raise ValueError("Product output differs from its complete compiler layout")
             arguments = binding["input_bindings"]

@@ -5,6 +5,7 @@ import pytest
 
 from ye3t import couplings
 from ye3t.couplings import tagged_cauchy_carriers as core
+from ye3t.core.basis.tree import COUPLING_TREE_CONVENTION
 
 
 @pytest.mark.parametrize("sources", [[], (), [{"values": [0., -0., 1e-12, True, None],
@@ -26,6 +27,10 @@ def test_catalogue_hash_cache_roundtrip_and_corruption_rejection(tmp_path):
     request = couplings.tagged_cauchy_carriers_request(species=["Ni"], catalogue={
         "ranks": [1, 2], "nmax": 1, "lmax": 1, "input_Lmax": 1,
         "max_source_blocks": 2, "tag_counts": [0, 1]})
+    # A historical cache under the same scientific request must not be
+    # interpreted as newly constructed canonical tree coordinates.
+    old_path = tmp_path / ("catalogue_" + request["request_hash"] + ".json")
+    old_path.write_text('{"historical_coordinate_fixture": true}')
     compiled = couplings.compile(request, cache_dir=tmp_path)
     expected = core._scalar._stable_hash(core._scalar._freeze_json(
         {key: value for key, value in compiled.items() if key != "self_hash"}))
@@ -33,7 +38,8 @@ def test_catalogue_hash_cache_roundtrip_and_corruption_rejection(tmp_path):
     restored = couplings.compile(request, cache_dir=tmp_path)
     assert core._scalar._freeze_json(restored) == core._scalar._freeze_json(compiled)
     core.tagged_cauchy_carrier_model_plan(restored)
-    path = next(tmp_path.glob("catalogue_*.json"))
+    assert json.loads(old_path.read_text()) == {"historical_coordinate_fixture": True}
+    path = next((tmp_path / COUPLING_TREE_CONVENTION).glob("catalogue_*.json"))
     damaged = json.loads(path.read_text())
     damaged["sources"][0]["multiplet_count"] += 1
     path.write_text(json.dumps(damaged))

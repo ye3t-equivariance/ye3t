@@ -17,6 +17,10 @@ class _CarrierProduct(torch.nn.Module):
         self.sparse_terms = 0
         self.native_reason = "not_evaluated"
         dtype = torch.get_default_dtype() if dtype is None else dtype
+        from ye3t.execution_plan import YE3T_O3_REAL_TESSERAL_CONVENTION
+        if (compiled["output_layout"]["key"]["convention_id"] == YE3T_O3_REAL_TESSERAL_CONVENTION
+                and dtype.is_complex):
+            raise ValueError("Real-form carrier products use a real floating dtype")
         from ye3t.runtime._carrier_product_sparse import sparse_schedule_size
         self.sparse_terms = sparse_schedule_size(compiled, dtype.is_complex)
         left, right = (compiled["request"][name] for name in ("left", "right"))
@@ -43,6 +47,17 @@ class _CarrierProduct(torch.nn.Module):
         self.register_buffer("direct_scale", torch.tensor([2**-.5 if row["exchange"] and row["left_channel"] != row["right_channel"] else 1
             for row in compiled["channels"]], dtype=dtype, device=device))
         self.role_scale = float(sp.sympify(compiled["role_scale"]))
+        assembly = compiled.get("independent_operation_maps")
+        analysis = None
+        if assembly is not None:
+            size = assembly["independent_map_count"]
+            if size != len(compiled["channels"]) or assembly["parameter_dependent"]:
+                raise ValueError("Product assembly must contain fixed independent selected maps")
+            analysis = torch.zeros((size, size), dtype=dtype, device=device)
+            for q, j, value in assembly["selected_route_analysis"]:
+                coefficient = sp.sympify(value)
+                analysis[q, j] = complex(coefficient) if dtype.is_complex else float(coefficient)
+        self.register_buffer("image_analysis", analysis)
 
     def forward(self, left, right, *, placements=None):
         request = self.compiled["request"]
@@ -67,7 +82,7 @@ class _CarrierProduct(torch.nn.Module):
             result = self._sparse(left, right)
             self.calls += 1
             self.executed_backend = "triton_deterministic_sparse_bilinear"
-            return result
+            return self._assemble_image(result)
         if request["operation"] == "disjoint_induction":
             coupled = torch.einsum("...pcim,...pdjn,mno,phijk->...cdhko", left, right, self.angular, self.young)
         else:
@@ -78,7 +93,12 @@ class _CarrierProduct(torch.nn.Module):
             result = result + flat.index_select(-3, self.swapped)*self.swap_scale[:, None, None]
         self.calls += 1
         self.executed_backend = "torch_factorized_young_angular_product"
-        return result*self.role_scale
+        return self._assemble_image(result*self.role_scale)
+
+    def _assemble_image(self, values):
+        if self.image_analysis is None:
+            return values
+        return torch.einsum("qj,...jtm->...qtm", self.image_analysis, values)
 
     def _use_native(self, left):
         from ye3t.runtime._carrier_product_sparse import _SparseCarrierProduct
@@ -106,6 +126,10 @@ class _CarrierProduct(torch.nn.Module):
         return False
 
     def _apply(self, fn):
+        from ye3t.execution_plan import YE3T_O3_REAL_TESSERAL_CONVENTION
+        if (self.compiled["output_layout"]["key"]["convention_id"] == YE3T_O3_REAL_TESSERAL_CONVENTION
+                and fn(self.angular).is_complex()):
+            raise ValueError("Real-form carrier products use a real floating dtype")
         self._sparse = None
         self.executed_backend = "not_executed"
         self.native_reason = "not_evaluated"
@@ -121,5 +145,6 @@ class _CarrierProduct(torch.nn.Module):
                 "sparse_table_bytes": self._sparse.table_bytes if self._sparse is not None else 0,
                 "sparse_launches_forward_left_right": self._sparse.last_launches if self._sparse is not None else None,
                 "executed_calls": self.calls,
+                "fixed_source_operation_image_resolved": self.image_analysis is not None,
                 "plan_hash": self.compiled["self_hash"], "coefficient_backend": self.compiled["coefficient_backend"],
                 "full_joint_matrix": False, "derivatives": ["value", "vjp", "double_backward"]}

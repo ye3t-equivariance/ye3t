@@ -41,12 +41,64 @@ def test_certificate_load_skips_reconstruction_without_priming_full_cache(artifa
         CompiledTaggedCauchyImage.from_dict(artifact, compiler_validation="none")
 
 
+def test_shared_compile_cache_uses_integrity_and_explicit_full_replays(artifact, monkeypatch, tmp_path):
+    monkeypatch.setenv("YE3T_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("YE3T_CACHE_MODE", "auto")
+    monkeypatch.setenv("YE3T_CACHE_VERIFY", "hash")
+    general._VALIDATED_GENERAL_ARTIFACTS.clear()
+    general._CERTIFICATE_CHECKED_ARTIFACTS.clear()
+    request = artifact["plan"]["report"]["request"]
+    builds = []
+    build = general._general_compile_uncached
+    def construct(plan):
+        builds.append(plan.convention_hash)
+        return build(plan)
+    def no_replay(*args, **kwargs):
+        raise AssertionError("explicit full replay")
+    monkeypatch.setattr(general, "_general_compile_uncached", construct)
+    monkeypatch.setattr(general, "_replay_general_artifact", no_replay)
+    cold = compile(plan(count(request)))
+    monkeypatch.setattr(general, "_validate_general_certificate", no_replay)
+    warm = compile(plan(count(request)))
+    assert cold.self_hash == warm.self_hash
+    assert len(builds) == 1
+    assert cold.self_hash not in general._VALIDATED_GENERAL_ARTIFACTS
+    monkeypatch.setenv("YE3T_CACHE_VERIFY", "full")
+    with pytest.raises(AssertionError, match="explicit full replay"):
+        compile(plan(count(request)))
+
+
 def test_certificate_load_still_checks_hashes_and_exact_adjoint(artifact):
+    _check_rehashed_exact_adjoint(artifact)
     corrupt = copy.deepcopy(artifact)
     corrupt["payload"]["real_schedule_core"]["terms"][0]["coefficient"] += 1
     with pytest.raises(ValueError, match="hash mismatch"):
         CompiledTaggedCauchyImage.from_dict(corrupt, compiler_validation="certificate")
+
+
+def test_integrity_load_never_reconstructs_or_checks_exact_coefficients(artifact, monkeypatch):
+    import ye3t.couplings.tagged_cauchy_image as image
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Stored numerical schedule must not replay exact construction")
+
+    monkeypatch.setattr(general, "_general_count", forbidden)
+    monkeypatch.setattr(general, "_validate_general_certificate", forbidden)
+    monkeypatch.setattr(general, "_replay_general_artifact", forbidden)
+    monkeypatch.setattr(image, "_validate_tagged_cauchy_real_schedule_core", forbidden)
+    monkeypatch.setattr(image, "_exact_real_scalar", forbidden)
+    compiled = CompiledTaggedCauchyImage.from_dict(artifact, compiler_validation="integrity")
+    schedule = tagged_cauchy_real_schedule(compiled, compiler_validation="integrity")
+    assert schedule["terms"] == compiled.payload["real_schedule_core"]["terms"]
+    corrupt = copy.deepcopy(artifact)
+    corrupt["payload"]["real_schedule_core"]["terms"][0]["coefficient"] += 1
+    with pytest.raises(ValueError, match="hash mismatch"):
+        CompiledTaggedCauchyImage.from_dict(corrupt, compiler_validation="integrity")
+
+def _check_rehashed_exact_adjoint(artifact):
     # Fully rehash the modified executable: binary64 must still match exact data.
+    corrupt = copy.deepcopy(artifact)
+    corrupt["payload"]["real_schedule_core"]["terms"][0]["coefficient"] += 1
     core = corrupt["payload"]["real_schedule_core"]
     corrupt["payload"]["real_schedule_core_hash"] = _stable_hash(_freeze_json(core))
     corrupt["self_hash"] = _stable_hash(_freeze_json({k: v for k, v in corrupt.items() if k != "self_hash"}))

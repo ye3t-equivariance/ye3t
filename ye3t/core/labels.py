@@ -16,6 +16,10 @@ def _freeze_compact_label_value(value):
 
 
 def _compact_label_integer(value, field):
+    # Compiler-generated labels already use built-in integers. Keep the public
+    # Integral check for other inputs without repeating its ABC dispatch here.
+    if type(value) is int:
+        return value
     if isinstance(value, bool) or not isinstance(value, Integral):
         raise TypeError(f"{field} values must be integers, not {value!r}.")
     return int(value)

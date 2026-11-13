@@ -3,6 +3,35 @@
 import sympy as sym
 
 
+def test_sparse_generator_schedule_reads_only_stored_entries(monkeypatch):
+    import numpy as np
+    from ye3t.couplings.young_coset_transport import adjacent_generator_columns
+    from ye3t.representations import projectors
+    from ye3t.representations import young_orthogonal
+
+    partition = (3, 2, 1)
+    reference = [projectors.adjacent_transposition_representation_matrix(partition, i)
+                 for i in range(5)]
+    class StoredEntries:
+        def __init__(self, matrix):
+            self.matrix = matrix
+        def todok(self):
+            return self.matrix.todok()
+        def __getitem__(self, index):
+            raise AssertionError("Sparse schedule scanned absent generator entries")
+    adjacent_generator_columns.cache_clear()
+    monkeypatch.setattr(young_orthogonal, "adjacent_transposition_representation_matrix",
+                        lambda parts, i: StoredEntries(reference[i]))
+    actual = adjacent_generator_columns(partition)
+    for (diagonal, off_diagonal, partner), expected in zip(actual, reference):
+        matrix = np.diag(diagonal)
+        for column, row in enumerate(partner):
+            if row != column:
+                matrix[row, column] = off_diagonal[column]
+        np.testing.assert_array_equal(matrix, np.asarray(expected, dtype=float))
+    adjacent_generator_columns.cache_clear()
+
+
 def test_identity_coset_block_transports_in_current_young_copy_gauge():
     from ye3t.global_coupler import _build_young_subgroup_specht_coupling
     from ye3t.representations.young_orthogonal import _young_irrep_matrix
@@ -122,7 +151,7 @@ def test_sparse_young_transport_float32_matches_float64_on_long_shuffle():
     torch.testing.assert_close(single.double(), double, atol=2e-6, rtol=2e-6)
 
 
-def test_matrix_unit_young_storage_matches_direct_restriction():
+def test_legacy_matrix_unit_storage_and_canonical_copy_conversion():
     import math
     import torch
 
@@ -139,11 +168,26 @@ def test_matrix_unit_young_storage_matches_direct_restriction():
                "restricted_scale": math.sqrt(7 / math.factorial(8)),
                "adjacent_generators": adjacent_generator_columns(target)}
     representative = (7, 6, 5, 4, 3, 2, 1, 0)
+    old_slices, new_slices = [], []
+    legacy = (tuple(compact["restricted_scale"] if gamma == column else 0.0
+                    for gamma in range(copies) for column in range(copies)),)
     for gamma in range(copies):
         expected = {**compact, "restricted_kind": "explicit",
-                    "restricted_values": dense}
+                    "restricted_values": legacy}
         actual = transported_young_slice(compact, representative, gamma,
                                          torch.float64, "cpu")
         full = transported_young_slice(expected, representative, gamma,
                                        torch.float64, "cpu")
         torch.testing.assert_close(actual, full, atol=1e-12, rtol=1e-12)
+        old_slices.append(actual)
+        canonical = {**expected, "restricted_values": dense}
+        new_slices.append(transported_young_slice(
+            canonical, representative, gamma, torch.float64, "cpu"))
+    # A saved YY-copy table retains its original predictions. New tree copies
+    # require this explicit orthogonal transform, never a relabelled old table.
+    change = torch.tensor(dense, dtype=torch.float64).reshape(copies, copies)
+    change = change / compact["restricted_scale"]
+    torch.testing.assert_close(change @ change.T, torch.eye(copies, dtype=torch.float64),
+                               atol=1e-12, rtol=1e-12)
+    transformed = torch.einsum("cg,git->cit", change, torch.stack(old_slices))
+    torch.testing.assert_close(transformed, torch.stack(new_slices), atol=1e-12, rtol=1e-12)

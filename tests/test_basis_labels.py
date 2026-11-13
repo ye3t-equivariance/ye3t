@@ -6,6 +6,24 @@ import pytest
 pytestmark = pytest.mark.fast
 
 
+def test_compact_label_integer_fast_case_preserves_public_input_validation():
+    import numpy as np
+    from ye3t.core.labels import CompactLabel
+
+    expected = CompactLabel((1, 1), (2, 2), (0,))
+    converted = CompactLabel((np.int64(1), np.int32(1)),
+                             (np.int64(2), np.int32(2)), (np.int64(0),))
+    assert converted == expected
+    assert all(type(value) is int for value in converted.n_tuple)
+    for invalid in (True, False, 1.0, "1", np.bool_(True)):
+        with pytest.raises(TypeError, match="integers"):
+            CompactLabel((invalid, 1), (2, 2), (0,))
+    with pytest.raises(ValueError, match="non-negative"):
+        CompactLabel((-1, 1), (2, 2), (0,))
+    with pytest.raises(ValueError, match="non-negative"):
+        CompactLabel((1, 1), (2, 2), (-1,))
+
+
 def test_composite_leaf_request_uses_exact_enumerator_canonical_order():
     from ye3t.core.basis.exhaustive_enumeration import (
         canonicalize_composite_leaf_quantum_numbers,

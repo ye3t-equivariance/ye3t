@@ -5560,6 +5560,23 @@ void symmetric_power_shared_monomial_batched_adjoint(
       Scalar(0));
   std::vector<Scalar> monomial_adjoint(
       static_cast<std::size_t>(seed_count * monomial_count));
+  // The compiler's exponent table is shared by every sample and seed.
+  // Preserve ascending component order while avoiding repeated dense scans
+  // of the many zero exponents in low-degree products of broad inputs.
+  std::vector<std::int64_t> factor_offsets(
+      static_cast<std::size_t>(monomial_count + 1), 0);
+  std::vector<std::int64_t> factor_components;
+  std::vector<std::int64_t> factor_exponents;
+  for (std::int64_t term = 0; term < monomial_count; ++term) {
+    for (std::int64_t component = 0; component < input_dimension; ++component) {
+      const auto exponent = monomial_counts[term * input_dimension + component];
+      if (exponent != 0) {
+        factor_components.push_back(component);
+        factor_exponents.push_back(exponent);
+      }
+    }
+    factor_offsets[term + 1] = static_cast<std::int64_t>(factor_components.size());
+  }
   for (std::int64_t batch = 0; batch < batch_size; ++batch) {
     std::fill(
         monomial_adjoint.begin(),
@@ -5592,15 +5609,9 @@ void symmetric_power_shared_monomial_batched_adjoint(
       Scalar monomial = Scalar(1);
       std::int64_t zero_count = 0;
       std::int64_t zero_component = -1;
-      for (std::int64_t component = 0;
-           component < input_dimension;
-           ++component) {
-        const std::int64_t exponent =
-            monomial_counts[
-                term * input_dimension + component];
-        if (exponent == 0) {
-          continue;
-        }
+      for (auto factor = factor_offsets[term]; factor < factor_offsets[term + 1]; ++factor) {
+        const auto component = factor_components[factor];
+        const auto exponent = factor_exponents[factor];
         if (input_row[component] == Scalar(0)) {
           ++zero_count;
           zero_component = component;
@@ -5632,15 +5643,9 @@ void symmetric_power_shared_monomial_batched_adjoint(
         }
         continue;
       }
-      for (std::int64_t component = 0;
-           component < input_dimension;
-           ++component) {
-        const std::int64_t exponent =
-            monomial_counts[
-                term * input_dimension + component];
-        if (exponent == 0) {
-          continue;
-        }
+      for (auto factor = factor_offsets[term]; factor < factor_offsets[term + 1]; ++factor) {
+        const auto component = factor_components[factor];
+        const auto exponent = factor_exponents[factor];
         const Scalar derivative = conjugate(
             Scalar(exponent) * monomial / input_row[component]);
         for (std::int64_t seed = 0; seed < seed_count; ++seed) {

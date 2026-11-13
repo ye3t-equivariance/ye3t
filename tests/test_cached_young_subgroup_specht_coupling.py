@@ -14,7 +14,7 @@ def test_cached_young_subgroup_specht_coupling_writes_file_cache(tmp_path):
     assert coupling.tensor.coefficient_backend == "numeric_subduction"
     assert report["passed"] is True
     assert any("cached" in note.lower() for note in coupling.tensor.notes)
-    assert tuple(cache_dir.glob("numeric_subduction/*.pt"))
+    assert tuple(cache_dir.glob("coefficient_arrays/*.npz"))
 
     cached = build_cached_young_subgroup_specht_coupling(((1,), (1,)), (2,), cache_dir=cache_dir)
     assert cached.coefficient_matrix() == coupling.coefficient_matrix()
@@ -30,7 +30,7 @@ def test_cached_young_subgroup_specht_coupling_recovers_corrupt_cache(tmp_path):
     expected = build_cached_young_subgroup_specht_coupling(
         ((1,), (1,)), (2,), cache_dir=cache_dir
     )
-    cache_path = next(cache_dir.glob("numeric_subduction/*.pt"))
+    cache_path = next(cache_dir.glob("coefficient_arrays/*.npz"))
     cache_path.write_bytes(b"truncated-cache")
 
     recovered = build_cached_young_subgroup_specht_coupling(
@@ -40,7 +40,58 @@ def test_cached_young_subgroup_specht_coupling_recovers_corrupt_cache(tmp_path):
     assert recovered.coefficient_matrix() == expected.coefficient_matrix()
     assert validate_young_subgroup_specht_coupling(recovered)["passed"] is True
     assert cache_path.stat().st_size > len(b"truncated-cache")
-    assert tuple(cache_dir.glob("numeric_subduction/*.tmp.*")) == tuple()
+    assert tuple(cache_dir.glob("coefficient_arrays/*.tmp")) == tuple()
+
+
+@pytest.mark.parametrize("children,target", [
+    (((1,), (1,), (1,)), (2, 1)),
+    (((1,), (1,), (1,), (1,)), (3, 1)),
+    (((1,), (1,), (1,), (1,), (1,)), (3, 2)),
+    (((2, 1), (2, 1)), (3, 2, 1)),
+])
+def test_numeric_public_copies_match_actual_canonical_tree_without_generic_solver(children, target, tmp_path, monkeypatch):
+    import numpy as np
+    from ye3t import build_cached_young_subgroup_specht_coupling, build_young_subgroup_specht_coupling
+    from ye3t.representations import young_subgroup_specht_coupling as consumer
+    from ye3t.representations import young_orthogonal as exact
+    reference = build_young_subgroup_specht_coupling(children, target)
+    expected = np.asarray(reference.coefficient_matrix().tolist(), dtype=float)
+    legacy = tmp_path / "numeric_subduction" / "historical.pt"
+    legacy.parent.mkdir()
+    legacy.write_bytes(b"historical-copy-coordinates-must-stay-untouched")
+    def forbidden(*args, **kwargs):
+        pytest.fail("Production public numeric materialization must use qualified shared canonical maps")
+    monkeypatch.setattr(consumer, "numeric_subduction_nullspace", forbidden)
+    monkeypatch.setattr(consumer, "validate_young_orthogonal_nary_subduction", forbidden)
+    monkeypatch.setattr(exact, "_sympy", forbidden)
+    actual = build_cached_young_subgroup_specht_coupling(children, target, cache_dir=tmp_path)
+    coefficients = np.asarray(actual.tensor.coefficient_matrix_native(), dtype=float)
+    np.testing.assert_allclose(coefficients, expected, atol=1e-12, rtol=1e-12)
+    np.testing.assert_allclose(coefficients.T @ coefficients, np.eye(coefficients.shape[1]), atol=1e-12, rtol=1e-12)
+    assert actual.tensor.lr_chain_labels == reference.tensor.lr_chain_labels
+    assert actual.validation.intermediate_subspaces_match is True
+    assert actual.numeric_validation_report["performed"] is False
+    assert "canonical_numeric_split" in actual.tensor.codepath
+    assert legacy.read_bytes() == b"historical-copy-coordinates-must-stay-untouched"
+
+
+@pytest.mark.parametrize("tree,generator", [("left", 0), ("right", 1), ("balanced", 0)])
+def test_numeric_public_intermediate_labels_select_actual_subgroup_spaces(tree, generator, tmp_path):
+    import numpy as np
+    from ye3t import build_cached_young_subgroup_specht_coupling
+    from ye3t.representations.projectors import adjacent_transposition_representation_matrix
+    tensor = build_cached_young_subgroup_specht_coupling(
+        ((1,),) * 3, (2, 1), bracketing=tree, cache_dir=tmp_path).tensor
+    coefficients = np.asarray(tensor.coefficient_matrix_native(), dtype=float)
+    identity = tensor.coset_reps.index((0, 1, 2))
+    action = np.asarray(adjacent_transposition_representation_matrix((2, 1), generator).tolist(), dtype=float)
+    for copy, label in enumerate(tensor.lr_chain_labels):
+        intermediate, = [partition.parts for partition in label.intermediate_partitions if partition.size == 2]
+        sign = 1 if tuple(intermediate) == (2,) else -1
+        vector = coefficients[identity, 2 * copy:2 * copy + 2]
+        assert np.linalg.norm(vector) > .1
+        np.testing.assert_allclose(action @ vector, sign * vector, atol=1e-12, rtol=1e-12)
+        assert np.linalg.norm(action @ vector + sign * vector) > .1
 
 
 def test_cached_young_subgroup_specht_coupling_runtime_does_not_import_sympy(tmp_path):

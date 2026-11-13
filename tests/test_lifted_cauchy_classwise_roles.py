@@ -12,10 +12,9 @@ sympy matrices sized ``role_dimension**size``.  This module embeds
 role_dimension 2 and 3), asserts the code reproduces them exactly, then
 checks the sparse role-carrier storage format directly.
 
-These keys are deliberately small (size <= 4, plus one size-6 key): this
-file must stay fast, and the byte-identity claim is a mathematical identity
-that holds at every size, so a small size is exactly as strong evidence as a
-large one.
+These keys are deliberately small (size <= 4, plus one size-6 key) for routine
+regression coverage. Larger cases require their own executed checks of the
+implemented storage, dispatch and resource behavior.
 
 For size >= 6, ``_role_schur_vectors`` dispatches to an exact coset
 decomposition (``_role_schur_vectors_coset``) that avoids
@@ -33,6 +32,66 @@ import pytest
 
 from ye3t.couplings import lifted_cauchy_scalar as compiler_module
 from ye3t.couplings.tagged_cauchy import kostka_number
+
+
+def test_role_construction_reuses_complete_checks_and_full_mode_replays(monkeypatch):
+    core = compiler_module
+    monkeypatch.setenv('YE3T_CACHE_MODE', 'auto')
+    monkeypatch.setenv('YE3T_CACHE_VERIFY', 'hash')
+    states, vectors, _ = core._selected_role_schur_vectors(3, 4, (2, 2), 1)
+    coordinates = tuple(sorted(vectors))
+    copies = (((1,), coordinates),)
+    payload = core._role_carrier_payload(states, coordinates, vectors, copies, 4, 'role_schur')
+    original = core._validate_carrier_payload_uncached
+    expected = original(payload)
+    calls = []
+
+    def recorded(value):
+        calls.append(True)
+        return original(value)
+
+    monkeypatch.setattr(core, '_validate_carrier_payload_uncached', recorded)
+    assert core._validate_carrier_payload(payload) == expected
+    assert calls == []
+    monkeypatch.setenv('YE3T_CACHE_VERIFY', 'full')
+    assert core._validate_carrier_payload(payload) == expected
+    assert calls == [True]
+    monkeypatch.setenv('YE3T_CACHE_VERIFY', 'hash')
+    import copy
+    corrupted = copy.deepcopy(payload)
+    corrupted['gram'][0][0]['real'] = ()
+    corrupted['gram'][0][0]['binary64'] = (0.0, 0.0)
+    corrupted.pop('carrier_hash')
+    corrupted['carrier_hash'] = core._stable_record_hash(corrupted)
+    with pytest.raises(ValueError, match='Gram'):
+        core._validate_carrier_payload(corrupted)
+    assert calls == [True, True]
+
+
+@pytest.mark.parametrize("degree,size,partition,copy", [(2, 3, (2, 1), 0), (3, 4, (2, 2), 1)])
+def test_restricted_actions_use_exact_field_inverse_and_match_symbolic_reference(
+        monkeypatch, degree, size, partition, copy):
+    sp = compiler_module._sympy()
+    states, vectors, _ = compiler_module._selected_role_schur_vectors(degree, size, partition, copy)
+    columns = tuple(vectors[key] for key in sorted(vectors))
+    basis = sp.Matrix.hstack(*(sp.Matrix(column) for column in columns))
+    _, pivots = basis.T.rref()
+    selected = tuple(range(basis.cols))
+    inverse = basis.extract(pivots, selected).inv()
+    expected = tuple(sp.simplify(inverse * basis.extract(
+        compiler_module._adjacent_permutation_rows(states, size, adjacent), selected).extract(pivots, selected))
+        for adjacent in range(size-1))
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Carrier pivot inversion must retain its exact algebraic field")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(sp.MutableDenseMatrix, "inv", forbidden)
+        actual = compiler_module._restricted_carrier_actions(states, columns, size)
+    assert actual == expected
+    for adjacent, action in enumerate(actual):
+        rows = compiler_module._adjacent_permutation_rows(states, size, adjacent)
+        assert sp.simplify(basis * action - basis.extract(rows, selected)) == sp.zeros(*basis.shape)
 
 
 # (role_dimension, size, partition, angular_l, output_L) -> hashes recorded

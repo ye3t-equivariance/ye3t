@@ -9,18 +9,16 @@ the maps that realize ``S_mu(W (x) V) = (+) g S_alpha(W) (x) S_beta(V)``; the
 symmetric and skew Cauchy pairings are the cases ``mu = (n)`` and
 ``mu = (1^n)``.
 
-Algorithm. The intertwining equations are solved over the rationals in
-Young's seminormal form, where every adjacent transposition is a rational
-matrix, and then transported to the project's Young-orthogonal form by the
-diagonal seminormal norms ``gamma_T``, with
-``gamma_{s_i T} = (1 - 1/d^2) gamma_T`` for axial distance ``d > 0``. Path
-independence of ``gamma_T`` is asserted during construction.
+The production constructor applies selected Young-tableau projectors to
+deterministically ordered coordinate columns, then transports the reference
+component with sparse Young-orthogonal generators. Multiplicity comes from
+the exact character count before coefficient construction. Its local copy
+normalization is shared with binary LR construction in ``projectors``.
 
-Multiplicity gauge (declared, deterministic). The rational solution space is
-taken in reduced row echelon pivot order, mapped to the orthogonal form, and
-orthonormalized by exact Gram-Schmidt under ``<A, B> = tr(A^T B) / dim S^mu``;
-by Schur's lemma ``A^T B`` is that inner product times the identity. Each
-intertwiner is scaled to an isometry and its first nonzero entry is positive.
+Identity, sign-twist and invariant-metric specializations preserve their
+historical coordinates. The rational-nullspace algorithm remains an explicitly
+named reference during compatibility/performance qualification; production
+does not dispatch to it.
 
 Algorithmic reference: Young's seminormal and orthogonal forms of the
 symmetric group. Paper/reference: James and Kerber, *The Representation Theory
@@ -152,16 +150,18 @@ def _sign_twist(partition):
     sp = _sympy()
     tableaux = standard_tableaux(partition)
     transposed = {tableau: index for index, tableau in enumerate(standard_tableaux(_conjugate(partition)))}
-    result = sp.zeros(len(tableaux))
+    entries = {}
     for row, tableau in enumerate(tableaux):
         transpose = tuple(tuple(tableau[i][j] for i in range(len(tableau)) if j < len(tableau[i]))
                           for j in range(len(tableau[0])))
         word = tuple(value for line in tableau for value in line)
         sign = (-1)**sum(word[i] > word[j] for i in range(len(word)) for j in range(i+1, len(word)))
-        result[row, transposed[transpose]] = sign
-    if next(value for value in result if value != 0) < 0:
-        result = -result
-    return result
+        entries[row, transposed[transpose]] = sign
+    # Exactly one entry per row: preserve the historical first-positive gauge
+    # without traversing zero entries or setting each symbolic matrix element.
+    if next(iter(entries.values())) < 0:
+        entries = {key: -value for key, value in entries.items()}
+    return sp.MutableSparseMatrix(len(tableaux), len(tableaux), entries)
 
 
 @lru_cache(maxsize=None)
@@ -169,8 +169,8 @@ def exact_kronecker_intertwiners(parent, left, right):
     """Exact maps with identity, invariant-metric and sign-twist fast paths.
 
     Tensoring by sign transposes a Young diagram. The signed tableau-transpose
-    map follows the same Young-orthogonal adjacent-generator relations and
-    positive-pivot isometry gauge as the general exact solver below.
+    map retains its historical positive-pivot isometry gauge. General maps
+    use the versioned shared selected-tableau projector convention.
     """
     sp = _sympy()
     parent, left, right = (tuple(map(int, value)) for value in (parent, left, right))
@@ -187,18 +187,54 @@ def exact_kronecker_intertwiners(parent, left, right):
         matrix = _sign_twist(right if left == sign else left)
     elif parent == trivial:
         dimension = len(standard_tableaux(left))
-        matrix = sp.eye(dimension).reshape(dimension**2, 1)/sp.sqrt(dimension)
+        scale = 1/sp.sqrt(dimension)
+        matrix = sp.MutableSparseMatrix(dimension**2, 1,
+            {(i*(dimension+1), 0): scale for i in range(dimension)})
     elif parent == sign:
         matrix = _sign_twist(left)
         matrix = matrix.reshape(matrix.rows**2, 1)/sp.sqrt(matrix.rows)
     if matrix is not None:
         return {"multiplicity": 1, "intertwiners": (matrix,), "gauge": _GAUGE}
-    return _exact_kronecker_intertwiners_general(parent, left, right)
+    return _projector_kronecker_intertwiners(parent, left, right)
+
+
+@lru_cache(maxsize=256)
+def _projector_kronecker_intertwiners(parent, left, right):
+    """Shared selected projector; do not allocate a product-action matrix."""
+    from .projectors import (
+        TABLEAU_PROJECTOR_COPY_CONVENTION, _tableau_construction_schedule,
+        _tableau_projector_copies, _sparse_action_columns, _apply_sparse_action,
+    )
+    sp = _sympy()
+    left_dimension = len(standard_tableaux(left))
+    right_dimension = len(standard_tableaux(right))
+    count = kronecker_multiplicity(parent, left, right)
+    actions = tuple((
+        _sparse_action_columns(adjacent_transposition_representation_matrix(left, i)),
+        _sparse_action_columns(adjacent_transposition_representation_matrix(right, i)),
+    ) for i in range(max(0, sum(parent) - 1)))
+
+    def action(factor, generator, columns):
+        a, b = actions[generator]
+        # Row-major vec(A X B^T) = (A tensor B) vec(X).
+        return sp.MutableSparseMatrix.hstack(*(
+            _apply_sparse_action(b, _apply_sparse_action(
+                a, columns[:, i].reshape(left_dimension, right_dimension),
+                left_dimension).T, right_dimension).T.reshape(left_dimension * right_dimension, 1)
+            for i in range(columns.cols)))
+
+    priority = tuple(i * right_dimension + j
+                     for i in _tableau_construction_schedule(left)[3]
+                     for j in _tableau_construction_schedule(right)[3])
+    maps = _tableau_projector_copies(
+        action, (parent,), left_dimension * right_dimension, count, priority)
+    return {"multiplicity": count, "intertwiners": maps,
+            "gauge": TABLEAU_PROJECTOR_COPY_CONVENTION}
 
 
 @lru_cache(maxsize=None)
 def _exact_kronecker_intertwiners_general(parent, left, right):
-    """Orthonormal exact basis of ``Hom_{S_n}(S^parent, S^left (x) S^right)``.
+    """Historical rational-solve reference for explicit compatibility tests.
 
     Returns a dict with ``multiplicity`` and ``intertwiners``: SymPy matrices
     of shape ``[dim left * dim right, dim parent]`` in the Young-orthogonal

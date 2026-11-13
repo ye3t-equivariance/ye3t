@@ -1,5 +1,87 @@
 # Covariant Cauchy bases for arbitrary `(L, parity)` and Young outputs
 
+## Shared normalized coupling paths
+
+`angular_basis_backend="normalized_cg_paths_v1"` constructs Young-adapted
+multiplicities in normalized angular coupling-path coordinates. The shared
+constructor uses exact adjacent-factor recoupling and Young branching. Magnetic
+components are represented by the existing normalized binary CG trees. It
+supports general block Young types and every available angular copy.
+
+Typed general-Young blocks and new shell-role catalogues use these shared
+maps. Symmetric and antisymmetric typed blocks retain their specialized
+occupation and determinant evaluators. A commuting Cauchy source pairs the
+normalized role and spatial maps with the factor `1/sqrt(dim[kappa])`.
+Selected occupations are reduced through the existing role-subduction maps;
+outer angular couplings use the same CG-tree constructor. Shell permutations
+act in the resulting role multiplicity space.
+
+The abstract selected embeddings satisfy `C† C = I` and `C C† = Pi_selected`.
+This normalization concerns the representation carrier. Independence after
+physical evaluation requires the appropriate source-image analysis; sampled
+feature orthogonality is a separate property. Counting still precedes
+coefficient construction and supplies the selected independent copies.
+
+The exact reduced maps use the common artifact cache, indexed by factor rank,
+angular degree, Young type, output angular momentum and coefficient convention.
+They can be reused across physical source families. Saved execution schedules
+contain their numerical maps and reload without rebuilding coefficients.
+Normalized occupation-subgroup vectors also use this artifact store. Their
+identity contains the ordered abstract subgroup, parent Young type and existing
+copy convention. Empty role coordinates add no subgroup factors; physical role
+bindings remain explicit in the source schedule. Reload preserves exact scalars
+and the original copy order. Normal reuse verifies the stored artifact; full
+verification reconstructs the canonical map for comparison. Read-only caches
+must already contain the required occupation entries.
+Compatible Young sectors share CG prefixes at execution. Native execution
+uses YE3T's existing angular-DAG kernel and analytical adjoint/double backward.
+Native Cauchy execution also binds the compiler's outer CG trees to that same
+kernel, including trees with different angular momenta at their leaves. The
+binding retains the original coefficients, real-form phase signs and complete
+magnetic outputs. Indices and coefficient tensors persist with the bound
+runtime; geometry-dependent values are recomputed for each evaluation. Real
+execution stores real tensors throughout. The Torch tree evaluator remains
+the reference, and the explicit analytical adjoint uses its established
+product-rule traversal. Performance depends on the selected catalogue and
+batch size; native dispatch alone does not guarantee faster force training.
+
+The coordinate convention is
+`normalized_role_subduction_paired_angular_paths_v1`. Historical saved maps
+retain their original convention and weights. The flat monomial export helper
+accepts legacy polynomial artifacts; shared-path artifacts retain their
+factorized schedule and use `evaluate_covariant_cauchy` or the application
+runtime. Generic ordered-role Cauchy artifacts still require migration to
+compact local execution. Their existing general-parent implementation remains
+available.
+
+## Legacy pivot-normalized angular coefficients
+
+For two coupled angular blocks, the triangle rule gives one copy of each
+allowed target `L`. The compiler obtains its complete magnetic multiplet from
+YE3T's exact Clebsch-Gordan routine. This avoids building the full tensor-space
+projector during angular preparation.
+
+For legacy polynomial artifacts, write the normalized CG
+column as `g_M`, and let `p` be the first nonzero coefficient of `g_L` in
+ascending input magnetic order. The saved synthesis column is `g_M / p`,
+its Gram value is `1 / p**2`, and its analysis row is `p * g_M.T` in the
+real Condon-Shortley convention. Complete payloads, including their hashes,
+match the bounded exact projector construction.
+
+References: [NIST DLMF 34.1.1](https://dlmf.nist.gov/34.1.E1) for the CG
+convention and [34.3.1](https://dlmf.nist.gov/34.3.E1) for the scalar case.
+The implementation composes existing YE3T exact routines.
+
+For three or more angular blocks, the compiler works in the requested
+highest-weight space. With input block momenta `Lambda_b`, it finds the exact
+kernel of `J_+ : H_L -> H_(L+1)`, retains every independent copy, and lowers
+each column through all `M=-L,...,L`. Here `H_M` contains magnetic tuples whose
+sum is `M`. The first nonzero highest-weight entry sets each column's pivot
+normalization. The multiplicity Gram matrix and its exact dual preserve the
+saved coordinate convention. Tests compare complete coefficients and hashes
+with the bounded full-projector reference, including sectors with multiple
+copies. Other target angular sectors are constructed when requested.
+
 ## Independent tagged-source planning
 
 `couplings.count(request)` and `couplings.plan(request)` return independent

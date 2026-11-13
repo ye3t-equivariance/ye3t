@@ -19,7 +19,7 @@ cfg_ye3t = {
         "parent": {"young_lambda": "(N)", "L": 0, "parity": "even"},
         "factorization": "cauchy", "subspace": "full",
         "uncoupled_factor_inputs": {
-            "eta_count_per_rank": {1: 1, 2: 1, 3: 1, 4: 2, 5: 1, 6: 1, 7: 1, 8: 1},
+            "eta_max_per_rank": {1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8},
             "l_max_per_rank": {1: 0, 2: 1, 3: 1, 4: 1, 5: 1, 6: 1, 7: 1, 8: 1},
         },
         "intermediates": {"young_kappa": "all_valid", "block_rotation": {"policy": "all_valid"}},
@@ -70,15 +70,15 @@ def run_tagged_cauchy_image_catalogue(config=None):
         raise ValueError("This physical-image compiler requires full scalar symmetric O3 Cauchy sectors.")
     catalogue = dict(settings["basis"]["catalogue"])
     if (tuple(catalogue.pop("ranks")) != representation.ranks
-            or catalogue["nmax_per_rank"] != dict(representation.eta_count_per_rank)
             or catalogue["lmax_per_rank"] != dict(representation.l_max_per_rank)):
-        raise ValueError("The source catalogue and representation rank/channel settings must match.")
+        raise ValueError("The source catalogue and representation ranks/angular settings must match.")
     if settings["basis"]["single_factors"]["radial"]["family"] != "shifted_jacobi":
         raise ValueError("This exact physical-image compiler requires shifted_jacobi sources.")
     if (settings["basis"]["tensor_product"]["kind"] != "tagged"
             or settings["basis"]["single_factors"]["chemical"]["kind"] != "explicit"
             or settings["runtime"]["backend"] != "exact_physical_image"):
         raise ValueError("Select tagged factors, explicit species, and the exact_physical_image backend.")
+    catalogue["eta_max_per_rank"] = dict(representation.eta_max_per_rank)
     catalogue["tag_counts_by_rank"] = settings["basis"]["tensor_product"]["tag_counts_per_rank"]
     request = couplings.tagged_cauchy_image_request(
         catalogue=catalogue, species=settings["basis"]["single_factors"]["species"])

@@ -8,52 +8,11 @@ in ``subtree_dag`` for validation and serialization paths.
 """
 
 from functools import lru_cache
-from math import factorial, sqrt
 
 import numpy as np
 
 from ye3t.core.basis.labels import LeafLabel, NodeLabel, SymBlockLabel
-
-
-@lru_cache(maxsize=None)
-def _factorials_up_to(n):
-    return tuple(factorial(i) for i in range(int(n) + 1))
-
-
-def _cg_integer_with_factorials(j1, m1, j2, m2, j3, m3, facts):
-    if m1 + m2 != m3:
-        return 0.0
-    if abs(m1) > j1 or abs(m2) > j2 or abs(m3) > j3:
-        return 0.0
-    if j3 < abs(j1 - j2) or j3 > j1 + j2:
-        return 0.0
-    prefactor_num = (
-        (2 * j3 + 1)
-        * facts[j1 + j2 - j3]
-        * facts[j1 - j2 + j3]
-        * facts[-j1 + j2 + j3]
-        * facts[j1 + m1]
-        * facts[j1 - m1]
-        * facts[j2 + m2]
-        * facts[j2 - m2]
-        * facts[j3 + m3]
-        * facts[j3 - m3]
-    )
-    prefactor_den = facts[j1 + j2 + j3 + 1]
-    z_min = max(0, j2 - j3 - m1, j1 - j3 + m2)
-    z_max = min(j1 + j2 - j3, j1 - m1, j2 + m2)
-    total = 0.0
-    for z in range(int(z_min), int(z_max) + 1):
-        denominator = (
-            facts[z]
-            * facts[j1 + j2 - j3 - z]
-            * facts[j1 - m1 - z]
-            * facts[j2 + m2 - z]
-            * facts[j3 - j2 + m1 + z]
-            * facts[j3 - j1 - m2 + z]
-        )
-        total += (-1.0 if z % 2 else 1.0) / denominator
-    return sqrt(prefactor_num / prefactor_den) * total
+from ye3t.core.cg import _cg_table_exact
 
 
 def label_block_specs(label_obj):
@@ -108,15 +67,8 @@ def cg_matrix_for_node(left_total, right_total, output_L):
     right_total = int(right_total)
     output_L = int(output_L)
     matrix = np.zeros((2 * left_total + 1, 2 * right_total + 1), dtype=np.complex128)
-    facts = _factorials_up_to(left_total + right_total + output_L + 1)
-    for m1 in range(-left_total, left_total + 1):
-        for m2 in range(-right_total, right_total + 1):
-            M = int(m1 + m2)
-            if abs(M) > output_L:
-                continue
-            value = _cg_integer_with_factorials(left_total, m1, right_total, m2, output_L, M, facts)
-            if abs(value) > 1e-14:
-                matrix[m1 + left_total, m2 + right_total] = value
+    for m1, m2, _, value in _cg_table_exact(left_total, right_total, output_L):
+        matrix[int(m1) + left_total, int(m2) + right_total] = float(value)
     return matrix
 
 

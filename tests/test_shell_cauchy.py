@@ -48,6 +48,94 @@ def test_formal_shell_runtime_preserves_occupation_and_selected_counts():
     assert any(tuple(record["label"]["block_kappas"][0]) == (3, 1) for record in schedule["inventory"])
 
 
+def test_catalogue_releases_finished_rank_workspaces_and_preserves_exact_sources(monkeypatch):
+    import weakref
+    from ye3t.couplings import shell_cauchy
+    monkeypatch.setenv('YE3T_CACHE_MODE', 'off')
+    block_compile = scalar._compile_block_template
+    source_compile = shell_cauchy.compile_shell_cauchy
+    tracked = []
+    transitions = []
+
+    class TrackedBlock(dict):
+        pass
+
+    def record_block(key, **kwargs):
+        result = TrackedBlock(block_compile(key, **kwargs))
+        tracked.append((key[1], weakref.ref(result)))
+        return result
+
+    def check_source(request, **kwargs):
+        rank = sum(request['coupling_request']['block_sizes'])
+        if rank == 3:
+            old = [reference for size, reference in tracked if size == 2]
+            assert old and all(reference() is None for reference in old)
+            transitions.append(rank)
+        result = source_compile(request, **kwargs)
+        # Source rows own their coefficients before cache serialization returns.
+        # No completed angular block should remain in the catalogue workspace.
+        assert all(reference() is None for _, reference in tracked)
+        assert set(kwargs.get('_block_templates') or ()) <= {'shell_role_rows'}
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(scalar, '_compile_block_template', record_block)
+        patch.setattr(shell_cauchy, 'compile_shell_cauchy', check_source)
+        request = shell_request(ranks=(2,3))
+        compiled = couplings.compile(request)
+    assert transitions
+    assert all(reference() is None for _, reference in tracked)
+    assert sum(source['multiplet_count'] for source in compiled['sources']) == couplings.count(request)['multiplet_count']
+    for source in compiled['sources']:
+        assert couplings.validate_tagged_cauchy_carriers(source, exact_reconstruction=True)
+
+
+def test_shell_exact_reconstruction_accepts_reference_storage_but_rejects_changed_map(monkeypatch):
+    from ye3t.couplings import shell_cauchy
+    from ye3t.couplings import covariant_cauchy
+    monkeypatch.setenv("YE3T_CACHE_MODE", "off")
+    request = shell_request(ranks=(2,))
+    fixed = couplings.count(request)["selected_records"][0]["request"]
+    compact = shell_cauchy._compile_shell_cauchy(fixed)
+    compile_block = covariant_cauchy._scalar._compile_block_template
+    def reference_block(key, **kwargs):
+        kwargs["emit_ordered_reference"] = True
+        return compile_block(key, **kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(covariant_cauchy._scalar, "_compile_block_template", reference_block)
+        reference = shell_cauchy._compile_shell_cauchy(fixed)
+    assert reference["coupling_hash"] != compact["coupling_hash"]
+    assert reference["descriptors"] == compact["descriptors"]
+    assert shell_cauchy.validate_shell_cauchy(reference, exact_reconstruction=True)
+    changed = copy.deepcopy(reference)
+    changed["descriptors"][0]["real_terms_by_component"][0]["terms"] = ()
+    changed.pop("self_hash")
+    changed["self_hash"] = scalar._stable_record_hash(changed)
+    with pytest.raises(ValueError, match="exact coefficient reconstruction differs"):
+        shell_cauchy.validate_shell_cauchy(changed, exact_reconstruction=True)
+
+
+def test_shell_source_rows_equal_full_coupler_and_keep_exact_reconstruction(monkeypatch):
+    from ye3t.couplings import shell_cauchy
+    monkeypatch.setenv("YE3T_CACHE_MODE", "off")
+    request = shell_request(ranks=(3,))
+    compile_covariant = shell_cauchy.compile_covariant_cauchy
+
+    def full_coupler(value, **kwargs):
+        kwargs["_source_rows_only"] = False
+        return compile_covariant(value, **kwargs)
+
+    for record in couplings.count(request)["selected_records"]:
+        compact = shell_cauchy._compile_shell_cauchy(record["request"])
+        with monkeypatch.context() as patch:
+            patch.setattr(shell_cauchy, "compile_covariant_cauchy", full_coupler)
+            full = shell_cauchy._compile_shell_cauchy(record["request"])
+        assert compact["descriptors"] == full["descriptors"]
+        assert compact["coupling_hash"] != full["coupling_hash"]
+        assert shell_cauchy.validate_shell_cauchy(compact, exact_reconstruction=True)
+        assert shell_cauchy.validate_shell_cauchy(full, exact_reconstruction=True)
+
+
 def test_formal_shell_source_selection_happens_before_coefficients():
     request = shell_request()
     cfg = copy.deepcopy(request["catalogue"])
@@ -99,3 +187,37 @@ def test_paired_and_angular_intermediates_are_selected_before_maps(monkeypatch):
     cfg["intermediate_selection"]["young_kappa"]["by_block_size"][4] = [[2, 2]]
     with pytest.raises(ValueError, match="valid alternatives"):
         couplings.count(couplings.tagged_cauchy_carriers_request(catalogue=cfg, species=["Ni"]))
+
+
+def test_explicit_base_contents_drive_shell_preplanning(monkeypatch):
+    from ye3t.couplings import shell_cauchy
+    cfg = copy.deepcopy(shell_request(ranks=(4,))["catalogue"])
+    cfg["shell_role_action"] = "permutation"
+    cfg["shell_occupancies_by_rank"] = {4: [[2, 2]]}
+    cfg["source_contents_by_rank"] = {4: [{"block_sizes": [4], "channels": [
+        {"neighbor_species": "Ni", "radial_channel": 0, "l": 1}]}]}
+    request = couplings.tagged_cauchy_carriers_request(catalogue=cfg, species=["Ni"])
+    def forbidden(*args, **kwargs):
+        pytest.fail("Explicit contents must avoid broad content enumeration and coefficient construction")
+    monkeypatch.setattr(shell_cauchy, "permutations", forbidden)
+    monkeypatch.setattr(scalar, "_compile_block_template", forbidden)
+    report = couplings.count(request)
+    assert report["multiplet_count"] > 0
+    assert all(record["request"]["coupling_request"]["channels"][0]["l"] == 1
+               for record in report["selected_records"])
+    direct = []
+    for L in range(cfg["input_Lmax"] + 1):
+        coupling = couplings.covariant_cauchy_request([
+            {"neighbor_species": "Ni", "radial_channel": 0, "l": 1,
+             "source_family_id": cfg["source_family_id"]}], [4], target_L=L,
+            role_dimension=2, role_occupations=[(2, 2)])
+        direct.extend(couplings.count({"family": "tagged_cauchy_carriers",
+            "basis_coordinates": "formal_cauchy", "coupling_request": coupling,
+            "radial_count": 1, "shell_role_action": "permutation"})["labels"])
+    actual = [item["label"] for item in report["available_coordinate_inventory"]]
+    assert {label["coordinate_id"] for label in actual} == {label["coordinate_id"] for label in direct}
+    # In formal coordinates n is a base radial index. A flattened second-shell
+    # index is not a second independent base radial function.
+    cfg["source_contents_by_rank"][4][0]["channels"][0]["radial_channel"] = 1
+    with pytest.raises(ValueError, match="bounds"):
+        couplings.tagged_cauchy_carriers_request(catalogue=cfg, species=["Ni"])

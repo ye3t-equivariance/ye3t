@@ -12,19 +12,20 @@ from .artifacts import (
     default_artifact_cache_directory,
 )
 
-from .symbolic import (
-    CGCacheKey,
-    CGCachedEntry,
-    ClebschGordanCache,
-    DualCacheSystem,
-    FeatureCache,
-    FeatureCachedEntry,
-    FeatureCacheKey,
-    PrimitiveCacheKey,
-    PrimitiveCacheSystem,
-    PrimitiveFeature,
-    ProductRecipe,
-)
+_SYMBOLIC_EXPORTS = {
+    "CGCacheKey", "CGCachedEntry", "ClebschGordanCache", "DualCacheSystem",
+    "FeatureCache", "FeatureCachedEntry", "FeatureCacheKey", "PrimitiveCacheKey",
+    "PrimitiveCacheSystem", "PrimitiveFeature", "ProductRecipe",
+}
+
+
+def __getattr__(name):
+    if name in _SYMBOLIC_EXPORTS:
+        from . import symbolic
+        value = getattr(symbolic, name)
+        globals()[name] = value
+        return value
+    raise AttributeError(name)
 
 __all__ = [
     "ARTIFACT_STORE_SCHEMA",

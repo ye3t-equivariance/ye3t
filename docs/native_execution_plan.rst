@@ -275,10 +275,11 @@ A rank-general one-warp-per-sample factorized-angular traversal was also
 validated against the serial CUDA reference, including shared-memory
 double-backward workspaces and a rank-12 two-block plan. It improved the two
 crossed catalogue gates by only 0.9 percent and -0.15 percent, below the fixed
-10 percent promotion threshold. Production ``auto`` therefore remains the
-stable serial traversal. ``YE3T_FACTORIZED_ANGULAR_CUDA_POLICY=warp`` is a
-developer-only diagnostic until a compiler-generated destination-segmented
-implementation passes an end-to-end gate.
+10 percent promotion threshold. For that unsegmented operator, ``auto``
+therefore remains the stable serial traversal and
+``YE3T_FACTORIZED_ANGULAR_CUDA_POLICY=warp`` remains a developer diagnostic.
+The packed heterogeneous-root binding documented below uses the existing
+segmented angular operator and its separate size-dependent automatic policy.
 
 ABI 30 adds a fused residual gated carrier scatter, and ABI 31 adds an exact
 destination-segmented form with native forward, adjoint, and double backward.
@@ -812,3 +813,138 @@ Feature adjoints are evaluated in bounded chunks and may be accumulated into
 retains one structure's force rows and compact edge-derivative record, but
 never retains a dataset-wide design matrix. Dense rank-2 and factorized
 rank-3 plans match full autograd and explicit normal equations.
+
+Factor groups with a shared permutation action
+---------------------------------------------
+
+The existing ``couplings.count``, ``couplings.plan`` and ``couplings.compile``
+functions accept the ``shared_permutation_factors`` request family. It describes
+several groups of input factors transformed simultaneously by one symmetric
+group. For example, root-edge and leaf-edge groups of a depth-two motif each
+contain b factors: the total factor rank is 2b and the shared action is S_b.
+
+Required request fields are ``factor_groups`` (ordered active factor lists),
+``content`` (complete-channel identities), ``input_Ls``,
+``target_partition`` and ``target_L``. Every group has the same positive size
+and one complete input type within that group. Groups can have different input
+angular momenta and channel identities. A heterogeneous word inside one group
+requires its complete orbit and is rejected by this request. The selected
+partition is a partition of the shared action degree. ``selected_copy_indices``
+selects complete independent copies; tableau and magnetic coordinates remain
+complete. ``convention_id`` defaults to the existing real O(3) convention;
+the existing complex Condon--Shortley convention is also supported.
+
+Optional ``fixed_factor_groups`` binds symmetric powers of repeated complete
+inputs that are fixed by the shared action. Together, active and fixed groups
+partition all factor positions exactly once. Each fixed group can have its own
+size; it selects the existing normalized symmetric angular decomposition and
+carries the trivial representation of the shared permutation group. Separate
+independent fixed inputs use separate groups, even when their channel labels
+agree. The physical adapter must establish which inputs are literally reused.
+
+For example, ``factor_groups=[[0, 1], [2, 3]]`` together with
+``fixed_factor_groups=[[4, 5]]`` and six vector factors describes four active
+edge factors and two uses of one fixed vector input. Total factor rank is six,
+shared action degree is two. The complete carrier has 486 components and seven
+even scalar copies with trivial S2 action. Splitting the two fixed inputs into
+``[[4], [5]]`` describes independent inputs, with 729 components. The source
+object uses the same optional metadata field; its simultaneous generators leave
+fixed positions unchanged. Empty fixed groups are rejected; an empty list of
+groups preserves the original request and compiled identity.
+
+These are abstract retained-carrier counts. A fixed group does not itself
+implement a physical background, motif exclusion or a marginal. Physical
+adapters must bind those operations before using the counts in models.
+
+Counting uses exact local Schur/rotation multiplicities and same-action
+Kronecker/CG selection, without materializing coefficients. Plans expose
+``factor_rank``, ``action_degree``, independent labels with ``full_path`` node
+references, local/intermediate layouts, selected copies and reachable nodes.
+Compilation reuses normalized angular-path schedules and complete-carrier
+product maps. It does not construct the full magnetic tensor matrix.
+
+``execution_plan_from_compiled_coupler`` lowers the result to the existing
+typed-source instruction. The shared bound runtime preserves independent-copy,
+tableau and magnetic axes. Real execution retains real coefficient tensors;
+phase compensation composes the existing real CG forms consistently through
+multiple groups. Immutable coefficients persist between evaluations. Common
+CG subtrees reuse values within a single forward call; changing input values
+always creates a fresh geometry/derivative graph.
+
+These counts describe the independent abstract tensor carrier. The report
+records ``physical_image_status=requires_physical_binding``. Physical adapters
+must verify actual argument identities, action preservation and any evaluation
+relations or marginals. ``YE3TSourceRealization`` supports this binding through
+``emitted_action=shared_factor_groups`` metadata with explicit ``factor_groups``
+and simultaneous adjacent factor permutations. Rooted motifs and external
+tensors use this existing source object; no separate coefficient constructor
+is involved. General multi-leaf rooted-tree actions require their corresponding
+subgroup/product action and are not implied by this diagonal-group construction.
+
+Packed fixed output maps
+------------------------
+
+Local normalized angular programs are grouped using their actual shared
+workspace. The existing packer first inspects canonical operator identities and
+physical factor bindings without allocating union coefficient tables. Complete
+programs then share compatible CG subtrees within the batching allowance. A
+required individual map larger than that allowance remains intact; other maps
+may join only when the shared workspace fits within the larger map's size.
+This bounds the group's primary workspace, not all activations retained during
+force training. Geometry changes reuse fixed groups and evaluate fresh values.
+
+On CUDA, packed groups with heterogeneous root dimensions bind their existing
+graph as one segment of the shared segmented angular executor. This reuses the
+original coefficient, root, source-copy and projection arrays. Small immutable
+segment-index buffers are prepared once, follow module device transfers and
+are excluded from saved model state. The existing segmented automatic policy
+selects execution from operation size; it changes no representation or basis.
+Its forward, adjoint and double backward handle populated and empty batches.
+CPU groups and groups with homogeneous root dimensions retain their existing
+operators. The group's ``last_backend`` identifies the executed binding.
+
+The shared factorized runtime batches compatible normalized angular programs
+and composes their fixed output maps into a packed operator. Unit maps use a
+gather; general real maps use the existing sparse-linear native operator and
+its registered first and second adjoints. The maps retain the compiler's route
+order, parent factors, selected multiplicities and complete magnetic/tableau
+components. No coupling coefficients or normalization are reconstructed.
+
+This execution choice depends on the bound operations, independently of the
+physical source family. Complex conventions, mixed polynomial/path schedules
+and trainable output maps retain their existing evaluator. Bound output tables
+contain no geometry or learned activations, have a bounded in-memory lifetime,
+and clear on state loading and device/dtype changes. Buffer versions invalidate
+changed maps. Saved scientific settings and learned parameters are unchanged.
+
+Large fixed output maps retain the compiler's row/column/value coordinates in
+registered buffers. Forward evaluation and analytical pullbacks consume those
+coordinates directly; they do not allocate a dense matrix. Small maps retain
+their dense storage. This internal storage choice preserves all coefficients
+and selected coordinates, including complete tableau and magnetic components.
+
+The runtime accepts earlier dense states and compact states. Explicit access to
+the private dense map buffer materializes it on demand, preserving inspection,
+mutation and derivatives with respect to the complete coefficient matrix. Such
+inspection can be expensive for large maps and is unnecessary for ordinary
+descriptor/model evaluation. Dtype changes rebuild compiler coefficients at
+the requested precision. Geometry derivatives and linear design-row pullbacks
+are tested against independent per-program dense evaluation.
+
+Local multiplicity maps
+-----------------------
+
+Local Young/rotation maps in the angular-path and grouped factorized evaluators
+share the existing native sparse-analysis operation. It applies the compiler's
+fixed coefficients while treating each complete magnetic component as a batch
+coordinate. This avoids expanding every nonzero coefficient into a separate
+temporary for every physical row. Copy, tableau and magnetic dimensions remain
+unchanged, and the analytical covector pullback preserves its existing
+algebraic-transpose convention, including complex coefficients.
+
+The bound operation stores only fixed index/coefficient owners and identity
+tables. Geometry values remain local to evaluation. Edited indices or
+coefficients and differentiable coefficient tables use the reference operation;
+their values and coefficient derivatives remain available. Registered native
+first and second derivatives are checked against the independent
+gather/multiply/accumulate expression on CPU and CUDA, including empty batches.

@@ -41,6 +41,33 @@ def test_role_product_independent_cg_normalization_and_gradients(L, left_partiti
     assert torch.autograd.gradgradcheck(bound, (left, right), fast_mode=True)
 
 
+def test_sparse_preparation_reuses_exact_coefficients_without_changing_tables(monkeypatch):
+    import ye3t.runtime._carrier_product_sparse as sparse
+    child = layout((2, 1), L=2, channels=8, parity=1)
+    compiled, _ = compile_product(child, child, (2, 1), 2)
+    sparse._fixed_map_coefficient.cache_clear()
+    first = sparse._SparseCarrierProduct(compiled, dtype=torch.complex128, device='cpu')
+    cold = sparse._fixed_map_coefficient.cache_info()
+    warm = sparse._SparseCarrierProduct(compiled, dtype=torch.complex128, device='cpu')
+    assert sparse._fixed_map_coefficient.cache_info().misses == cold.misses
+    assert cold.hits > cold.misses > 0
+    # Independent exact-number conversion retains the original product order.
+    with monkeypatch.context() as reference:
+        reference.setattr(sparse, '_fixed_map_coefficient',
+            lambda y, cg, exchange, role: float(y*cg*exchange*role))
+        expected = sparse._SparseCarrierProduct(compiled, dtype=torch.complex128, device='cpu')
+    for actual in (first, warm):
+        for (name, value), (expected_name, reference) in zip(
+                actual.named_buffers(), expected.named_buffers(), strict=True):
+            assert name == expected_name
+            torch.testing.assert_close(value, reference, rtol=0, atol=0)
+    args = (sp.sqrt(2)/3, sp.sqrt(7)/5, 1/sp.sqrt(2), sp.Rational(1, 2))
+    assert sparse._fixed_map_coefficient(*args) == float(sp.prod(args))
+    assert sparse._fixed_map_coefficient(*args[:-1], sp.Integer(1)) == float(sp.prod(args[:-1]))
+    with pytest.raises(ValueError, match='real canonical fixed maps'):
+        sparse._fixed_map_coefficient(sp.I, *args[1:])
+
+
 @pytest.mark.parametrize("L,expected", [(0, 3), (1, 1), (2, 3)])
 def test_identical_argument_exchange_keeps_antisymmetric_channel_pairs(L, expected):
     compiled, bound = compile_product(layout((2,)), layout((2,)), (2,), L, argument_ids=("h", "h"))
@@ -151,7 +178,7 @@ def test_sign_fast_maps_generators_through_rank_six():
 
 def test_multiple_young_copies_exchange_mixing_and_dense_analysis():
     from ye3t.representations.kronecker_intertwiners import exact_kronecker_intertwiners
-    from ye3t.couplings.carrier_products import _exchange_modes
+    from ye3t.couplings.carrier_products import _exchange_modes, _exchange_trace
     child, parent = (3, 1, 1), (3, 2)
     maps = exact_kronecker_intertwiners(parent, child, child)["intertwiners"]
     assert len(maps) == 2
@@ -159,11 +186,12 @@ def test_multiple_young_copies_exchange_mixing_and_dense_analysis():
     target_dimension = Partition(parent).dimension
     swap_maps = [matrix.extract([j*d+i for i in range(d) for j in range(d)], range(target_dimension)) for matrix in maps]
     exchange = sp.Matrix([[sp.simplify((a.T*b).trace()/target_dimension) for b in swap_maps] for a in maps])
-    modes = _exchange_modes(maps, d, target_dimension)
+    trace = _exchange_trace(child, parent)
+    modes = _exchange_modes(maps, d, target_dimension, trace)
     # Rotating the exact multiplicity gauge tests mixing independently of
     # whether this backend's original gauge happens to diagonalize exchange.
     mixed = [(3*maps[0]+4*maps[1])/5, (-4*maps[0]+3*maps[1])/5]
-    mixed_modes = _exchange_modes(mixed, d, target_dimension)
+    mixed_modes = _exchange_modes(mixed, d, target_dimension, trace)
     assert sorted(sign for sign, _ in modes) == sorted(sign for sign, _ in mixed_modes)
     compiled, bound = compile_product(layout(child, 0), layout(child, 0), parent, 0, argument_ids=("h", "h"))
     x = torch.randn(2, 2, d, 1, dtype=torch.complex128, requires_grad=True)

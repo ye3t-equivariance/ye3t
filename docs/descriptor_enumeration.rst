@@ -42,7 +42,42 @@ representation-side labels and coupling coefficients.
 Reusing enumeration and compiled maps
 ------------------------------------
 
+Compact ``YE3TRepresentation`` inputs use ``eta_max_per_rank`` to bound the
+number of distinct non-angular primitive identities in each product. Its
+entries lie in ``1..N`` for factor rank ``N``. Species, the base radial
+function and the source family identify a primitive; angular type and retained
+role are separate inputs. A bound of one still permits every physical radial
+function individually. Physical radial/angular dictionaries remain basis
+settings. Existing ``eta_count_per_rank`` retains its historical capacity-hint
+meaning and may be omitted when ``eta_max_per_rank`` is supplied.
+
+The optional ``retained_max_per_rank`` has entries in ``0..N``. It bounds
+singleton tags or occupied shell roles, excluding an explicit pooled
+background. Total shell count remains a separate source setting. A zero bound
+selects background-only shell occupations where that background exists;
+shell-only sources then have an empty selected space. Complete shell-action
+orbits and tableau/magnetic components remain present. Compiler catalogues
+apply these bounds before their independent-copy inventory and coefficient
+materialization. Explicit contents or occupations conflicting with a bound
+raise an input error.
+
+For abstract ``count_fixed_content``, ``content`` provides non-angular
+primitive labels and ``input_Ls`` supplies their angular types. A restrictive
+retained-role bound requires a source plan with explicit role identities;
+ordinary ``ACE_density`` has zero retained roles. The existing canonical leaf
+iterator and count accept ``eta_max`` for physical primitive dictionaries.
+
 Use ``ye3t.couplings.count``, ``plan`` and ``compile`` for the selected carrier.
+
+For general tagged-Cauchy scalar requests, the catalogue may contain
+``chemical_patterns_by_rank``. Each rank maps to a list of neighbor chemical
+multisets of that length, for example ``{4: [["H", "H", "O", "O"]]}``.
+Omitted ranks retain all chemical choices within the other limits. The shared
+compiler applies this selection before coefficient materialization. It does
+not filter central species or change their independent coefficient blocks.
+Raw count/plan reports are upper bounds until physical-image reduction has
+resolved identities; compiled labels give the final independent coordinates.
+
 Their existing mathematical caches retain valid labels, Young/angular blocks
 and coupling paths. Tagged physical-coordinate maps and shell source maps also
 use the shared store, so extending a catalogue can reuse smaller compiled
@@ -55,12 +90,36 @@ The store defaults to ``~/.cache/ye3t`` (or the XDG cache directory), with
 and request bindings. Unchanged files have bounded process-local reuse, with
 separate values returned to callers. General tagged-image independent validation
 is retained across processes by content and validator revision.
+Scalar parent maps shared by different catalogues reuse completed exact checks
+within a process. Loading checks the current artifact contents before using
+this bounded memo. Individual parent checks create no disk records; persistent
+validation reuse operates on complete tagged images.
+
+General tagged compilation also saves the complete independent physical image
+under the full compiler plan. Repeating that plan reuses its assembled maps;
+extending the catalogue can reuse the individual coordinate maps. Complete
+images use losslessly compressed JSON in the same cache directory. Their
+public labels, coefficient ordering and saved-model format remain unchanged.
+In read-only mode, an absent complete image can still be assembled from
+available coordinate maps without writing a new cache entry.
 
 For an explicit audit, set ``YE3T_CACHE_VERIFY=full``. This replays the relevant
 independent construction checks. A new compiler convention or validation rule
 must update its cache schema or producer revision. Digests serve internal cache
 and saved-model integrity; routine examples need only show the selected source,
 feature counts and evaluated results.
+
+The optional Triton runtime uses the same persistent cache root, under
+``runtime/triton_cache``. Set ``YE3T_CACHE_DIR`` before importing the runtime to
+choose that root; otherwise the XDG directory or ``~/.cache/ye3t`` is used.
+Explicit ``TRITON_CACHE_DIR`` and existing runtime-directory overrides retain
+precedence. Application runtimes use the same default, regardless of import
+order. Triton retains its own compiler/device compatibility keys; this does
+not bypass coefficient validation or change a model's basis. Kernel storage
+is separate from ``YE3T_CACHE_MODE``, which controls coupling artifacts.
+An upgrade from the historical temporary default may compile kernels once
+in the new location. Subsequent processes can reuse them. Saved models do
+not require distributing the machine-specific kernel cache.
 
 Coupling Namespace
 ------------------
@@ -98,6 +157,13 @@ basis across all magnetic components. The compact coefficients remain the
 evaluation and serialization convention. This joint reference compilation
 has a bounded dense-table size cap and is meant for tests and comparisons;
 ``count`` and ``plan`` do not materialize the table.
+
+The public cached numerical Specht materializer uses the same canonical
+binary split maps and actual intermediate subgroup labels as the exact
+constructor. Its versioned coefficient-array cache preserves the selected
+copy convention. Historical nullspace cache files remain separate; they
+retain their original coordinates. Ordinary construction records trusted
+constructor metadata, while explicit diagnostics perform residual checks.
 
 For an ordinary commutative ACE-density label, ``compile_ace_coordinate``
 materializes all ``2L+1`` complex-magnetic components. It composes the

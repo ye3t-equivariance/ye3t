@@ -10,11 +10,15 @@ including channel pairs. Induction accepts the complete induced-placement axis.
 
 import hashlib
 import json
+from collections import OrderedDict
 from functools import lru_cache
 from itertools import product
 from math import factorial, prod
+from threading import RLock
 
-from ye3t.execution_plan import YE3TCarrierKey, YE3TCarrierLayout, YE3T_O3_PRIMARY_CONVENTION
+from ye3t.execution_plan import (YE3TCarrierKey, YE3TCarrierLayout,
+    YE3T_O3_PRIMARY_CONVENTION, YE3T_O3_REAL_TESSERAL_CONVENTION)
+from ye3t.cache.artifacts import _artifact_cache_policy
 from ye3t.representations.generalized_irreps import Partition
 from ye3t.representations.kronecker_intertwiners import kronecker_multiplicity, exact_kronecker_intertwiners
 from ye3t.representations.young_subgroup_specht_coupling import (
@@ -22,6 +26,52 @@ from ye3t.representations.young_subgroup_specht_coupling import (
 
 
 _FAMILY = "complete_carrier_product"
+_verified_product_hashes = OrderedDict()
+_verified_product_lock = RLock()
+_verified_product_limit = 2048
+
+
+def _remember_compiled_product(compiled):
+    """Retain only a receipt for a map returned by canonical construction."""
+    mode, verify = _artifact_cache_policy()
+    if mode in {"auto", "read_only"} and verify != "full":
+        with _verified_product_lock:
+            _verified_product_hashes[compiled["self_hash"]] = None
+            _verified_product_hashes.move_to_end(compiled["self_hash"])
+            while len(_verified_product_hashes) > _verified_product_limit:
+                _verified_product_hashes.popitem(last=False)
+    return compiled
+
+
+def _validated_carrier_product(compiled):
+    """Check complete current map contents against a compiler-owned receipt.
+
+    Construction is repeated for unknown or changed contents and explicit full
+    verification. A claimed self_hash alone never establishes validity. The
+    registry owns no coefficient trees and cannot be mutated through callers.
+    """
+    claimed = compiled.get("self_hash")
+    mode, verify = _artifact_cache_policy()
+    reuse = mode in {"auto", "read_only"} and verify != "full"
+    with _verified_product_lock:
+        known = reuse and isinstance(claimed, str) and claimed in _verified_product_hashes
+    if known:
+        body = {key: value for key, value in compiled.items() if key != "self_hash"}
+        encoded = json.dumps(body, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+        if hashlib.sha256(encoded).hexdigest() == claimed:
+            # Preserve the canonical constructor's container checks as well as
+            # its mathematical values; e.g. a tuple does not replace a list.
+            normalized = json.loads(encoded)
+            normalized["self_hash"] = claimed
+            if normalized == compiled:
+                with _verified_product_lock:
+                    if claimed in _verified_product_hashes:
+                        _verified_product_hashes.move_to_end(claimed)
+                return compiled
+    canonical = compile_carrier_product(compiled)
+    if canonical != compiled:
+        raise ValueError("Compiled product differs from its canonical fixed maps")
+    return compiled
 
 
 def _hash(value):
@@ -40,10 +90,12 @@ def carrier_product_request(left, right, *, target_partition=None, target_L,
     layouts = [item if isinstance(item, YE3TCarrierLayout) else YE3TCarrierLayout.from_dict(item)
                for item in (left, right)]
     for layout in layouts:
-        if (layout.key.convention_id != YE3T_O3_PRIMARY_CONVENTION
+        if (layout.key.convention_id not in {YE3T_O3_PRIMARY_CONVENTION, YE3T_O3_REAL_TESSERAL_CONVENTION}
                 or layout.tableau_count != layout.key.tableau_dimension):
-            raise ValueError("Products require complete Young/O(3) carriers in the primary convention")
+            raise ValueError("Products require complete Young/O(3) carriers in a supported convention")
     left, right = layouts
+    if left.key.convention_id != right.key.convention_id:
+        raise ValueError("Product arguments must use the same magnetic convention; convert their basis first")
     if operation not in {"same_action_tensor_product", "pointwise_role_product", "disjoint_induction", "independent_action_tensor_product"}:
         raise ValueError("Unknown carrier product operation")
     ids = list(argument_ids)
@@ -68,7 +120,10 @@ def carrier_product_request(left, right, *, target_partition=None, target_L,
         if target_partition:
             raise ValueError("Product-group targets use permutation blocks and an empty single-group partition")
         target_partition = ()
-    target = YE3TCarrierKey(rank, target_partition, target_L, YE3T_O3_PRIMARY_CONVENTION,
+    if rank == 0 and target_partition:
+        raise ValueError("Product inputs carry the trivial S0 action: use parent.young_lambda=[] "
+                         "for its output. Formal factor ranks remain in the source construction labels.")
+    target = YE3TCarrierKey(rank, target_partition, target_L, left.key.convention_id,
                            left.key.parity * right.key.parity, target_permutation_blocks)
     if not independent and operation != "disjoint_induction" and target.permutation_degrees != left.key.permutation_degrees:
         raise ValueError("Product target must retain the complete acting permutation group")
@@ -103,11 +158,22 @@ def _product_full_path(value, layouts, argument_ids):
     Source labels and physical bindings remain available to source-specific
     product planning. This graph alone is not an independent-image calculation.
     """
+    if not isinstance(value, dict) or len(value.get("arguments", ())) != 2:
+        raise ValueError("Product full_path must identify both existing argument nodes")
+    path = _construction_full_path(value, layouts)
+    arguments = path["arguments"]
+    if (arguments[0] == arguments[1]) != (argument_ids[0] == argument_ids[1]):
+        raise ValueError("Repeated arguments must use the same full_path node and canonical argument ID")
+    return path
+
+
+def _construction_full_path(value, layouts):
+    """Validate one shared fixed/learned construction graph and its arguments."""
     path = value
     if not isinstance(path, dict) or set(path) != {"arguments", "nodes"} or not isinstance(path["nodes"], dict):
         raise ValueError("Product full_path needs arguments and construction nodes")
     arguments, nodes = path["arguments"], path["nodes"]
-    if (not isinstance(arguments, (list, tuple)) or len(arguments) != 2
+    if (not isinstance(arguments, (list, tuple)) or not arguments or len(arguments) != len(layouts)
             or any(not isinstance(name, str) or name not in nodes for name in arguments)):
         raise ValueError("Product full_path must identify both existing argument nodes")
     visited, active, identities = set(), set(), {}
@@ -125,6 +191,65 @@ def _product_full_path(value, layouts, argument_ids):
             if not isinstance(child, str) or child not in nodes:
                 raise ValueError("Product full_path references an absent input node")
             visit(child)
+        if node.get("operation") == "direct_sum":
+            layout = YE3TCarrierLayout.from_dict(node["layout"])
+            children = [YE3TCarrierLayout.from_dict(nodes[child]["layout"]) for child in node["inputs"]]
+            if (not children or any((child.key, child.tableau_count, child.magnetic_count) !=
+                    (layout.key, layout.tableau_count, layout.magnetic_count) for child in children)
+                    or sum(child.channel_count for child in children) != layout.channel_count):
+                raise ValueError("Direct-sum source collection must preserve complete carrier types and copy counts")
+            if node.get("parameter_binding") or node.get("parameter_bindings"):
+                raise ValueError("Direct-sum source collection cannot contain learned mixing")
+        if node.get("operation") == "fixed_carrier_product":
+            selection = node["coupling_selection"]
+            canonical = _request({**selection, "request_hash": _hash(selection)})
+            layout = YE3TCarrierLayout.from_dict(node["layout"])
+            if (len(node["inputs"]) != 2
+                    or canonical["left"] != nodes[node["inputs"][0]]["layout"]
+                    or canonical["right"] != nodes[node["inputs"][1]]["layout"]
+                    or canonical["target"] != layout.key.to_dict()
+                    or ((canonical["argument_ids"][0] == canonical["argument_ids"][1]) !=
+                        (node["inputs"][0] == node["inputs"][1]))):
+                raise ValueError("Fixed product must use its complete canonical child and target layouts")
+            if node.get("parameter_binding") or node.get("parameter_bindings"):
+                raise ValueError("Fixed product coordinates must precede learned mixing")
+        if node.get("operation") == "fixed_channel_map":
+            import math
+            layout = YE3TCarrierLayout.from_dict(node["layout"])
+            if len(node["inputs"]) != 1:
+                raise ValueError("Fixed channel map needs one complete carrier input")
+            child = YE3TCarrierLayout.from_dict(nodes[node["inputs"][0]]["layout"])
+            matrix = node.get("matrix")
+            scales = node.get("scales", [1]*child.channel_count)
+            indices = node.get("copy_indices")
+            if indices is not None and (
+                    matrix is not None or "subspace_request" in node
+                    or not isinstance(indices, list) or len(indices) != layout.channel_count
+                    or any(type(index) is not int or index < 0 or index >= child.channel_count for index in indices)
+                    or len(set(indices)) != len(indices)):
+                raise ValueError("Fixed copy selection needs distinct in-range indices and no second copy map")
+            if "subspace_request" in node:
+                from .carrier_subspaces import compile_carrier_subspace
+                if matrix is not None or "scales" in node:
+                    raise ValueError("A compiler subspace map precedes separate calibration maps")
+                compiled = compile_carrier_subspace(node["subspace_request"])
+                target_path = compiled["request"]["full_path"]
+                target = target_path["arguments"][0]
+                actual = _construction_full_path({"arguments": node["inputs"], "nodes": nodes}, [child])
+                expected = _construction_full_path({"arguments": [target], "nodes": target_path["nodes"]}, [child])
+                if (actual != expected or compiled["output_channel_count"] != layout.channel_count):
+                    raise ValueError("Fixed subspace map must consume its exact compiler target and selected copies")
+            if ((child.key, child.tableau_count, child.magnetic_count) !=
+                    (layout.key, layout.tableau_count, layout.magnetic_count)
+                    or not isinstance(scales, list) or len(scales) != child.channel_count
+                    or (matrix is None and indices is None and "subspace_request" not in node and layout.channel_count != child.channel_count)
+                    or (matrix is not None and (not isinstance(matrix, list) or len(matrix) != layout.channel_count
+                        or any(not isinstance(row, list) or len(row) != child.channel_count for row in matrix)))
+                    or any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)
+                           for value in scales + ([] if matrix is None else [v for row in matrix for v in row]))):
+                raise ValueError("Fixed channel map needs a finite real copy matrix preserving complete carrier types")
+            if node.get("parameter_binding") or node.get("parameter_bindings"):
+                raise ValueError("Fixed channel map cannot contain learned parameters")
         active.remove(name)
         visited.add(name)
         definition = {key: item for key, item in node.items() if key != "inputs"}
@@ -140,9 +265,8 @@ def _product_full_path(value, layouts, argument_ids):
         # The recursive closure otherwise holds itself and the complete source
         # graph until cyclic GC. Release it between large planning requests.
         visit = None
-    if (arguments[0] == arguments[1]) != (argument_ids[0] == argument_ids[1]):
-        raise ValueError("Repeated arguments must use the same full_path node and canonical argument ID")
-    if arguments[0] != arguments[1] and identities[arguments[0]] == identities[arguments[1]]:
+    names = set(arguments)
+    if len({identities[name] for name in names}) != len(names):
         raise ValueError("Identical full_path constructions must share one canonical repeated-argument identity")
     # Unused branches cannot affect the request identity or grow cached maps.
     return json.loads(json.dumps({"arguments": list(arguments),
@@ -196,7 +320,7 @@ def carrier_product_inventory(value):
                 argument_ids=raw.get("argument_ids", ("left", "right")),
                 full_path=raw.get("full_path"),
                 copy_limit=None if selection["copies"] == "all" else selection["copies"])
-            report = carrier_product_count(request)
+            report = _canonical_carrier_product_count(request)
             if not report["output_channel_count"]:
                 continue
             target = YE3TCarrierKey.from_dict(request["target"])
@@ -231,6 +355,7 @@ def _request(value):
     return result
 
 
+@lru_cache(maxsize=256)
 def _exchange_trace(partition, target):
     # tr(swap | Hom(target, child tensor child)) = <chi_target(g), chi_child(g^2)>.
     from ye3t.representations.projectors import _symmetric_group_conjugacy_classes, _murnaghan_nakayama_character
@@ -293,9 +418,9 @@ def _local_density_product_is_zero(request):
             children = [words(child) for child in node["inputs"]]
             if any(child is None for child in children):
                 result = None
-            elif node["operation"] == "learned_channel_projection":
+            elif node["operation"] in {"learned_channel_projection", "direct_sum", "fixed_channel_map"}:
                 result = set().union(*children)
-            elif node["operation"] == "same_action_tensor_product":
+            elif node["operation"] in {"same_action_tensor_product", "fixed_carrier_product"}:
                 result = {tuple(sorted(left + right)) for left, right in product(*children)}
             else:
                 result = None
@@ -325,7 +450,16 @@ def _local_density_product_is_zero(request):
 
 
 def carrier_product_count(value):
-    request = _request(value)
+    return _canonical_carrier_product_count(_request(value))
+
+
+def _canonical_carrier_product_count(request):
+    """Count a request owned by this call after canonical construction.
+
+    Inventory constructs each request immediately before this calculation.
+    Public entry points validate caller-supplied contents through _request.
+    No request is accepted by cached object identity or retained as trusted.
+    """
     left, right = (YE3TCarrierLayout.from_dict(request[name]) for name in ("left", "right"))
     target = YE3TCarrierKey.from_dict(request["target"])
     angular = abs(left.key.rotation_L-right.key.rotation_L) <= target.rotation_L <= left.key.rotation_L+right.key.rotation_L
@@ -370,45 +504,66 @@ def carrier_product_count(value):
 
 
 def carrier_product_plan(value):
-    """Resolve local product images after coefficient-free representation counts."""
+    """Resolve selected images after coefficient-free representation counts.
+
+    Fixed source relations select independent operation maps and their output
+    count. The abstract carrier count is retained separately. A generic rank
+    for learned source coefficients does not select a fixed operation basis.
+    """
     from .density_product_images import reduced_density_product_image
+    from .graph_source_images import bound_graph_product_image
     result = carrier_product_count(value)
     if result["output_channel_count"]:
-        image = reduced_density_product_image(result["request"])
+        image = bound_graph_product_image(result["request"])
+        if image is None:
+            image = reduced_density_product_image(result["request"])
         if image is not None:
             if image["route_count"] != result["output_channel_count"]:
                 raise ArithmeticError("Reduced product routes disagree with the canonical product count")
             result["reduced_product_image"] = image
-            result["independent_output_channel_count"] = image["independent_image_count"]
+            if "independent_operation_maps" in image:
+                result["independent_operation_maps"] = image["independent_operation_maps"]
+                result["abstract_output_channel_count"] = result["output_channel_count"]
+                result["output_channel_count"] = image["independent_operation_maps"]["independent_map_count"]
+                result["independent_output_channel_count"] = result["output_channel_count"]
+                result["fixed_source_operation_image_resolved"] = True
+            else:
+                # A rank at generic learned weights does not identify fixed
+                # independent maps. Keep it inside the image diagnostic, where
+                # its parameter dependence is explicit, never as an allocation.
+                result["operation_map_status"] = image["operation_map_status"]
     return result
 
 
-def _exchange_modes(maps, dimension, target_dimension):
+def _exchange_modes(maps, dimension, target_dimension, exchange_trace):
+    """Resolve complete-child exchange with the shared local projector frame.
+
+    The character precompiler supplies tr(exchange); m_+/-=(m+/-tr)/2.
+    Exact exchange/closure proofs belong in the representation tests.
+    """
     import sympy as sp
+    from ye3t.exact_scalars import _exact_matrix_product
+    from ye3t.representations.projectors import _selected_projector_frame
     swapped = [matrix.extract([j*dimension+i for i in range(dimension) for j in range(dimension)],
                               range(target_dimension)) for matrix in maps]
-    exchange = sp.Matrix([[sp.simplify((a.T*b).trace()/target_dimension) for b in swapped] for a in maps])
-    if (exchange*exchange-sp.eye(len(maps))).applyfunc(sp.simplify) != sp.zeros(len(maps)):
-        raise ArithmeticError("Exact child exchange is not an involution")
-    for b, matrix in enumerate(swapped):
-        reconstructed = sum((maps[a]*exchange[a, b] for a in range(len(maps))), sp.zeros(*matrix.shape))
-        if (matrix-reconstructed).applyfunc(sp.simplify) != sp.zeros(*matrix.shape):
-            raise ArithmeticError("Child exchange leaves the complete Kronecker multiplicity space")
+    # Schur's lemma makes C_a^T swap C_b a scalar identity on the complete
+    # target irrep. One common component gives that scalar without forming
+    # a full target-by-target matrix. Full-component identities are tested.
+    exchange = sp.Matrix([[_exact_matrix_product(a[:, :1].T, b[:, :1])[0, 0]
+                           for b in swapped] for a in maps])
     modes = []
     for sign in (1, -1):
-        basis = []
+        count = (len(maps) + sign * exchange_trace) // 2
+        if not count:
+            continue
         projector = (sp.eye(len(maps))+sign*exchange)/2
-        _, pivots = projector.rref()
-        for index in pivots:
-            column = projector[:, index]
-            for previous in basis:
-                column = (column-previous*(previous.T*column)[0]).applyfunc(sp.simplify)
-            column = (column/sp.sqrt((column.T*column)[0])).applyfunc(sp.simplify)
-            if next(value for value in column if value != 0).is_negative:
-                column = -column
-            basis.append(column)
+        columns, normalization = _selected_projector_frame(
+            lambda unit: projector * unit, len(maps), count, range(len(maps)))
+        basis = (columns * normalization).applyfunc(sp.expand)
+        for index in range(count):
+            column = basis[:, index]
             matrix = sum((maps[g]*column[g] for g in range(len(maps))), sp.zeros(*maps[0].shape))
-            modes.append((sign, matrix.applyfunc(sp.simplify)))
+            modes.append((sign, matrix.applyfunc(sp.expand)))
     return modes
 
 
@@ -426,7 +581,8 @@ def _product_group_young(left, right, target, self_product):
                        target.permutation_partitions, strict=True):
         da, db, dt = (Partition(parts).dimension for parts in (a, b, t))
         maps = exact_kronecker_intertwiners(t, a, b)["intertwiners"]
-        modes = _exchange_modes(maps, da, dt) if self_product else [(0, matrix) for matrix in maps]
+        modes = (_exchange_modes(maps, da, dt, _exchange_trace(a, t))
+                 if self_product else [(0, matrix) for matrix in maps])
         blocks.append([(sign, da, db, dt, [(i, j, k, matrix[i*db+j, k])
             for i in range(da) for j in range(db) for k in range(dt) if matrix[i*db+j, k] != 0])
             for sign, matrix in modes])
@@ -444,9 +600,10 @@ def _product_group_young(left, right, target, self_product):
 
 
 @lru_cache(maxsize=128)
-def _compile(serialized):
+def _compile_young(serialized):
     import sympy as sp
-    from sympy.physics.wigner import clebsch_gordan
+    from ye3t.representations.projectors import TABLEAU_PROJECTOR_COPY_CONVENTION
+    from ye3t.representations.young_orthogonal import SPLIT_COORDINATE_CONVENTION
     request = json.loads(serialized)
     report = carrier_product_count(request)
     if not report["output_channel_count"]:
@@ -476,7 +633,9 @@ def _compile(serialized):
         maps = exact_kronecker_intertwiners(target.partition, left.key.partition, right.key.partition)["intertwiners"]
         backend = "exact_kronecker_intertwiners"
     if young is None:
-        modes = _exchange_modes(maps, left.tableau_count, dt) if self_product else [(0, matrix) for matrix in maps]
+        modes = (_exchange_modes(maps, left.tableau_count, dt,
+                                 _exchange_trace(left.key.partition, target.partition))
+                 if self_product else [(0, matrix) for matrix in maps])
         mode_signs = [mode[0] for mode in modes]
         young = []
         for mode, (_, matrix) in enumerate(modes):
@@ -500,24 +659,20 @@ def _compile(serialized):
         raise ArithmeticError("Exchange-resolved product size differs from its exact character count")
     channels = ([channels[index] for index in request["selected_copy_indices"]]
                 if "selected_copy_indices" in request else channels[:report["output_channel_count"]])
-    # Separate sparse tables: no Young x magnetic product matrix is allocated.
-    angular = []
-    ll, lr, L = left.key.rotation_L, right.key.rotation_L, target.rotation_L
-    for m in range(-ll, ll+1):
-        for n in range(-lr, lr+1):
-            if abs(m+n) <= L:
-                coefficient = clebsch_gordan(ll, lr, L, m, n, m+n)
-                if coefficient:
-                    angular.append([m+ll, n+lr, m+n+L, str(coefficient)])
-    result = dict(report, schema="ye3t_complete_carrier_product_v1", young=young, angular=angular,
+    result = dict(report, schema="ye3t_complete_carrier_product_young_map_v1", young=young,
         channels=channels, young_mode_count=len(mode_signs), placements=placements,
         coefficient_backend=backend, analysis_orientation="adjoint_of_real_orthonormal_embeddings",
-        exchange_gauge="projector_rref_pivot_columns_exact_gram_schmidt_first_nonzero_positive",
+        exchange_gauge="selected_projector_root2_triangular_v2",
+        coefficient_conventions={
+            "split": SPLIT_COORDINATE_CONVENTION,
+            "general_same_action": TABLEAU_PROJECTOR_COPY_CONVENTION,
+            "specialization_policy": "preserve_historical_identity_sign_invariant_maps",
+        },
         binding_requirements={"actual_action_alignment": "validated_by_source_graph",
                               "induction": "all_compiler_ordered_child_placements",
                               "argument_identity": "same_tensor_for_repeated_argument"},
         role_scale="sqrt(2)/2" if request["role_algebra"] else "1",
-        output_layout=YE3TCarrierLayout(target, len(channels), dt, 2*L+1).to_dict())
+        output_layout=YE3TCarrierLayout(target, len(channels), dt, 2*target.rotation_L+1).to_dict())
     if target.permutation_blocks:
         # Canonical adjacent-generator actions for one-dimensional blocks.
         # Source adapters use these signs to orient physical occurrences.
@@ -531,13 +686,49 @@ def _compile(serialized):
     return result
 
 
+@lru_cache(maxsize=128)
+def _compile(serialized):
+    """Bind shared Young maps to the selected angular coefficients."""
+    from sympy.physics.wigner import clebsch_gordan
+    result = dict(_compile_young(serialized))
+    request = result["request"]
+    ll, lr = (request[name]["key"]["rotation_L"] for name in ("left", "right"))
+    L = request["target"]["rotation_L"]
+    # Separate sparse tables: no Young x magnetic product matrix is allocated.
+    angular = []
+    if request["target"]["convention_id"] == YE3T_O3_REAL_TESSERAL_CONVENTION:
+        from ye3t.core.tesseral import _real_cg_entries_exact
+        angular = [[m, n, M, str(value._sympy_())] for m, n, M, value in _real_cg_entries_exact(ll, lr, L)]
+    else:
+        for m in range(-ll, ll+1):
+            for n in range(-lr, lr+1):
+                if abs(m+n) <= L:
+                    coefficient = clebsch_gordan(ll, lr, L, m, n, m+n)
+                    if coefficient:
+                        angular.append([m+ll, n+lr, m+n+L, str(coefficient)])
+    result.update(schema="ye3t_complete_carrier_product_v1", angular=angular)
+    result.pop("self_hash")
+    result["self_hash"] = _hash(result)
+    return result
+
+
 def compile_carrier_product(value):
-    """Compile selected complete copies with separate exact Young/angular maps."""
+    """Compile complete Young/angular maps and any resolved fixed source image.
+
+    Fixed-source requests emit independent image copies; their selected route
+    analysis and exact reconstruction remain inspectable. Free carrier requests
+    retain the canonical complete-child/Young coupling coordinates.
+    """
     import copy
-    request = _request(value)
-    if "full_path" not in request:
-        return copy.deepcopy(_compile(json.dumps(request, sort_keys=True)))
-    if not carrier_product_count(request)["output_channel_count"]:
+    raw = value.get("request", value)
+    if "full_path" not in raw:
+        request = _request(value)
+        return _remember_compiled_product(copy.deepcopy(_compile(json.dumps(request, sort_keys=True))))
+    # Planning already validates and owns the canonical request. Reuse it
+    # within this call instead of walking/copying the entire source graph twice.
+    plan = carrier_product_plan(value)
+    request = plan["request"]
+    if not plan["output_channel_count"]:
         raise ValueError("Requested product has no nonzero coupled coordinates for its source full_path")
     # Fixed coefficients depend on the complete carrier layouts and selected
     # copies. Preserve source provenance in the returned artifact while sharing
@@ -546,14 +737,22 @@ def compile_carrier_product(value):
     structural["request_hash"] = _hash(structural)
     result = copy.deepcopy(_compile(json.dumps(structural, sort_keys=True)))
     result["request"] = request
+    if "independent_operation_maps" in plan:
+        assembly = plan["independent_operation_maps"]
+        result["abstract_output_channel_count"] = result["output_channel_count"]
+        result["independent_operation_maps"] = copy.deepcopy(assembly)
+        result["channels"] = [result["channels"][i] for i in assembly["selected_route_indices"]]
+        result["output_channel_count"] = assembly["independent_map_count"]
+        result["output_layout"]["channel_count"] = assembly["independent_map_count"]
+        result["output_layout"] = YE3TCarrierLayout.from_dict(result["output_layout"]).to_dict()
+        result["fixed_source_operation_image_resolved"] = True
     result.pop("self_hash")
     result["self_hash"] = _hash(result)
-    return result
+    return _remember_compiled_product(result)
 
 
 def bind_carrier_product_torch(compiled, *, dtype=None, device=None, backend="auto"):
     """Bind canonical fixed maps once for differentiable repeated execution."""
     from ye3t.runtime.carrier_products import _CarrierProduct
-    if compiled != compile_carrier_product(compiled):
-        raise ValueError("Compiled product differs from its canonical fixed maps")
+    _validated_carrier_product(compiled)
     return _CarrierProduct(compiled, dtype=dtype, device=device, backend=backend)

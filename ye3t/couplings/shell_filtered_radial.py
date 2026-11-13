@@ -138,7 +138,10 @@ def shell_filtered_raw_values(plan, x, angular_l):
         ladder = shifted_jacobi_ladder_with_derivative(count - 1, 4, 2 * int(angular_l) + 2, x)[0]
     radial = torch.stack(ladder) * (1 - x) ** _ENVELOPE_POWER[base]
     windows = torch.movedim(shell_windows(x, plan["shells"]), -1, 0)
-    return (windows[:, None] * radial[None]).reshape((int(plan["shell_count"]) * count,) + tuple(x.shape))
+    if plan.get("include_background", False):
+        windows = torch.cat((windows, torch.ones_like(x)[None]), dim=0)
+    roles = int(plan.get("role_dimension", plan["shell_count"]))
+    return (windows[:, None] * radial[None]).reshape((roles * count,) + tuple(x.shape))
 
 
 def shell_filtered_radial_values(plan, x, angular_l, transform=None):
@@ -206,7 +209,7 @@ def _transform(plan, gram, orthogonalization):
     count = int(plan["radial_count"])
     transform = torch.zeros_like(gram)
     worst = 1.
-    for shell in range(len(plan["shells"]["centers"])):
+    for shell in range(plan.get("role_dimension", plan["shell_count"])):
         block = slice(shell * count, (shell + 1) * count)
         transform[block, block], condition = _block_transform(gram[block, block], orthogonalization["factorization"])
         worst = max(worst, condition)
@@ -225,7 +228,7 @@ def _identity_residuals(plan, identity, orthogonalization):
         return {"identity_residual": float(torch.linalg.matrix_norm(identity - eye, ord=2)),
                 "cross_shell_overlap": 0.}
     blocks = torch.block_diag(*(identity[shell * count:(shell + 1) * count, shell * count:(shell + 1) * count]
-                                for shell in range(len(plan["shells"]["centers"]))))
+                                for shell in range(plan.get("role_dimension", plan["shell_count"]))))
     return {"identity_residual": float((blocks - eye).abs().max()),
             "cross_shell_overlap": float(torch.linalg.matrix_norm(identity - blocks, ord=2))}
 
@@ -260,7 +263,7 @@ def _sample_residuals(plan, transform, angular_l, points, orthogonalization):
 
 
 def shell_filtered_source_plan(family, radial_count, lmax, shells, orthogonalization=None, *,
-                               evaluation_coordinates="orthogonal_channels"):
+                               evaluation_coordinates="orthogonal_channels", include_background=False):
     """Compile the frozen transform of one shell-filtered family.
 
     ``family`` is a configured name from ``SHELL_FILTERED_BASE_FAMILIES``;
@@ -268,11 +271,18 @@ def shell_filtered_source_plan(family, radial_count, lmax, shells, orthogonaliza
     ``lmax`` the largest angular degree whose transform is needed.  The plan
     stores the construction Gram, the transform, the independent-rule
     residuals and a content hash; its ``family_id`` carries that hash.
+    With include_background=True, append unfiltered radial functions after the
+    Gaussian shell roles. Shell permutations fix this last role. Softmax shells
+    already sum to the background, so they cannot supply an additional axis.
     """
     name = shell_filtered_family_name(family)
     if evaluation_coordinates not in {"orthogonal_channels", "physical_shells"}:
         raise ValueError("Shell evaluation_coordinates must be orthogonal_channels or physical_shells")
     shells, orthogonalization = normalize_shell_filter_settings(shells, orthogonalization)
+    if type(include_background) is not bool:
+        raise TypeError("include_background must be a boolean")
+    if include_background and shells["kind"] != "gaussian":
+        raise ValueError("Softmax shells satisfy A0=sum_s A_s; use the existing shell span, or explicitly choose Gaussian shells for an independent background")
     radial_count, lmax = int(radial_count), int(lmax)
     if radial_count < 1 or lmax < 0:
         raise ValueError("radial_count must be positive and lmax nonnegative")
@@ -287,6 +297,9 @@ def shell_filtered_source_plan(family, radial_count, lmax, shells, orthogonaliza
             "coordinate": "x = r / r_cut_pair", "measure": "x^(2l) x^2 dx on [0, 1]",
             "radial_definition": "T_l[(s,n),(s',n')] w_s'(x) (1-x)^p P_n'(x); x^l in the regular solid harmonic",
             "transforms": {}, "gram": {}, "diagnostics": {}}
+    if include_background:
+        plan.update(include_background=True, role_dimension=plan["shell_count"] + 1,
+                    permuted_role_count=plan["shell_count"])
     with torch.no_grad():
         for angular_l in range(lmax + 1):
             gram = _gram(plan, angular_l, orthogonalization["construction_points"])
@@ -320,6 +333,9 @@ def shell_filtered_source_plan(family, radial_count, lmax, shells, orthogonaliza
         plan["evaluation_coordinates"] = evaluation_coordinates
         plan["occupation_transport"] = "inverse_channel_transform_before_products"
         plan["radial_definition"] = "w_s(x) (1-x)^p P_n(x); inverse T_l transport fused with T_l; x^l in the regular solid harmonic"
+    if include_background:
+        plan["schema"] = "ye3t_shell_filtered_radial_source_plan_v3"
+        plan["radial_definition"] += "; final role has w_background(x)=1"
     plan["plan_hash"] = _stable_hash(plan)
     plan["family_id"] = name + ":" + plan["plan_hash"][:16]
     return plan
@@ -330,14 +346,24 @@ def validate_shell_filtered_source_plan(plan, *, recompute=False):
     required = {"schema", "family", "base_family", "radial_count", "lmax", "shell_count", "shells",
                 "orthogonalization", "quadrature", "channel_order", "radial_channel_index", "coordinate",
                 "measure", "radial_definition", "transforms", "gram", "diagnostics", "plan_hash", "family_id"}
-    physical = isinstance(plan, dict) and plan.get("schema") == "ye3t_shell_filtered_radial_source_plan_v2"
+    background = isinstance(plan, dict) and plan.get("schema") == "ye3t_shell_filtered_radial_source_plan_v3"
+    if background:
+        required |= {"include_background", "role_dimension", "permuted_role_count"}
+        if (plan.get("include_background") is not True or plan.get("shells", {}).get("kind") != "gaussian"
+                or type(plan.get("role_dimension")) is not int or type(plan.get("permuted_role_count")) is not int
+                or plan["role_dimension"] != plan.get("shell_count", 0) + 1
+                or plan["permuted_role_count"] != plan.get("shell_count")):
+            raise ValueError("Independent background requires Gaussian shells, one final fixed role and the S_q shell action")
+    physical = isinstance(plan, dict) and (plan.get("schema") == "ye3t_shell_filtered_radial_source_plan_v2"
+        or background and "evaluation_coordinates" in plan)
     if physical:
         required |= {"evaluation_coordinates", "occupation_transport"}
         if (plan.get("evaluation_coordinates") != "physical_shells"
                 or plan.get("occupation_transport") != "inverse_channel_transform_before_products"):
             raise ValueError("Physical shell occupations require the inverse coordinate transport")
     if (not isinstance(plan, dict) or set(plan) != required or
-            plan["schema"] not in {SHELL_FILTERED_SOURCE_PLAN_SCHEMA, "ye3t_shell_filtered_radial_source_plan_v2"}):
+            plan["schema"] not in {SHELL_FILTERED_SOURCE_PLAN_SCHEMA, "ye3t_shell_filtered_radial_source_plan_v2",
+                                   "ye3t_shell_filtered_radial_source_plan_v3"}):
         raise ValueError("Unknown shell-filtered radial source plan payload")
     body = {key: value for key, value in plan.items() if key not in {"plan_hash", "family_id"}}
     if _stable_hash(body) != plan["plan_hash"] or plan["family_id"] != plan["family"] + ":" + plan["plan_hash"][:16]:
@@ -355,7 +381,7 @@ def validate_shell_filtered_source_plan(plan, *, recompute=False):
         raise ValueError("Shell-filtered radial source plan settings are not canonical")
     if int(plan["radial_count"]) < 1 or int(plan["lmax"]) < 0:
         raise ValueError("Shell-filtered source needs positive radial count and nonnegative lmax")
-    width = plan["shell_count"] * int(plan["radial_count"])
+    width = plan.get("role_dimension", plan["shell_count"]) * int(plan["radial_count"])
     if (set(plan["transforms"]) != {str(l) for l in range(int(plan["lmax"]) + 1)}
             or set(plan["gram"]) != set(plan["transforms"])
             or any(len(rows) != width or any(len(row) != width for row in rows)
@@ -371,10 +397,16 @@ def validate_shell_filtered_source_plan(plan, *, recompute=False):
     # Softmax division contributes a common positive denominator. An invertible
     # fixed T_l preserves this one-particle source dimension. This argument
     # concerns functions, independently of any sampled quadrature Gram.
+    # For raw Gaussians plus an unfiltered polynomial block, an identity on
+    # (0,1) extends analytically to the real line. The Gaussian terms decay
+    # at infinity, forcing the unfiltered polynomial to vanish. The remaining
+    # distinct-exponent argument proves independence of the filtered blocks.
     report = {"passed": True, "family_id": plan["family_id"], "recomputed": bool(recompute), "residuals": {},
               "source_independence": "distinct_exponents_and_polynomial_degrees",
               "independent_radial_channels_per_l": width,
               "transform_rank": "exact_serialized_binary64"}
+    if background:
+        report["source_independence"] = "Gaussian_polynomial_blocks_and_unfiltered_polynomials"
     if recompute:
         with torch.no_grad():
             for key, rows in plan["transforms"].items():
@@ -418,6 +450,8 @@ def _independent_transform(rows):
 def shell_filtered_source_metadata(plan):
     """Source smoothness/provenance record for graph bindings and reports."""
     return {"radial_family": plan["family_id"], "base_family": plan["base_family"],
+            **({"role_dimension": plan["role_dimension"], "permuted_role_count": plan["permuted_role_count"],
+                "include_background": True} if plan.get("include_background") else {}),
             "radial_definition": plan["radial_definition"], "coordinate": plan["coordinate"],
             "normalization": ("physical_shell_coordinates_with_inverse_orthogonal_basis_transport"
                              if plan.get("evaluation_coordinates") == "physical_shells" else

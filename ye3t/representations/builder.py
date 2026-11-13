@@ -19,6 +19,9 @@ Related validation tools can compare these sectors with Young/block builders and
 with generalized tensor-product metadata.
 """
 from itertools import product
+from array import array
+from collections.abc import Mapping
+from ye3t.exact_scalars import _exact_matrix_product
 
 from .generalized_irreps import AngularIrrep, CoupledIrrepLabel, Partition, PermutationIrrep, PermutationSubgroup
 from .generalized_sector_data import GeneralizedSectorData
@@ -28,6 +31,56 @@ def _sympy():
     from ye3t._optional_sympy import sp
 
     return sp
+
+
+class _PackedExactColumns(Mapping):
+    """Temporary exact columns with shared scalars and packed nonzero indices.
+
+    A separate SymPy column allocates a dictionary for each nonzero row. Large
+    carriers contain many such columns. Keep their exact entries compact and
+    materialize one owned column only when a consumer requests it.
+    """
+
+    def __init__(self, rows):
+        self.rows = rows
+        self._columns = {}
+        self._scalars = []
+        self._scalar_ids = {}
+        self._checked_actions = {}
+
+    def __len__(self):
+        return len(self._columns)
+
+    def __iter__(self):
+        return iter(self._columns)
+
+    def __setitem__(self, key, vector):
+        if vector.shape != (self.rows, 1):
+            raise ValueError("Packed exact column has an inconsistent shape")
+        self._checked_actions.clear()
+        indices, scalars = array('q'), array('q')
+        storage = vector._rep.to_sparse()
+        convert = storage.domain.to_sympy
+        for row, entries in storage.rep.items():
+            for column, item in entries.items():
+                value = convert(item)
+                if value not in self._scalar_ids:
+                    self._scalar_ids[value] = len(self._scalars)
+                    self._scalars.append(value)
+                indices.append(row)
+                scalars.append(self._scalar_ids[value])
+        self._columns[key] = indices, scalars
+
+    def __getitem__(self, key):
+        indices, scalars = self._columns[key]
+        return _sympy().SparseMatrix(self.rows, 1,
+            {(row, 0): self._scalars[value] for row, value in zip(indices, scalars, strict=True)})
+
+    def reorder(self, keys):
+        keys = tuple(keys)
+        if len(keys) != len(self) or set(keys) != set(self._columns):
+            raise ValueError("Packed exact column ordering changed its coordinates")
+        self._columns = {key: self._columns[key] for key in keys}
 
 
 from .projectors import (
@@ -43,21 +96,40 @@ from .projectors import (
 
 
 def _pivot_normalize_vector(vector):
-    entries = [_sympy().simplify(value) for value in vector]
+    # Exact real-radical coefficients already have a canonical arithmetic
+    # representation. Normalize in that field before invoking general symbolic
+    # simplification. Other domains retain the original symbolic convention.
+    from ye3t.exact_scalars import exact_scalar
+    sp = _sympy()
+    values = tuple(dict.fromkeys(vector))
+    try:
+        if any(sp.sympify(value).has(sp.Float) for value in values):
+            raise TypeError("Preserve floating-point inputs in their original domain")
+        exact = {value: exact_scalar(value) for value in values}
+        scale = next((exact[value] for value in vector if exact[value]), None)
+        if scale is not None:
+            normalized = {value: (coefficient/scale)._sympy_()
+                          for value,coefficient in exact.items()}
+            return sp.Matrix([normalized[value] for value in vector])
+    except (TypeError, ValueError):
+        pass
+    simplified = {value: _sympy().simplify(value) for value in dict.fromkeys(vector)}
+    entries = [simplified[value] for value in vector]
     pivot = next((idx for idx, value in enumerate(entries) if value != 0), len(entries))
     if pivot == len(entries):
         return _sympy().Matrix(vector)
     scale = entries[pivot]
-    return _sympy().Matrix([_sympy().simplify(value / scale) for value in entries])
+    normalized = {value: _sympy().simplify(value / scale) for value in dict.fromkeys(entries)}
+    return _sympy().Matrix([normalized[value] for value in entries])
 
 
 def _normalized_vector_key(vector):
-    entries = [_sympy().simplify(value) for value in vector]
+    entries = list(_pivot_normalize_vector(vector))
     pivot = next((idx for idx, value in enumerate(entries) if value != 0), len(entries))
     if pivot == len(entries):
         return pivot, tuple()
-    scale = entries[pivot]
-    return pivot, tuple(_sympy().srepr(_sympy().simplify(value / scale)) for value in entries)
+    representations = {value: _sympy().srepr(value) for value in dict.fromkeys(entries)}
+    return pivot, tuple(representations[value] for value in entries)
 
 
 def _exact_independent_basis(vectors):
@@ -330,6 +402,7 @@ def _exact_domain_nullspace(matrix):
 def _weight_raising_matrix(lin, source_states, target_states):
     target_index = {state: index for index, state in enumerate(target_states)}
     entries = {}
+    coefficients = {}
     for column, state in enumerate(source_states):
         for slot, (l_value, m_value) in enumerate(
             zip(lin, state, strict=True)
@@ -341,16 +414,17 @@ def _weight_raising_matrix(lin, source_states, target_states):
             row = target_index.get(tuple(raised))
             if row is None:
                 raise RuntimeError("Angular raising map left its target weight space.")
-            coefficient = _sympy().sqrt(
-                _sympy().Integer(
-                    (int(l_value) - int(m_value))
-                    * (int(l_value) + int(m_value) + 1)
-                )
-            )
+            coefficient_key = (int(l_value), int(m_value))
+            if coefficient_key not in coefficients:
+                coefficients[coefficient_key] = _sympy().sqrt(_sympy().Integer(
+                    (int(l_value) - int(m_value)) * (int(l_value) + int(m_value) + 1)))
+            coefficient = coefficients[coefficient_key]
             key = (int(row), int(column))
-            entries[key] = _sympy().simplify(
-                entries.get(key, _sympy().Integer(0)) + coefficient
-            )
+            # Raising different ordered factors changes different coordinates,
+            # so each source/target pair has exactly one contribution.
+            if key in entries:
+                raise RuntimeError("Ordered raising map has a repeated source/target pair.")
+            entries[key] = coefficient
     return _sympy().SparseMatrix(
         len(target_states),
         len(source_states),
@@ -358,8 +432,9 @@ def _weight_raising_matrix(lin, source_states, target_states):
     )
 
 
-# TODO: the l = 2 size-8 M = 0 space (63k states) is untested on the coset path; if it does not fit,
-# tensor order 8 must use blocks of size <= 6. Cache keys for compiled templates must include this threshold.
+# TODO(YE3T_HIGH_RANK_WEIGHT_RUNTIME): qualify complete l=2 size-8 requested
+# carriers and their compiler memory use. Report resource limits explicitly;
+# never replace a requested repeated-content block with smaller blocks.
 _COSET_SCALAR_VECTORS_THRESHOLD = 6
 """Block size at/above which ``_exact_single_factor_scalar_vectors`` uses the
 exact coset path instead of the native
@@ -391,6 +466,64 @@ def _magnetic_content_vector(state, angular_l):
     return tuple(counts)
 
 
+def _check_scalar_tableau_actions(raw_by_tableau, scalar_states, slots, generators):
+    """Check every raw tableau vector, reusing exact symbolic operations."""
+    from functools import lru_cache
+    from ye3t.exact_scalars import exact_scalar
+
+    sp = _sympy()
+    dimension = len(raw_by_tableau)
+    vectors = raw_by_tableau
+    zero = sp.Integer(0)
+    # Every relation remains checked. Repeated real radical coefficients can
+    # be multiplied and compared directly in their exact field, avoiding
+    # symbolic Add/simplify construction for every magnetic word.
+    values = tuple(dict.fromkeys(value for vector in vectors for value in vector.values()))
+    values = tuple(dict.fromkeys((*values, *(value for generator in generators for value in generator))))
+    try:
+        if any(sp.sympify(value).has(sp.Float) for value in values):
+            raise TypeError('Preserve floating-point coefficient semantics')
+        exact = {value: exact_scalar(value) for value in values}
+    except (TypeError, ValueError):
+        exact = None
+    if exact is not None:
+        vectors = tuple({word: exact[value] for word, value in vector.items()} for vector in vectors)
+        zero = exact_scalar(0)
+
+    @lru_cache(maxsize=4096)
+    def coefficient_product(coefficient, value):
+        return coefficient * value
+
+    @lru_cache(maxsize=4096)
+    def coefficient_sum(left, right):
+        return left + right
+
+    @lru_cache(maxsize=4096)
+    def exact_equal(left, right):
+        return left == right if exact is not None else sp.simplify(left-right) == 0
+
+    for adjacent, generator in enumerate(generators):
+        permutation = list(range(len(slots)))
+        permutation[adjacent], permutation[adjacent+1] = permutation[adjacent+1], permutation[adjacent]
+        targets = {word: permute_state_slots(word, slots, tuple(permutation))
+            for word in scalar_states}
+        for tableau in range(dimension):
+            permuted = {targets[word]: value for word, value in vectors[tableau].items()}
+            expected = {}
+            for source in range(dimension):
+                if generator[source, tableau] == 0:
+                    continue
+                coefficient = generator[source, tableau]
+                if exact is not None:
+                    coefficient = exact[coefficient]
+                for word, value in vectors[source].items():
+                    product = coefficient_product(coefficient, value)
+                    expected[word] = coefficient_sum(expected.get(word, zero), product)
+            if any(not exact_equal(permuted.get(word, zero), expected.get(word, zero))
+                   for word in set(permuted) | set(expected)):
+                raise RuntimeError("Angular scalar tableau vectors fail exact Coxeter/intertwining validation.")
+
+
 def _angular_scalar_vectors_coset(
     scalar_states,
     raising,
@@ -400,17 +533,19 @@ def _angular_scalar_vectors_coset(
     dimension,
     *,
     normalize_tableaux=True,
+    compact_vectors=False,
 ):
     """Selected E_{0,0} pivots and complete tableau vectors on one weight space.
 
     Magnetic-content classes contain words with the same multiset of m
     values. Factor permutations preserve each class. The shared coset_units
-    helpers select its original independent columns by the exact Kostka
-    count and construct their complete tableau components by vector transport.
+    helpers select its original independent E00 columns by the exact Kostka
+    count. Complete tableau components are constructed after angular-copy
+    selection, by transporting the selected combinations of projected rows.
 
     The raising nullspace fixes the angular multiplicity coordinates in that
     selected E00 basis. E_t0 E00 = E_t0 transfers those same coefficients to
-    every tableau. Storage contains the selected columns and the returned
+    every tableau. Storage contains the reference-tableau columns and returned
     vectors. The full native matrix-unit construction is an independent
     reference in tests.
 
@@ -428,7 +563,8 @@ def _angular_scalar_vectors_coset(
         class_pivot_indices,
         class_projected_row,
         content_key,
-        selected_unit_column,
+        _reference_unit_columns,
+        _unit_column_from_projected_row,
     )
 
     sp = _sympy()
@@ -442,7 +578,8 @@ def _angular_scalar_vectors_coset(
         class_member_indices.setdefault(content_key(state), []).append(global_index)
 
     global_pivots = []       # (global_index, key, local_index)
-    class_full = {}          # key -> {pivot word: full}, all tableau components
+    class_reference = {}    # E00 only until angular multiplicities are selected
+    class_projected = {}
     class_words_by_key = {}  # key -> class words tuple (class-word order)
 
     for key, member_indices in class_member_indices.items():
@@ -464,13 +601,14 @@ def _angular_scalar_vectors_coset(
             row_for_word=lambda word: class_projected_row(
                 w0, word, dimension, generators, s_w0),
         )
-        full_by_word = {}
+        projected = {index: class_projected_row(w0, class_words[index],
+                     dimension, generators, s_w0) for index in pivot_indices}
+        reference_columns = _reference_unit_columns(dimension, size, class_words,
+            w0, tuple(projected.values()), generators)
         for local_index in pivot_indices:
-            word = class_words[local_index]
-            full_by_word[word] = selected_unit_column(
-                dimension, size, class_words, w0, word, generators, s_w0)
             global_pivots.append((member_indices[local_index], key, local_index))
-        class_full[key] = full_by_word
+        class_reference[key] = dict(zip(pivot_indices, reference_columns, strict=True))
+        class_projected[key] = projected
         class_words_by_key[key] = class_words
 
     if not global_pivots:
@@ -481,28 +619,26 @@ def _angular_scalar_vectors_coset(
     reference_basis_columns = []
     for _global_index, key, local_index in global_pivots:
         class_words = class_words_by_key[key]
-        full = class_full[key][class_words[local_index]]
         member_indices = class_member_indices[key]
-        column = sp.zeros(len(scalar_states), 1)
-        for target_local_index, value in full[0].items():
+        column = sp.SparseMatrix(len(scalar_states), 1, {})
+        for target_local_index, value in class_reference[key][local_index].items():
             column[member_indices[target_local_index], 0] = value
         reference_basis_columns.append(column)
-    reference_basis_matrix = _matrix_from_columns(
-        reference_basis_columns, rows=len(scalar_states)
-    )
+    reference_basis_matrix = sp.SparseMatrix.hstack(*reference_basis_columns)
 
     reference_coefficients = _exact_independent_basis(
         tuple(
             sp.Matrix(vector)
-            for vector in _exact_domain_nullspace(raising * reference_basis_matrix)
+            for vector in _exact_domain_nullspace(raising * sp.SparseMatrix(reference_basis_matrix))
         )
     )
     if not reference_coefficients:
         return {}, 0
     multiplicity = len(reference_coefficients)
 
-    scalar_vectors = {}
-    all_tableau_vectors = []
+    scalar_vectors = _PackedExactColumns(len(scalar_states)) if compact_vectors else {}
+    reference_tableau_vectors = []
+    checked_actions = {}
     for copy_index, coefficients in enumerate(reference_coefficients):
         reference_vector = reference_basis_matrix * coefficients
         pivot = next((sp.simplify(value) for value in reference_vector
@@ -513,22 +649,33 @@ def _angular_scalar_vectors_coset(
         # E_t0 E00 = E_t0 gives every tableau from the same selected columns.
         # Preserve the initial pivot normalization even when callers disable
         # the later per-tableau normalization for requested-weight lowering.
-        # See Etingof et al. (2011), sections 4.5--4.7, matrix elements.
+        # See Etingof et al., Introduction to Representation Theory,
+        # section 4.7, Proposition 4.7.1 (matrix-element orthogonality).
         raw_by_tableau = tuple({} for _ in range(dimension))
+        selected_rows = {}
         for coefficient, (_global_index, key, local_index) in zip(
                 coefficients, global_pivots, strict=True):
             coefficient = sp.simplify(coefficient / pivot)
             if coefficient == 0:
                 continue
+            if key not in selected_rows:
+                selected_rows[key] = sp.zeros(1, dimension)
+            selected_rows[key] += coefficient*class_projected[key][local_index]
+        # Resolve the selected angular-copy combination before expanding its
+        # complete tableau components. Distributivity preserves E_t0 E00=E_t0,
+        # every canonical pivot and the original normalization exactly.
+        for key, initial in selected_rows.items():
             class_words = class_words_by_key[key]
-            full = class_full[key][class_words[local_index]]
+            initial = initial.applyfunc(sp.simplify)
+            full = _unit_column_from_projected_row(dimension, size, class_words,
+                class_words[0], initial, generators)
             for tableau in range(dimension):
                 target = raw_by_tableau[tableau]
                 for target_local_index, unit_value in full[tableau].items():
                     target_word = class_words[target_local_index]
                     target[target_word] = (
                         target.get(target_word, sp.Integer(0))
-                        + coefficient * unit_value
+                        + unit_value
                     )
 
         # Exact Coxeter/intertwining check on the raw
@@ -539,62 +686,61 @@ def _angular_scalar_vectors_coset(
         # per-tableau pivot normalization afterward (matching the native
         # path's own convention) rescales this to a diagonal similarity, so
         # this check uses the vectors before normalization.
-        for adjacent in range(max(size - 1, 0)):
-            permutation = tuple(
-                index + 1 if index == adjacent else adjacent
-                if index == adjacent + 1
-                else index
-                for index in range(size)
-            )
-            D_si = generators[adjacent]
-            for t in range(dimension):
-                permuted = {}
-                for word, value in raw_by_tableau[t].items():
-                    if value == 0:
-                        continue
-                    target_word = permute_state_slots(word, slots, permutation)
-                    permuted[target_word] = (
-                        permuted.get(target_word, sp.Integer(0)) + value
-                    )
-                expected = {}
-                for k in range(dimension):
-                    coefficient = D_si[k, t]
-                    if coefficient == 0:
-                        continue
-                    for word, value in raw_by_tableau[k].items():
-                        expected[word] = (
-                            expected.get(word, sp.Integer(0)) + coefficient * value
-                        )
-                for word in set(permuted) | set(expected):
-                    residual = sp.simplify(
-                        permuted.get(word, 0) - expected.get(word, 0)
-                    )
-                    if residual != 0:
-                        raise RuntimeError(
-                            "Angular scalar tableau vectors fail the exact "
-                            "Coxeter/intertwining certificate."
-                        )
+        _check_scalar_tableau_actions(raw_by_tableau, scalar_states, slots, generators)
 
+        pivots = []
         for tableau in range(dimension):
             dense = sp.zeros(len(scalar_states), 1)
             for word, value in raw_by_tableau[tableau].items():
                 dense[scalar_index[word], 0] = value
             normalized = _pivot_normalize_vector(dense) if normalize_tableaux else dense
+            if compact_vectors:
+                pivots.append(next(value for value in dense if value != 0)
+                              if normalize_tableaux else sp.S.One)
             scalar_vectors[(copy_index, tableau)] = normalized
-            all_tableau_vectors.append(normalized)
+            if tableau == 0:
+                reference_tableau_vectors.append(normalized)
+        if compact_vectors:
+            # P raw_t = sum_k D[k,t] raw_k was checked on every word above.
+            # With normalized_t = raw_t/p_t the same action is
+            # diag(p) D diag(1/p). Retain that checked change of coordinates.
+            keys = tuple((copy_index, tableau) for tableau in range(dimension))
+            checked_actions[keys] = tuple(sp.ImmutableSparseMatrix(dimension, dimension,
+                {(row, column): sp.simplify(value*pivots[row]/pivots[column])
+                 for (row, column), value in generator.todok().items()})
+                for generator in generators)
 
-    independence_matrix = _matrix_from_columns(
-        all_tableau_vectors, rows=len(scalar_states)
-    )
-    if int(independence_matrix.rank()) != dimension * multiplicity:
+    # Matrix-unit working columns are no longer needed. Release them before
+    # checking independence in the multiplicity space. The complete raw
+    # intertwining checks above give a map from copies of one irreducible
+    # Specht module. Its kernel is K_copy tensor Specht, so the actual
+    # reference-tableau columns have full copy rank exactly when the complete
+    # map is injective. Nonzero per-tableau pivot rescaling preserves rank.
+    # Reference: Etingof et al., Introduction to representation theory (2011),
+    # Corollary 2.3.10 and Proposition 4.7.1. Independent implementation; no code
+    # copied. Tests also check full-column rank against native matrix units.
+    del class_reference, class_projected, class_words_by_key, full, selected_rows
+    del reference_basis_columns, reference_basis_matrix, reference_coefficients
+    del raw_by_tableau, reference_vector
+    independence_matrix = sp.SparseMatrix(len(scalar_states), multiplicity,
+        {(row, column): value for column, vector in enumerate(reference_tableau_vectors)
+         for (row, _), value in vector.todok().items() if value != 0})
+    # These entries are exact algebraic numbers. Domain-aware elimination
+    # checks the same column rank without generic symbolic zero testing at
+    # every elimination step (SymPy DomainMatrix.rref documentation).
+    _rref, independent_columns = independence_matrix.to_DM(extension=True).rref()
+    if len(independent_columns) != multiplicity:
         raise RuntimeError(
             "Angular scalar tableau vectors are not exactly linearly independent."
         )
 
+    if compact_vectors:
+        scalar_vectors._checked_actions = checked_actions
     return scalar_vectors, multiplicity
 
 
-def _exact_single_factor_weight_vectors(nin, lin, permutation_irrep, output_L, *, normalize_tableaux=True):
+def _exact_single_factor_weight_vectors(nin, lin, permutation_irrep, output_L, *, normalize_tableaux=True,
+                                       compact_vectors=False):
     """Exact requested-L carrier from a coset image and raising nullspace.
 
     This uses only the highest-weight raising block and successive lowering
@@ -602,6 +748,7 @@ def _exact_single_factor_weight_vectors(nin, lin, permutation_irrep, output_L, *
     The highest-weight copy gauge is the exact coset pivot convention; lowering
     preserves that gauge rather than independently normalizing each M.
     """
+    from functools import lru_cache
     from .young_sectors import generalized_sector_counts
 
     sp = _sympy()
@@ -620,32 +767,64 @@ def _exact_single_factor_weight_vectors(nin, lin, permutation_irrep, output_L, *
     raising = _weight_raising_matrix(lin, highest_states, weights[output_L+1])
     highest, multiplicity = _angular_scalar_vectors_coset(
         highest_states, raising, slots, lin[0], partition, int(partition.dimension),
-        normalize_tableaux=normalize_tableaux)
+        normalize_tableaux=normalize_tableaux, compact_vectors=compact_vectors)
     expected = generalized_sector_counts(nin, lin, permutation_irrep=permutation_irrep,
                                         count_only=True, spatial_symmetry="O3")
     if int(expected.counts_by_L.get(output_L, 0)) != multiplicity:
         raise RuntimeError("Requested-L coset multiplicity disagrees with exact representation counting.")
     full_index = {state: index for index, state in enumerate(basis_states)}
-    lowering = {magnetic: _weight_raising_matrix(lin, weights[magnetic-1], weights[magnetic]).T
-                for magnetic in range(-output_L+1, output_L+1)}
-    vectors = {}
-    for (copy_index, tableau), highest_vector in highest.items():
-        if any(sp.simplify(value) != 0 for value in raising*highest_vector):
+    from ye3t.exact_scalars import exact_scalar
+    lowering = {}
+    for magnetic in range(-output_L+1, output_L+1):
+        scale = exact_scalar(sp.sqrt((output_L+magnetic)*(output_L-magnetic+1)))
+        operator = _weight_raising_matrix(lin, weights[magnetic-1], weights[magnetic]).T
+        # Normalize the small alphabet of operator coefficients once. The
+        # exact product then emits canonical radicals directly, avoiding a
+        # generic symbolic simplification for every lowered tableau entry.
+        @lru_cache(maxsize=256)
+        def normalized(value):
+            return (exact_scalar(value)/scale)._sympy_()
+        lowering[magnetic] = operator.applyfunc(normalized)
+    # Tableau and magnetic vectors repeat exact scalar expressions. Reuse their
+    # simplifications locally without retaining whole carriers across requests.
+    simplify_coefficient = lru_cache(maxsize=4096)(sp.simplify)
+    vectors = _PackedExactColumns(len(basis_states)) if compact_vectors else {}
+    highest_keys = tuple(highest)
+    for start in range(0, len(highest_keys), 16):
+        keys = highest_keys[start:start+16]
+        # Bounded batches share the exact raising/lowering operator preparation
+        # across complete tableau columns. Every magnetic component is retained.
+        highest_vectors = sp.SparseMatrix.hstack(*(sp.SparseMatrix(highest[key]) for key in keys))
+        raised = _exact_matrix_product(raising, highest_vectors)
+        if any(simplify_coefficient(value) != 0 for value in raised.todok().values()):
             raise RuntimeError("Requested-L vector is not highest weight.")
-        current = highest_vector
+        current = highest_vectors
         for magnetic in range(output_L, -output_L-1, -1):
-            embedded = sp.zeros(len(basis_states), 1)
-            for state, value in zip(weights[magnetic], current, strict=True):
-                if value != 0:
-                    embedded[full_index[state], 0] = value
-            vectors[(copy_index, tableau, magnetic)] = embedded
+            entries = [{} for _ in keys]
+            for (row, column), value in current.todok().items():
+                entries[column][full_index[weights[magnetic][row]], 0] = value
+            for (copy_index, tableau), column in zip(keys, entries, strict=True):
+                vectors[(copy_index, tableau, magnetic)] = sp.SparseMatrix(len(basis_states),1,column)
             if magnetic > -output_L:
-                scale = sp.sqrt((output_L+magnetic)*(output_L-magnetic+1))
-                current = (lowering[magnetic]*current/scale).applyfunc(sp.simplify)
+                current = sp.SparseMatrix(_exact_matrix_product(lowering[magnetic], current))
+    ordered = tuple((copy, tableau, magnetic) for copy, tableau in highest_keys
+                    for magnetic in range(output_L, -output_L-1, -1))
+    if compact_vectors:
+        vectors.reorder(ordered)
+        # Homogeneous factor permutations commute with the diagonal lowering
+        # operator. Every M column above is produced by that exact normalized
+        # operator, with no subsequent tableau rescaling. Its action therefore
+        # equals the already checked highest-weight action at every M.
+        vectors._checked_actions = {
+            tuple((copy, tableau, magnetic) for copy, tableau in keys): actions
+            for keys, actions in getattr(highest, '_checked_actions', {}).items()
+            for magnetic in range(output_L, -output_L-1, -1)}
+    else:
+        vectors = {key: vectors[key] for key in ordered}
     return basis_states, vectors, multiplicity
 
 
-def _exact_single_factor_scalar_vectors(nin, lin, permutation_irrep, *, backend="auto"):
+def _exact_single_factor_scalar_vectors(nin, lin, permutation_irrep, *, backend="auto", compact_vectors=False):
     """Return the exact L=0 carrier using only the M=0 and M=1 spaces."""
     if backend not in {"auto", "exact_coset"}:
         raise ValueError("scalar weight-space backend must be auto or exact_coset")
@@ -687,6 +866,7 @@ def _exact_single_factor_scalar_vectors(nin, lin, permutation_irrep, *, backend=
             angular_l,
             partition,
             dimension,
+            compact_vectors=compact_vectors,
         )
         if multiplicity == 0:
             return basis_states, {}, 0
@@ -712,7 +892,7 @@ def _exact_single_factor_scalar_vectors(nin, lin, permutation_irrep, *, backend=
                 tuple(
                     _sympy().Matrix(vector)
                     for vector in _exact_domain_nullspace(
-                        raising * image_basis_matrix
+                        raising * _sympy().SparseMatrix(image_basis_matrix)
                     )
                 )
             )
@@ -784,7 +964,7 @@ def _exact_single_factor_scalar_vectors(nin, lin, permutation_irrep, *, backend=
                 tuple(
                     _sympy().Matrix(vector)
                         for vector in _exact_domain_nullspace(
-                            raising * reference_basis_matrix
+                            raising * _sympy().SparseMatrix(reference_basis_matrix)
                         )
                 )
             )
@@ -805,19 +985,25 @@ def _exact_single_factor_scalar_vectors(nin, lin, permutation_irrep, *, backend=
                     )
     basis_index = {state: index for index, state in enumerate(basis_states)}
     scalar_indices = tuple(basis_index[state] for state in scalar_states)
-    vectors = {}
+    # Check every complete tableau in bounded groups. Reuse the same sparse
+    # raising operator preparation across each group instead of rebuilding its
+    # exact coefficient/index tables separately for every tableau column.
+    scalar_keys = tuple((copy, tableau) for copy in range(multiplicity)
+                        for tableau in range(dimension))
+    for start in range(0, len(scalar_keys), 16):
+        columns = _sympy().SparseMatrix.hstack(*(
+            _sympy().SparseMatrix(scalar_vectors[key]) for key in scalar_keys[start:start+16]))
+        raised = _exact_matrix_product(raising, columns)
+        if any(raised.todok().values()):
+            raise RuntimeError("Scalar carrier is not annihilated by J+.")
+    vectors = _PackedExactColumns(len(basis_states)) if compact_vectors else {}
     for copy_index in range(multiplicity):
         for tableau in range(dimension):
             scalar_vector = scalar_vectors[(copy_index, tableau)]
-            if raising * scalar_vector != _sympy().zeros(
-                len(raised_states),
-                1,
-            ):
-                raise RuntimeError("Scalar carrier is not annihilated by J+.")
             if projector_matrix is not None:
                 if projector_matrix * scalar_vector != scalar_vector:
                     raise RuntimeError("Scalar carrier left its Young sector.")
-            vector = _sympy().zeros(len(basis_states), 1)
+            vector = _sympy().SparseMatrix.zeros(len(basis_states), 1)
             for row, value in zip(
                 scalar_indices,
                 scalar_vector,
@@ -831,6 +1017,10 @@ def _exact_single_factor_scalar_vectors(nin, lin, permutation_irrep, *, backend=
                     0,
                 )
             ] = vector
+    if compact_vectors and isinstance(scalar_vectors, _PackedExactColumns):
+        vectors._checked_actions = {
+            tuple((copy, tableau, 0) for copy, tableau in keys): actions
+            for keys, actions in scalar_vectors._checked_actions.items()}
     return basis_states, vectors, multiplicity
 
 

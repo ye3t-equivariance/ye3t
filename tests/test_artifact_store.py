@@ -9,6 +9,24 @@ import time
 import pytest
 
 
+def test_memory_cache_policy_uses_store_rules_without_filesystem_setup(monkeypatch):
+    from ye3t.cache import artifacts
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Memory cache policy must not inspect paths")
+
+    monkeypatch.setattr(artifacts, "default_artifact_cache_directory", forbidden)
+    monkeypatch.setattr(artifacts, "Path", forbidden)
+    monkeypatch.setenv("YE3T_CACHE_MODE", " Refresh ")
+    monkeypatch.setenv("YE3T_CACHE_VERIFY", " FULL ")
+    assert artifacts._artifact_cache_policy() == ("rebuild", "full")
+    assert artifacts._artifact_cache_policy(" READ_ONLY ", " Hash ") == ("read_only", "hash")
+    with pytest.raises(ValueError, match="Artifact-cache mode"):
+        artifacts._artifact_cache_policy("unknown")
+    with pytest.raises(ValueError, match="verification"):
+        artifacts._artifact_cache_policy("auto", "unknown")
+
+
 def _certificate(payload):
     return {
         "passed": True,
@@ -112,6 +130,189 @@ def test_canonical_json_is_order_independent_and_strict():
         canonical_json_bytes({1: "ambiguous"})
     with pytest.raises(TypeError, match="Unsupported"):
         canonical_json_bytes({"path": Path("cache")})
+
+
+def test_direct_encoding_matches_normalized_reference_for_nested_mappings():
+    from types import MappingProxyType
+    from ye3t.cache import artifacts
+
+    shared = {"radical": (2**100, 13), "coordinates": ((0, 1, -2), (1, 0, 2))}
+    value = MappingProxyType({"rows": (shared, shared), "text": "κ\n雪",
+                              "values": [None, True, -0.0, 1e-100]})
+    expected = artifacts._encode_canonical_json(artifacts._canonical_value(value))
+    assert artifacts.canonical_json_bytes(value) == expected
+    with pytest.raises(TypeError, match="Non-string"):
+        artifacts.canonical_json_bytes(MappingProxyType({"nested": {1: "invalid"}}))
+
+
+def test_streamed_digest_preserves_canonical_bytes_and_bounds_encoding_memory():
+    import hashlib
+    import tracemalloc
+    from ye3t.cache import artifacts
+
+    row = {"coordinates": [[0, 1, -2], [1, 0, 2]],
+           "coefficient": [2**100, 13], "text": "\u03ba\n\u96ea" * 40,
+           "values": [None, True, -0.0, 1e-100]}
+    value = {"rows": [row] * 8000, "empty": {}}
+    encoded = artifacts.canonical_json_bytes(value)
+    expected = hashlib.sha256(encoded).hexdigest()
+    encoded_size = len(encoded)
+    del encoded
+    tracemalloc.start()
+    try:
+        assert artifacts._hash_canonical_json(value) == expected
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert peak < encoded_size
+    with pytest.raises(ValueError):
+        artifacts._hash_canonical_json({"bad": float("nan")})
+
+
+def test_decoded_digest_does_not_materialize_complete_json_bytes(tmp_path, monkeypatch):
+    from ye3t.cache import artifacts
+
+    kwargs = dict(artifact_type="large_read", artifact_schema="v1", request={},
+                  builder=lambda: {"value": 7, "rows": [[1, 2, 3]] * 5000},
+                  certificate={"passed": True, "checks": {"valid": True}},
+                  required_certificate_checks=("valid",))
+    built = artifacts.YE3TArtifactStore(directory=tmp_path).resolve(**kwargs)
+    path = Path(built["path"])
+    path.write_bytes(path.read_bytes())
+    original = artifacts._encode_canonical_json
+
+    def encode(value):
+        if isinstance(value, dict) and ("payload" in value or "rows" in value):
+            raise AssertionError("Complete decoded artifact was encoded in memory")
+        return original(value)
+
+    monkeypatch.setattr(artifacts, "_encode_canonical_json", encode)
+    loaded = artifacts.YE3TArtifactStore(directory=tmp_path, mode="read_only").resolve(**kwargs)
+    assert loaded["payload"] == built["payload"]
+
+
+def test_batched_digest_large_maps_nested_lists_and_unicode():
+    import hashlib
+    from types import MappingProxyType
+    from ye3t.cache import artifacts
+
+    cases = [
+        {str(i): [i, -i, float(i)] for i in range(5000)},
+        [[[i, j] for i in range(90)] for j in range(83)],
+        MappingProxyType({"matrix": tuple(tuple(range(5000)) for _ in range(3)),
+                          "text": "\u03ba\u96ea\n\"\\" * 10000}),
+    ]
+    for value in cases:
+        encoded = artifacts.canonical_json_bytes(value)
+        expected = hashlib.sha256(encoded).hexdigest()
+        assert artifacts._hash_canonical_json(json.loads(encoded)) == expected
+
+
+@pytest.mark.parametrize("mode", ["off", "auto"])
+def test_builder_normalization_isolated_and_callbacks_preserved(tmp_path, mode):
+    from types import MappingProxyType
+    from ye3t.cache.artifacts import YE3TArtifactStore, artifact_hash
+
+    shared = {"value": 7, "coordinates": ((1, 2, 3),)}
+    original = MappingProxyType({"rows": (shared, shared)})
+
+    def validate(payload):
+        assert isinstance(payload["rows"], list)
+        assert isinstance(payload["rows"][0]["coordinates"], list)
+        payload["rows"][0]["value"] = 8
+        assert payload["rows"][1]["value"] == 7
+        assert shared["value"] == 7
+
+    result = YE3TArtifactStore(directory=tmp_path, mode=mode).resolve(
+        "isolated_builder", "v1", {}, lambda: original, validator=validate,
+        certificate={"passed": True, "checks": {"valid": True}},
+        required_certificate_checks=("valid",))
+    assert result["payload"]["rows"][0]["value"] == 8
+    assert result["payload_hash"] == artifact_hash(result["payload"])
+    result["payload"]["rows"][0]["coordinates"][0][0] = 99
+    assert result["payload"]["rows"][1]["coordinates"][0][0] == 1
+    assert shared["coordinates"] == ((1, 2, 3),)
+
+
+def test_invalid_callback_mutation_still_fails_strict_encoding(tmp_path):
+    from ye3t.cache.artifacts import YE3TArtifactStore
+
+    def invalid_mutation(payload):
+        payload["bad"] = {1: "not a string key"}
+
+    with pytest.raises(TypeError, match="Non-string"):
+        YE3TArtifactStore(directory=tmp_path).resolve(
+            "invalid_mutation", "v1", {}, lambda: {"value": 1},
+            validator=invalid_mutation,
+            certificate={"passed": True, "checks": {"valid": True}})
+    assert not list(tmp_path.rglob("*.json"))
+
+
+@pytest.mark.parametrize("number", ["NaN", "Infinity", "-Infinity", "1e999"])
+def test_decoded_artifact_rejects_nonfinite_numbers(tmp_path, number):
+    from ye3t.cache.artifacts import YE3TArtifactStore, ArtifactCacheValidationError
+
+    built = _resolve(YE3TArtifactStore(directory=tmp_path), {"partition": [2]}, 7)
+    path = Path(built["path"])
+    envelope = json.loads(path.read_text())
+    envelope["payload"]["value"] = "invalid_numeric_placeholder"
+    path.write_text(json.dumps(envelope).replace('"invalid_numeric_placeholder"', number))
+    with pytest.raises(ArtifactCacheValidationError):
+        _resolve(YE3TArtifactStore(directory=tmp_path, mode="read_only"), {"partition": [2]}, 9)
+
+
+def test_decoded_envelope_is_not_recopied_before_digest_checks(tmp_path, monkeypatch):
+    from ye3t.cache import artifacts
+
+    built = _resolve(artifacts.YE3TArtifactStore(directory=tmp_path), {"partition": [2]}, 7)
+    path = Path(built["path"])
+    path.write_bytes(path.read_bytes())
+    original = artifacts._canonical_value
+
+    def check(value, path="$"):
+        if isinstance(value, dict) and "envelope_hash" in value:
+            raise AssertionError("Decoded envelope was copied a second time")
+        return original(value, path)
+
+    monkeypatch.setattr(artifacts, "_canonical_value", check)
+    loaded = _resolve(artifacts.YE3TArtifactStore(directory=tmp_path, mode="read_only"),
+                      {"partition": [2]}, 9)
+    assert loaded["status"] == "hit"
+    assert loaded["payload"] == built["payload"]
+
+
+def test_normalized_envelope_replays_exact_values_and_checks_both_hashes(tmp_path):
+    from ye3t.cache.artifacts import (YE3TArtifactStore, artifact_hash,
+        ArtifactCacheValidationError)
+    payload = {"exact": {"numerator": 2**100, "denominator": 13},
+               "mixed": [None, True, -0.0, 1e-100, "κ_λ\n雪"],
+               "nested": {"z": [], "a": {"real": 1.25}}}
+    kwargs = {"artifact_type": "mixed_exact", "artifact_schema": "v1",
+              "request": {"partition": [2, 1]},
+              "certificate": {"passed": True, "checks": {"exact": True}},
+              "required_certificate_checks": ("exact",)}
+    built = YE3TArtifactStore(directory=tmp_path).resolve(builder=lambda: payload, **kwargs)
+    path = Path(built["path"])
+    encoded = path.read_text()
+    path.write_text(encoded)  # Force a fresh read rather than the process snapshot.
+    store = YE3TArtifactStore(directory=tmp_path, mode="read_only")
+    def unexpected_builder():
+        raise AssertionError("Persisted exact values must replay without compilation")
+    loaded = store.resolve(builder=unexpected_builder, **kwargs)
+    assert loaded["payload"] == payload
+    assert loaded["payload_hash"] == artifact_hash(payload)
+    damaged = json.loads(encoded)
+    damaged["payload"]["exact"]["numerator"] += 1
+    damaged["envelope_hash"] = artifact_hash({key: value for key, value in damaged.items()
+                                             if key != "envelope_hash"})
+    path.write_text(json.dumps(damaged))
+    with pytest.raises(ArtifactCacheValidationError, match="payload hash"):
+        store.resolve(builder=unexpected_builder, **kwargs)
+    damaged = json.loads(encoded)
+    damaged["envelope_hash"] = "0"*64
+    path.write_text(json.dumps(damaged))
+    with pytest.raises(ArtifactCacheValidationError, match="envelope hash"):
+        store.resolve(builder=unexpected_builder, **kwargs)
 
 
 def test_inspect_and_explicit_prune_keep_valid_entries(tmp_path, monkeypatch):

@@ -6,9 +6,19 @@ provide values and derivatives through order two, including force training.
 """
 
 from math import prod
+from functools import lru_cache
 
 import sympy as sp
 import torch
+
+
+@lru_cache(maxsize=8192)
+def _fixed_map_coefficient(young, angular, exchange, role_scale):
+    """Convert one canonical exact coefficient shared by channel pairs."""
+    value = young * angular * exchange * role_scale
+    if value.is_real is not True:
+        raise ValueError("Sparse carrier lowering requires real canonical fixed maps")
+    return float(value)
 
 
 def sparse_schedule_size(compiled, complex_storage):
@@ -51,9 +61,7 @@ class _SparseCarrierProduct(torch.nn.Module):
             for p, i, j, t, y in young[row["young_copy"]]:
                 for m, n, M, cg in angular:
                     for ca, cb, weight in pairs:
-                        value = y * cg * weight * role_scale
-                        if value.is_real is not True:
-                            raise ValueError("Sparse carrier lowering requires real canonical fixed maps")
+                        value = _fixed_map_coefficient(y, cg, weight, role_scale)
                         li = ((p * layouts[0]["channel_count"] + ca) * layouts[0]["tableau_count"] + i) * layouts[0]["magnetic_count"] + m
                         ri = ((p * layouts[1]["channel_count"] + cb) * layouts[1]["tableau_count"] + j) * layouts[1]["magnetic_count"] + n
                         oi = (channel * output["tableau_count"] + t) * output["magnetic_count"] + M
@@ -62,7 +70,7 @@ class _SparseCarrierProduct(torch.nn.Module):
                         for l, r, o, sign in terms:
                             for target, index in zip(indices, (l, r, o)):
                                 target.append(index)
-                            coefficients.append(sign * float(value))
+                            coefficients.append(sign * value)
         if len(coefficients) != sparse_schedule_size(compiled, self.complex_storage):
             raise ArithmeticError("Sparse carrier schedule differs from its canonical nonzero term count")
         tables, self.sizes = bilinear_plan(*indices, *widths)

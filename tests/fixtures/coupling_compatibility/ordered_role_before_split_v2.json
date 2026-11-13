@@ -1,0 +1,1857 @@
+{
+  "provenance": "Pre-remediation source snapshot, 2026-11-12T20:28:29Z; no fitting",
+  "artifact": {
+    "schema": "ye3t_ordered_role_cauchy_compiled_v2",
+    "request": {
+      "family": "linear_covariant_cauchy",
+      "schema": "ye3t_ordered_role_cauchy_v2",
+      "carrier": "ordered_role",
+      "role_dimension": 1,
+      "channels": [
+        {
+          "channel_index": 0,
+          "channel_id": 0,
+          "neighbor_species": "X",
+          "radial_channel": 0,
+          "l": 1,
+          "source_family_id": "ordered_role_test"
+        },
+        {
+          "channel_index": 1,
+          "channel_id": 1,
+          "neighbor_species": "X",
+          "radial_channel": 1,
+          "l": 1,
+          "source_family_id": "ordered_role_test"
+        },
+        {
+          "channel_index": 2,
+          "channel_id": 2,
+          "neighbor_species": "X",
+          "radial_channel": 2,
+          "l": 1,
+          "source_family_id": "ordered_role_test"
+        }
+      ],
+      "block_sizes": [
+        1,
+        1,
+        1
+      ],
+      "kappa_policy": "all",
+      "angular_basis_backend": "exact_weight_space_v1",
+      "target": {
+        "permutation": "young:2,1",
+        "young_partition": [
+          2,
+          1
+        ],
+        "L": 1,
+        "o3_parity": -1
+      },
+      "factor_input": "one_ordered_role_angular_multiplet_per_factor",
+      "convention_id": "ordered_role_cauchy_joint_young_cg_v2"
+    },
+    "labels": [
+      {
+        "local_choices": [
+          {
+            "block_index": 0,
+            "parent": [
+              1
+            ],
+            "role_partition": [
+              1
+            ],
+            "angular_partition": [
+              1
+            ],
+            "Lambda": 1,
+            "role_copy": 0,
+            "angular_copy": 0,
+            "kronecker_copy": 0
+          },
+          {
+            "block_index": 1,
+            "parent": [
+              1
+            ],
+            "role_partition": [
+              1
+            ],
+            "angular_partition": [
+              1
+            ],
+            "Lambda": 1,
+            "role_copy": 0,
+            "angular_copy": 0,
+            "kronecker_copy": 0
+          },
+          {
+            "block_index": 2,
+            "parent": [
+              1
+            ],
+            "role_partition": [
+              1
+            ],
+            "angular_partition": [
+              1
+            ],
+            "Lambda": 1,
+            "role_copy": 0,
+            "angular_copy": 0,
+            "kronecker_copy": 0
+          }
+        ],
+        "local_copy_gauge": "full_family_cholesky_orthonormal_v1",
+        "block_parents": [
+          [
+            1
+          ],
+          [
+            1
+          ],
+          [
+            1
+          ]
+        ],
+        "block_Lambdas": [
+          1,
+          1,
+          1
+        ],
+        "young_copy": 0,
+        "angular_copy": 0,
+        "angular_tree": [
+          "merge",
+          1,
+          [
+            "leaf",
+            0,
+            1
+          ],
+          [
+            "merge",
+            0,
+            [
+              "leaf",
+              1,
+              1
+            ],
+            [
+              "leaf",
+              2,
+              1
+            ]
+          ]
+        ],
+        "multiplicity_index": 0
+      },
+      {
+        "local_choices": [
+          {
+            "block_index": 0,
+            "parent": [
+              1
+            ],
+            "role_partition": [
+              1
+            ],
+            "angular_partition": [
+              1
+            ],
+            "Lambda": 1,
+            "role_copy": 0,
+            "angular_copy": 0,
+            "kronecker_copy": 0
+          },
+          {
+            "block_index": 1,
+            "parent": [
+              1
+            ],
+            "role_partition": [
+              1
+            ],
+            "angular_partition": [
+              1
+            ],
+            "Lambda": 1,
+            "role_copy": 0,
+            "angular_copy": 0,
+            "kronecker_copy": 0
+          },
+          {
+            "block_index": 2,
+            "parent": [
+              1
+            ],
+            "role_partition": [
+              1
+            ],
+            "angular_partition": [
+              1
+            ],
+            "Lambda": 1,
+            "role_copy": 0,
+            "angular_copy": 0,
+            "kronecker_copy": 0
+          }
+        ],
+        "local_copy_gauge": "full_family_cholesky_orthonormal_v1",
+        "block_parents": [
+          [
+            1
+          ],
+          [
+            1
+          ],
+          [
+            1
+          ]
+        ],
+        "block_Lambdas": [
+          1,
+          1,
+          1
+        ],
+        "young_copy": 1,
+        "angular_copy": 0,
+        "angular_tree": [
+          "merge",
+          1,
+          [
+            "leaf",
+            0,
+            1
+          ],
+          [
+            "merge",
+            0,
+            [
+              "leaf",
+              1,
+              1
+            ],
+            [
+              "leaf",
+              2,
+              1
+            ]
+          ]
+        ],
+        "multiplicity_index": 1
+      },
+      {
+        "local_choices": [
+          {
+            "block_index": 0,
+            "parent": [
+              1
+            ],
+            "role_partition": [
+              1
+            ],
+            "angular_partition": [
+              1
+            ],
+            "Lambda": 1,
+            "role_copy": 0,
+            "angular_copy": 0,
+            "kronecker_copy": 0
+          },
+          {
+            "block_index": 1,
+            "parent": [
+              1
+            ],
+            "role_partition": [
+              1
+            ],
+            "angular_partition": [
+              1
+            ],
+            "Lambda": 1,
+            "role_copy": 0,
+            "angular_copy": 0,
+            "kronecker_copy": 0
+          },
+          {
+            "block_index": 2,
+            "parent": [
+              1
+            ],
+            "role_partition": [
+              1
+            ],
+            "angular_partition": [
+              1
+            ],
+            "Lambda": 1,
+            "role_copy": 0,
+            "angular_copy": 0,
+            "kronecker_copy": 0
+          }
+        ],
+        "local_copy_gauge": "full_family_cholesky_orthonormal_v1",
+        "block_parents": [
+          [
+            1
+          ],
+          [
+            1
+          ],
+          [
+            1
+          ]
+        ],
+        "block_Lambdas": [
+          1,
+          1,
+          1
+        ],
+        "young_copy": 0,
+        "angular_copy": 1,
+        "angular_tree": [
+          "merge",
+          1,
+          [
+            "leaf",
+            0,
+            1
+          ],
+          [
+            "merge",
+            1,
+            [
+              "leaf",
+              1,
+              1
+            ],
+            [
+              "leaf",
+              2,
+              1
+            ]
+          ]
+        ],
+        "multiplicity_index": 2
+      },
+      {
+        "local_choices": [
+          {
+            "block_index": 0,
+            "parent": [
+              1
+            ],
+            "role_partition": [
+              1
+            ],
+            "angular_partition": [
+              1
+            ],
+            "Lambda": 1,
+            "role_copy": 0,
+            "angular_copy": 0,
+            "kronecker_copy": 0
+          },
+          {
+            "block_index": 1,
+            "parent": [
+              1
+            ],
+            "role_partition": [
+              1
+            ],
+            "angular_partition": [
+              1
+            ],
+            "Lambda": 1,
+            "role_copy": 0,
+            "angular_copy": 0,
+            "kronecker_copy": 0
+          },
+          {
+            "block_index": 2,
+            "parent": [
+              1
+            ],
+            "role_partition": [
+              1
+            ],
+            "angular_partition": [
+              1
+            ],
+            "Lambda": 1,
+            "role_copy": 0,
+            "angular_copy": 0,
+            "kronecker_copy": 0
+          }
+        ],
+        "local_copy_gauge": "full_family_cholesky_orthonormal_v1",
+        "block_parents": [
+          [
+            1
+          ],
+          [
+            1
+          ],
+          [
+            1
+          ]
+        ],
+        "block_Lambdas": [
+          1,
+          1,
+          1
+        ],
+        "young_copy": 1,
+        "angular_copy": 1,
+        "angular_tree": [
+          "merge",
+          1,
+          [
+            "leaf",
+            0,
+            1
+          ],
+          [
+            "merge",
+            1,
+            [
+              "leaf",
+              1,
+              1
+            ],
+            [
+              "leaf",
+              2,
+              1
+            ]
+          ]
+        ],
+        "multiplicity_index": 3
+      },
+      {
+        "local_choices": [
+          {
+            "block_index": 0,
+            "parent": [
+              1
+            ],
+            "role_partition": [
+              1
+            ],
+            "angular_partition": [
+              1
+            ],
+            "Lambda": 1,
+            "role_copy": 0,
+            "angular_copy": 0,
+            "kronecker_copy": 0
+          },
+          {
+            "block_index": 1,
+            "parent": [
+              1
+            ],
+            "role_partition": [
+              1
+            ],
+            "angular_partition": [
+              1
+            ],
+            "Lambda": 1,
+            "role_copy": 0,
+            "angular_copy": 0,
+            "kronecker_copy": 0
+          },
+          {
+            "block_index": 2,
+            "parent": [
+              1
+            ],
+            "role_partition": [
+              1
+            ],
+            "angular_partition": [
+              1
+            ],
+            "Lambda": 1,
+            "role_copy": 0,
+            "angular_copy": 0,
+            "kronecker_copy": 0
+          }
+        ],
+        "local_copy_gauge": "full_family_cholesky_orthonormal_v1",
+        "block_parents": [
+          [
+            1
+          ],
+          [
+            1
+          ],
+          [
+            1
+          ]
+        ],
+        "block_Lambdas": [
+          1,
+          1,
+          1
+        ],
+        "young_copy": 0,
+        "angular_copy": 2,
+        "angular_tree": [
+          "merge",
+          1,
+          [
+            "leaf",
+            0,
+            1
+          ],
+          [
+            "merge",
+            2,
+            [
+              "leaf",
+              1,
+              1
+            ],
+            [
+              "leaf",
+              2,
+              1
+            ]
+          ]
+        ],
+        "multiplicity_index": 4
+      },
+      {
+        "local_choices": [
+          {
+            "block_index": 0,
+            "parent": [
+              1
+            ],
+            "role_partition": [
+              1
+            ],
+            "angular_partition": [
+              1
+            ],
+            "Lambda": 1,
+            "role_copy": 0,
+            "angular_copy": 0,
+            "kronecker_copy": 0
+          },
+          {
+            "block_index": 1,
+            "parent": [
+              1
+            ],
+            "role_partition": [
+              1
+            ],
+            "angular_partition": [
+              1
+            ],
+            "Lambda": 1,
+            "role_copy": 0,
+            "angular_copy": 0,
+            "kronecker_copy": 0
+          },
+          {
+            "block_index": 2,
+            "parent": [
+              1
+            ],
+            "role_partition": [
+              1
+            ],
+            "angular_partition": [
+              1
+            ],
+            "Lambda": 1,
+            "role_copy": 0,
+            "angular_copy": 0,
+            "kronecker_copy": 0
+          }
+        ],
+        "local_copy_gauge": "full_family_cholesky_orthonormal_v1",
+        "block_parents": [
+          [
+            1
+          ],
+          [
+            1
+          ],
+          [
+            1
+          ]
+        ],
+        "block_Lambdas": [
+          1,
+          1,
+          1
+        ],
+        "young_copy": 1,
+        "angular_copy": 2,
+        "angular_tree": [
+          "merge",
+          1,
+          [
+            "leaf",
+            0,
+            1
+          ],
+          [
+            "merge",
+            2,
+            [
+              "leaf",
+              1,
+              1
+            ],
+            [
+              "leaf",
+              2,
+              1
+            ]
+          ]
+        ],
+        "multiplicity_index": 5
+      }
+    ],
+    "multiplet_count": 6,
+    "tableau_count": 2,
+    "component_count": 36,
+    "blocks": [
+      {
+        "channel": 0,
+        "size": 1,
+        "positions": [
+          0
+        ]
+      },
+      {
+        "channel": 1,
+        "size": 1,
+        "positions": [
+          1
+        ]
+      },
+      {
+        "channel": 2,
+        "size": 1,
+        "positions": [
+          2
+        ]
+      }
+    ],
+    "factor_types": [
+      0,
+      1,
+      2
+    ],
+    "orbit_count": 6,
+    "coset_representatives": null,
+    "local_tables": [
+      {
+        "key": [
+          0,
+          [
+            1
+          ],
+          [
+            1
+          ],
+          [
+            1
+          ],
+          1
+        ],
+        "parent_dimension": 1,
+        "copy_gauge": "full_family_cholesky_orthonormal_v1",
+        "family_order": [
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "copy_gram": [
+          [
+            {
+              "real": [
+                {
+                  "radicand_numerator": 1,
+                  "radicand_denominator": 1,
+                  "coefficient_numerator": 1,
+                  "coefficient_denominator": 1
+                }
+              ],
+              "imag": [],
+              "binary64": [
+                1.0,
+                0.0
+              ]
+            }
+          ]
+        ],
+        "validation_report": {
+          "passed": true,
+          "role_vectors_young_orthogonal_exact": true,
+          "angular_vectors_regauged_exact": true,
+          "slot_transpositions_act_by_parent_irrep_exact": true,
+          "each_family_tableau_multiplet_orthonormal_exact": true,
+          "full_copy_gram_independent_of_tableau_and_M_exact": true,
+          "full_copy_metric_dual_exact": true,
+          "full_copy_orthonormal_exact": true
+        },
+        "strategy": "sparse_monomial",
+        "entries_by_family": [
+          {
+            "family": [
+              0,
+              0,
+              0
+            ],
+            "terms": [
+              [
+                [
+                  0
+                ],
+                0,
+                1.0
+              ],
+              [
+                [
+                  1
+                ],
+                1,
+                1.0
+              ],
+              [
+                [
+                  2
+                ],
+                2,
+                1.0
+              ]
+            ]
+          }
+        ]
+      },
+      {
+        "key": [
+          1,
+          [
+            1
+          ],
+          [
+            1
+          ],
+          [
+            1
+          ],
+          1
+        ],
+        "parent_dimension": 1,
+        "copy_gauge": "full_family_cholesky_orthonormal_v1",
+        "family_order": [
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "copy_gram": [
+          [
+            {
+              "real": [
+                {
+                  "radicand_numerator": 1,
+                  "radicand_denominator": 1,
+                  "coefficient_numerator": 1,
+                  "coefficient_denominator": 1
+                }
+              ],
+              "imag": [],
+              "binary64": [
+                1.0,
+                0.0
+              ]
+            }
+          ]
+        ],
+        "validation_report": {
+          "passed": true,
+          "role_vectors_young_orthogonal_exact": true,
+          "angular_vectors_regauged_exact": true,
+          "slot_transpositions_act_by_parent_irrep_exact": true,
+          "each_family_tableau_multiplet_orthonormal_exact": true,
+          "full_copy_gram_independent_of_tableau_and_M_exact": true,
+          "full_copy_metric_dual_exact": true,
+          "full_copy_orthonormal_exact": true
+        },
+        "strategy": "sparse_monomial",
+        "entries_by_family": [
+          {
+            "family": [
+              0,
+              0,
+              0
+            ],
+            "terms": [
+              [
+                [
+                  0
+                ],
+                0,
+                1.0
+              ],
+              [
+                [
+                  1
+                ],
+                1,
+                1.0
+              ],
+              [
+                [
+                  2
+                ],
+                2,
+                1.0
+              ]
+            ]
+          }
+        ]
+      },
+      {
+        "key": [
+          2,
+          [
+            1
+          ],
+          [
+            1
+          ],
+          [
+            1
+          ],
+          1
+        ],
+        "parent_dimension": 1,
+        "copy_gauge": "full_family_cholesky_orthonormal_v1",
+        "family_order": [
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "copy_gram": [
+          [
+            {
+              "real": [
+                {
+                  "radicand_numerator": 1,
+                  "radicand_denominator": 1,
+                  "coefficient_numerator": 1,
+                  "coefficient_denominator": 1
+                }
+              ],
+              "imag": [],
+              "binary64": [
+                1.0,
+                0.0
+              ]
+            }
+          ]
+        ],
+        "validation_report": {
+          "passed": true,
+          "role_vectors_young_orthogonal_exact": true,
+          "angular_vectors_regauged_exact": true,
+          "slot_transpositions_act_by_parent_irrep_exact": true,
+          "each_family_tableau_multiplet_orthonormal_exact": true,
+          "full_copy_gram_independent_of_tableau_and_M_exact": true,
+          "full_copy_metric_dual_exact": true,
+          "full_copy_orthonormal_exact": true
+        },
+        "strategy": "sparse_monomial",
+        "entries_by_family": [
+          {
+            "family": [
+              0,
+              0,
+              0
+            ],
+            "terms": [
+              [
+                [
+                  0
+                ],
+                0,
+                1.0
+              ],
+              [
+                [
+                  1
+                ],
+                1,
+                1.0
+              ],
+              [
+                [
+                  2
+                ],
+                2,
+                1.0
+              ]
+            ]
+          }
+        ]
+      }
+    ],
+    "young_tables": [
+      {
+        "local_parents": [
+          [
+            1
+          ],
+          [
+            1
+          ],
+          [
+            1
+          ]
+        ],
+        "analytic_character": null,
+        "local_tableau_dim": 1,
+        "target_tableau_dim": 2,
+        "gamma_count": 2,
+        "target_partition": [
+          2,
+          1
+        ],
+        "restricted_kind": "matrix_units",
+        "restricted_scale": 0.5773502691896257,
+        "adjacent_generators": [
+          [
+            [
+              -1.0,
+              1.0
+            ],
+            [
+              0.0,
+              0.0
+            ],
+            [
+              0,
+              1
+            ]
+          ],
+          [
+            [
+              0.5,
+              -0.5
+            ],
+            [
+              0.8660254037844386,
+              0.8660254037844386
+            ],
+            [
+              1,
+              0
+            ]
+          ]
+        ],
+        "coset_transport_residual": 0.0,
+        "transport_validation": "exact_subgroup_generators_and_reduced_gram",
+        "storage": "identity_coset_plus_sparse_adjacent_generators_v1"
+      }
+    ],
+    "angular_trees": [
+      {
+        "kind": "merge",
+        "L": 1,
+        "left": {
+          "kind": "leaf",
+          "index": 0,
+          "L": 1
+        },
+        "right": {
+          "kind": "merge",
+          "L": 0,
+          "left": {
+            "kind": "leaf",
+            "index": 1,
+            "L": 1
+          },
+          "right": {
+            "kind": "leaf",
+            "index": 2,
+            "L": 1
+          },
+          "entries": [
+            [
+              0,
+              2,
+              0,
+              0.5773502691896257
+            ],
+            [
+              1,
+              1,
+              0,
+              -0.5773502691896257
+            ],
+            [
+              2,
+              0,
+              0,
+              0.5773502691896257
+            ]
+          ]
+        },
+        "entries": [
+          [
+            0,
+            0,
+            0,
+            1.0
+          ],
+          [
+            1,
+            0,
+            1,
+            1.0
+          ],
+          [
+            2,
+            0,
+            2,
+            1.0
+          ]
+        ]
+      },
+      {
+        "kind": "merge",
+        "L": 1,
+        "left": {
+          "kind": "leaf",
+          "index": 0,
+          "L": 1
+        },
+        "right": {
+          "kind": "merge",
+          "L": 1,
+          "left": {
+            "kind": "leaf",
+            "index": 1,
+            "L": 1
+          },
+          "right": {
+            "kind": "leaf",
+            "index": 2,
+            "L": 1
+          },
+          "entries": [
+            [
+              0,
+              1,
+              0,
+              -0.7071067811865476
+            ],
+            [
+              0,
+              2,
+              1,
+              -0.7071067811865476
+            ],
+            [
+              1,
+              0,
+              0,
+              0.7071067811865476
+            ],
+            [
+              1,
+              2,
+              2,
+              -0.7071067811865476
+            ],
+            [
+              2,
+              0,
+              1,
+              0.7071067811865476
+            ],
+            [
+              2,
+              1,
+              2,
+              0.7071067811865476
+            ]
+          ]
+        },
+        "entries": [
+          [
+            0,
+            1,
+            0,
+            -0.7071067811865476
+          ],
+          [
+            0,
+            2,
+            1,
+            -0.7071067811865476
+          ],
+          [
+            1,
+            0,
+            0,
+            0.7071067811865476
+          ],
+          [
+            1,
+            2,
+            2,
+            -0.7071067811865476
+          ],
+          [
+            2,
+            0,
+            1,
+            0.7071067811865476
+          ],
+          [
+            2,
+            1,
+            2,
+            0.7071067811865476
+          ]
+        ]
+      },
+      {
+        "kind": "merge",
+        "L": 1,
+        "left": {
+          "kind": "leaf",
+          "index": 0,
+          "L": 1
+        },
+        "right": {
+          "kind": "merge",
+          "L": 2,
+          "left": {
+            "kind": "leaf",
+            "index": 1,
+            "L": 1
+          },
+          "right": {
+            "kind": "leaf",
+            "index": 2,
+            "L": 1
+          },
+          "entries": [
+            [
+              0,
+              0,
+              0,
+              1.0
+            ],
+            [
+              0,
+              1,
+              1,
+              0.7071067811865476
+            ],
+            [
+              0,
+              2,
+              2,
+              0.40824829046386296
+            ],
+            [
+              1,
+              0,
+              1,
+              0.7071067811865476
+            ],
+            [
+              1,
+              1,
+              2,
+              0.8164965809277259
+            ],
+            [
+              1,
+              2,
+              3,
+              0.7071067811865476
+            ],
+            [
+              2,
+              0,
+              2,
+              0.40824829046386296
+            ],
+            [
+              2,
+              1,
+              3,
+              0.7071067811865476
+            ],
+            [
+              2,
+              2,
+              4,
+              1.0
+            ]
+          ]
+        },
+        "entries": [
+          [
+            0,
+            2,
+            0,
+            0.316227766016838
+          ],
+          [
+            0,
+            3,
+            1,
+            0.5477225575051662
+          ],
+          [
+            0,
+            4,
+            2,
+            0.7745966692414834
+          ],
+          [
+            1,
+            1,
+            0,
+            -0.5477225575051662
+          ],
+          [
+            1,
+            2,
+            1,
+            -0.632455532033676
+          ],
+          [
+            1,
+            3,
+            2,
+            -0.5477225575051662
+          ],
+          [
+            2,
+            0,
+            0,
+            0.7745966692414834
+          ],
+          [
+            2,
+            1,
+            1,
+            0.5477225575051662
+          ],
+          [
+            2,
+            2,
+            2,
+            0.316227766016838
+          ]
+        ]
+      }
+    ],
+    "routes": [
+      {
+        "multiplicity_index": 0,
+        "local_indices": [
+          0,
+          1,
+          2
+        ],
+        "local_copy_indices": [
+          0,
+          0,
+          0
+        ],
+        "young_index": 0,
+        "angular_index": 0,
+        "local_choices": [
+          {
+            "block_index": 0,
+            "parent": [
+              1
+            ],
+            "role_partition": [
+              1
+            ],
+            "angular_partition": [
+              1
+            ],
+            "Lambda": 1,
+            "role_copy": 0,
+            "angular_copy": 0,
+            "kronecker_copy": 0
+          },
+          {
+            "block_index": 1,
+            "parent": [
+              1
+            ],
+            "role_partition": [
+              1
+            ],
+            "angular_partition": [
+              1
+            ],
+            "Lambda": 1,
+            "role_copy": 0,
+            "angular_copy": 0,
+            "kronecker_copy": 0
+          },
+          {
+            "block_index": 2,
+            "parent": [
+              1
+            ],
+            "role_partition": [
+              1
+            ],
+            "angular_partition": [
+              1
+            ],
+            "Lambda": 1,
+            "role_copy": 0,
+            "angular_copy": 0,
+            "kronecker_copy": 0
+          }
+        ],
+        "young_copy": 0
+      },
+      {
+        "multiplicity_index": 1,
+        "local_indices": [
+          0,
+          1,
+          2
+        ],
+        "local_copy_indices": [
+          0,
+          0,
+          0
+        ],
+        "young_index": 0,
+        "angular_index": 0,
+        "local_choices": [
+          {
+            "block_index": 0,
+            "parent": [
+              1
+            ],
+            "role_partition": [
+              1
+            ],
+            "angular_partition": [
+              1
+            ],
+            "Lambda": 1,
+            "role_copy": 0,
+            "angular_copy": 0,
+            "kronecker_copy": 0
+          },
+          {
+            "block_index": 1,
+            "parent": [
+              1
+            ],
+            "role_partition": [
+              1
+            ],
+            "angular_partition": [
+              1
+            ],
+            "Lambda": 1,
+            "role_copy": 0,
+            "angular_copy": 0,
+            "kronecker_copy": 0
+          },
+          {
+            "block_index": 2,
+            "parent": [
+              1
+            ],
+            "role_partition": [
+              1
+            ],
+            "angular_partition": [
+              1
+            ],
+            "Lambda": 1,
+            "role_copy": 0,
+            "angular_copy": 0,
+            "kronecker_copy": 0
+          }
+        ],
+        "young_copy": 1
+      },
+      {
+        "multiplicity_index": 2,
+        "local_indices": [
+          0,
+          1,
+          2
+        ],
+        "local_copy_indices": [
+          0,
+          0,
+          0
+        ],
+        "young_index": 0,
+        "angular_index": 1,
+        "local_choices": [
+          {
+            "block_index": 0,
+            "parent": [
+              1
+            ],
+            "role_partition": [
+              1
+            ],
+            "angular_partition": [
+              1
+            ],
+            "Lambda": 1,
+            "role_copy": 0,
+            "angular_copy": 0,
+            "kronecker_copy": 0
+          },
+          {
+            "block_index": 1,
+            "parent": [
+              1
+            ],
+            "role_partition": [
+              1
+            ],
+            "angular_partition": [
+              1
+            ],
+            "Lambda": 1,
+            "role_copy": 0,
+            "angular_copy": 0,
+            "kronecker_copy": 0
+          },
+          {
+            "block_index": 2,
+            "parent": [
+              1
+            ],
+            "role_partition": [
+              1
+            ],
+            "angular_partition": [
+              1
+            ],
+            "Lambda": 1,
+            "role_copy": 0,
+            "angular_copy": 0,
+            "kronecker_copy": 0
+          }
+        ],
+        "young_copy": 0
+      },
+      {
+        "multiplicity_index": 3,
+        "local_indices": [
+          0,
+          1,
+          2
+        ],
+        "local_copy_indices": [
+          0,
+          0,
+          0
+        ],
+        "young_index": 0,
+        "angular_index": 1,
+        "local_choices": [
+          {
+            "block_index": 0,
+            "parent": [
+              1
+            ],
+            "role_partition": [
+              1
+            ],
+            "angular_partition": [
+              1
+            ],
+            "Lambda": 1,
+            "role_copy": 0,
+            "angular_copy": 0,
+            "kronecker_copy": 0
+          },
+          {
+            "block_index": 1,
+            "parent": [
+              1
+            ],
+            "role_partition": [
+              1
+            ],
+            "angular_partition": [
+              1
+            ],
+            "Lambda": 1,
+            "role_copy": 0,
+            "angular_copy": 0,
+            "kronecker_copy": 0
+          },
+          {
+            "block_index": 2,
+            "parent": [
+              1
+            ],
+            "role_partition": [
+              1
+            ],
+            "angular_partition": [
+              1
+            ],
+            "Lambda": 1,
+            "role_copy": 0,
+            "angular_copy": 0,
+            "kronecker_copy": 0
+          }
+        ],
+        "young_copy": 1
+      },
+      {
+        "multiplicity_index": 4,
+        "local_indices": [
+          0,
+          1,
+          2
+        ],
+        "local_copy_indices": [
+          0,
+          0,
+          0
+        ],
+        "young_index": 0,
+        "angular_index": 2,
+        "local_choices": [
+          {
+            "block_index": 0,
+            "parent": [
+              1
+            ],
+            "role_partition": [
+              1
+            ],
+            "angular_partition": [
+              1
+            ],
+            "Lambda": 1,
+            "role_copy": 0,
+            "angular_copy": 0,
+            "kronecker_copy": 0
+          },
+          {
+            "block_index": 1,
+            "parent": [
+              1
+            ],
+            "role_partition": [
+              1
+            ],
+            "angular_partition": [
+              1
+            ],
+            "Lambda": 1,
+            "role_copy": 0,
+            "angular_copy": 0,
+            "kronecker_copy": 0
+          },
+          {
+            "block_index": 2,
+            "parent": [
+              1
+            ],
+            "role_partition": [
+              1
+            ],
+            "angular_partition": [
+              1
+            ],
+            "Lambda": 1,
+            "role_copy": 0,
+            "angular_copy": 0,
+            "kronecker_copy": 0
+          }
+        ],
+        "young_copy": 0
+      },
+      {
+        "multiplicity_index": 5,
+        "local_indices": [
+          0,
+          1,
+          2
+        ],
+        "local_copy_indices": [
+          0,
+          0,
+          0
+        ],
+        "young_index": 0,
+        "angular_index": 2,
+        "local_choices": [
+          {
+            "block_index": 0,
+            "parent": [
+              1
+            ],
+            "role_partition": [
+              1
+            ],
+            "angular_partition": [
+              1
+            ],
+            "Lambda": 1,
+            "role_copy": 0,
+            "angular_copy": 0,
+            "kronecker_copy": 0
+          },
+          {
+            "block_index": 1,
+            "parent": [
+              1
+            ],
+            "role_partition": [
+              1
+            ],
+            "angular_partition": [
+              1
+            ],
+            "Lambda": 1,
+            "role_copy": 0,
+            "angular_copy": 0,
+            "kronecker_copy": 0
+          },
+          {
+            "block_index": 2,
+            "parent": [
+              1
+            ],
+            "role_partition": [
+              1
+            ],
+            "angular_partition": [
+              1
+            ],
+            "Lambda": 1,
+            "role_copy": 0,
+            "angular_copy": 0,
+            "kronecker_copy": 0
+          }
+        ],
+        "young_copy": 1
+      }
+    ],
+    "validation_report": {
+      "passed": true,
+      "all_multiplicity_coordinates": true,
+      "local_full_copy_orthonormal": true,
+      "young_subduction_validated": true,
+      "binary_CG_paths": true,
+      "full_joint_matrix_not_materialized": true,
+      "full_young_orbit_matrix_not_stored": true
+    },
+    "self_hash": "ec6a4629a7e23fdd98b48e61084f332aad9aa7118a320003a47af10b2ccde791"
+  },
+  "input": [
+    [
+      [
+        0.2,
+        0.3,
+        -0.5
+      ]
+    ],
+    [
+      [
+        0.7,
+        -0.1,
+        0.4
+      ]
+    ],
+    [
+      [
+        0.1,
+        0.9,
+        -0.2
+      ]
+    ]
+  ],
+  "output_real": [
+    [
+      [
+        -0.0006666666666666656,
+        -0.0009999999999999983,
+        0.001666666666666664
+      ],
+      [
+        -0.0,
+        -0.0,
+        0.0
+      ]
+    ],
+    [
+      [
+        -0.0,
+        -0.0,
+        0.0
+      ],
+      [
+        -0.0006666666666666656,
+        -0.0009999999999999983,
+        0.001666666666666664
+      ]
+    ],
+    [
+      [
+        -0.06581793068761733,
+        0.07274613391789285,
+        -0.05542562584220407
+      ],
+      [
+        -0.0,
+        0.0,
+        -0.0
+      ]
+    ],
+    [
+      [
+        -0.0,
+        0.0,
+        -0.0
+      ],
+      [
+        -0.06581793068761733,
+        0.07274613391789285,
+        -0.05542562584220407
+      ]
+    ],
+    [
+      [
+        -0.061417333781994224,
+        -0.03980200999949628,
+        -0.02221160857649792
+      ],
+      [
+        -0.0,
+        -0.0,
+        -0.0
+      ]
+    ],
+    [
+      [
+        -0.0,
+        -0.0,
+        -0.0
+      ],
+      [
+        -0.061417333781994224,
+        -0.03980200999949628,
+        -0.02221160857649792
+      ]
+    ]
+  ],
+  "output_imag": [
+    [
+      [
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0
+      ]
+    ],
+    [
+      [
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0
+      ]
+    ],
+    [
+      [
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0
+      ]
+    ],
+    [
+      [
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0
+      ]
+    ],
+    [
+      [
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0
+      ]
+    ],
+    [
+      [
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0
+      ]
+    ]
+  ]
+}

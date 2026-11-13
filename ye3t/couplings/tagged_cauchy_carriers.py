@@ -24,6 +24,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 
 from ye3t.core.cg import cg_exact_integer
+from ye3t.core.basis.tree import COUPLING_TREE_CONVENTION
 from ye3t.exact_scalars import exact_scalar
 from ye3t.global_coupler import _angular_factorized_paths
 from ye3t.representations.generalized_irreps import Partition
@@ -43,6 +44,7 @@ from .tagged_cauchy_general import (
     _add_exact, _exact_pivot_image, _physical_source_product, _role_copy_content,
 )
 from .sector_selection import normalize_sector_selection, select_independent_sector_copies
+from .shell_role_restriction import _singleton_role_restriction as _tag_role_ancestry
 
 
 TAGGED_CAUCHY_CARRIERS_FAMILY = "tagged_cauchy_carriers"
@@ -73,7 +75,7 @@ def is_tagged_cauchy_carriers_request(request):
 def tagged_cauchy_carriers_request(
     channels=None, block_sizes=None, *, tag_count=None, target_Ls=(0, 1, 2, 3),
     tag_sectors="all", kappa_policy="all", selected_coordinates=None,
-    catalogue=None, species=None,
+    catalogue=None, species=None, angular_basis_backend=None, density_context="inclusive",
 ):
     """Specify fixed sources or a rank-keyed catalogue without building coefficients.
 
@@ -85,14 +87,23 @@ def tagged_cauchy_carriers_request(
     counts within those bounds before coefficient compilation.
     """
     if catalogue is not None:
-        if channels is not None or block_sizes is not None or tag_count is not None:
+        if (channels is not None or block_sizes is not None or tag_count is not None
+                or angular_basis_backend is not None or density_context != "inclusive"):
             raise ValueError("catalogue and fixed-content tagged requests are mutually exclusive")
         return _catalogue_request(catalogue, species)
+    if angular_basis_backend not in {None, "exact_weight_space_v1", "normalized_cg_paths_v1"}:
+        raise ValueError("Tagged angular_basis_backend must be normalized_cg_paths_v1 or exact_weight_space_v1")
     block_sizes = tuple(int(value) for value in block_sizes)
     rank = sum(block_sizes)
     tag_count = int(tag_count)
     if tag_count < 0 or tag_count > rank:
         raise ValueError("tag_count must be nonnegative and cannot exceed tensor rank")
+    if density_context not in {"inclusive", "motif_excluded"}:
+        raise ValueError("density_context must be inclusive or motif_excluded")
+    if not tag_count:
+        density_context = "inclusive"
+    if density_context == "motif_excluded" and angular_basis_backend != "normalized_cg_paths_v1":
+        raise ValueError("motif_excluded sources require normalized_cg_paths_v1 retained-source maps")
     target_Ls = tuple(sorted(set(int(value) for value in target_Ls)))
     if not target_Ls or min(target_Ls) < 0:
         raise ValueError("target_Ls must be nonempty and nonnegative")
@@ -102,17 +113,22 @@ def tagged_cauchy_carriers_request(
         channels, block_sizes, target_L=target_Ls[0],
         role_dimension=tag_count + 1, kappa_policy=kappa_policy,
     )
+    convention = _CONVENTION
+    if angular_basis_backend == "normalized_cg_paths_v1":
+        from .cauchy_paths import CONVENTION
+        convention = CONVENTION
     return {
         "family": TAGGED_CAUCHY_CARRIERS_FAMILY,
         "channels": normalized["channels"], "block_sizes": block_sizes,
         "tag_count": tag_count, "target_Ls": target_Ls,
         "tag_sectors": tag_sectors, "kappa_policy": kappa_policy,
         "selected_coordinates": None if selected_coordinates is None else tuple(selected_coordinates),
-        "formal_parent": (rank,), "density_context": "inclusive",
+        "formal_parent": (rank,), "density_context": density_context,
         "tag_identity": "distinct_ordered_periodic_occurrences",
         "role_content": (1,) * tag_count + (rank - tag_count,),
-        "convention_id": _CONVENTION,
+        "convention_id": convention,
         "source_planning": "independent_role_image_v2",
+        **({"angular_basis_backend": angular_basis_backend} if angular_basis_backend is not None else {}),
     }
 
 
@@ -127,6 +143,8 @@ def _request(value):
         value["channels"], value["block_sizes"], tag_count=value["tag_count"],
         target_Ls=value["target_Ls"], tag_sectors=value["tag_sectors"],
         kappa_policy=value["kappa_policy"], selected_coordinates=value.get("selected_coordinates"),
+        angular_basis_backend=value.get("angular_basis_backend"),
+        density_context=value.get("density_context", "inclusive"),
     )
 
 
@@ -255,32 +273,6 @@ def _tagged_cauchy_projection_candidates(request):
     }
 
 
-@lru_cache(maxsize=512)
-def _tag_role_ancestry(block_kappas, tag_partition, pooled_degree):
-    """Exact role multiplicity from induction followed by pooled restriction.
-
-    m_tau = sum_lambda c_(kappa_1,...,kappa_B)^lambda
-                         c_(tau,(N-s))^lambda.
-    This character calculation constructs no role or angular coefficients.
-    See tensor_product_math_update.md (28)--(29); the same restriction follows
-    from Frobenius reciprocity and the Schur-functor product rule.
-    """
-    from ye3t.core.basis.exhaustive_enumeration import integer_partitions
-    from ye3t.representations.young_orthogonal import young_nary_induced_multiplicity_by_character
-
-    rank = sum(map(sum, block_kappas))
-    restricted = tuple(part for part in (tag_partition, (pooled_degree,) if pooled_degree else ()) if part)
-    ancestry = []
-    for partition in integer_partitions(rank):
-        partition = tuple(partition)
-        restriction = young_nary_induced_multiplicity_by_character(restricted, partition)
-        if restriction:
-            copies = restriction * young_nary_induced_multiplicity_by_character(block_kappas, partition)
-            if copies:
-                ancestry.append((partition, int(copies)))
-    return tuple(ancestry)
-
-
 def _tagged_sector_multiplicities(request):
     """Compute dimensions from characters before resolving any copy basis."""
     choices = []
@@ -346,6 +338,9 @@ def tagged_cauchy_carriers_count(request):
     if request.get("basis_coordinates") == "formal_cauchy":
         from .shell_cauchy import count_shell_cauchy
         return count_shell_cauchy(request)
+    if request.get("angular_basis_backend") == "normalized_cg_paths_v1":
+        from .retained_cauchy_paths import retained_cauchy_count
+        return retained_cauchy_count(request)
     expected_inventory = _tagged_sector_multiplicities(request)
     candidates = _tagged_cauchy_projection_candidates(request)["labels"]
     groups = defaultdict(list)
@@ -666,24 +661,42 @@ def _source_rows(request, label):
     return rows
 
 
-def compile_tagged_cauchy_carriers(request, *, cache_dir=None):
-    """Compile selected complete source multiplets and exact reconstruction."""
+def compile_tagged_cauchy_carriers(request, *, cache_dir=None, stream_sources=False):
+    """Compile selected complete source multiplets and exact reconstruction.
+
+    With stream_sources, catalogue sources load individually from cache during
+    lowering. The mathematical payload and its canonical hash are unchanged.
+    """
     normalized = _request(request)
     if "catalogue" in normalized:
-        return _compile_catalogue(normalized, cache_dir=cache_dir)
+        return _compile_catalogue(normalized, cache_dir=cache_dir, _stream_sources=stream_sources)
+    if stream_sources:
+        raise ValueError("stream_sources requires a source catalogue")
     if normalized.get("basis_coordinates") == "formal_cauchy":
         from .shell_cauchy import compile_shell_cauchy
         return compile_shell_cauchy(normalized)
     from ye3t.cache.artifacts import YE3TArtifactStore
-    store = YE3TArtifactStore()
-    result = store.resolve("tagged_cauchy_source", TAGGED_CAUCHY_CARRIERS_SCHEMA, normalized,
+    store = YE3TArtifactStore(directory=cache_dir) if cache_dir else YE3TArtifactStore()
+    cache_request = {"source_request": normalized,
+                     "tree_coordinate_convention": COUPLING_TREE_CONVENTION}
+    if normalized.get("angular_basis_backend") == "normalized_cg_paths_v1":
+        from .retained_cauchy_paths import SCHEMA, compile_retained_cauchy_paths, validate_retained_cauchy_paths
+        result = store.resolve("tagged_cauchy_source", SCHEMA, cache_request,
+            builder=lambda: compile_retained_cauchy_paths(normalized),
+            validator=lambda payload: validate_retained_cauchy_paths(payload, exact_reconstruction=store.verify == "full"),
+            certificate={"passed": True, "checks": {"complete_source": True}},
+            required_certificate_checks=("complete_source",),
+            producer={"compiler_revision": 1, "angular_basis_backend": "normalized_cg_paths_v1"})
+        return _scalar._freeze_json(result["payload"], consume=True)
+    result = store.resolve("tagged_cauchy_source", TAGGED_CAUCHY_CARRIERS_SCHEMA, cache_request,
         builder=lambda: _materialize_source_image(tagged_cauchy_carriers_count(normalized)),
         validator=lambda payload: validate_tagged_cauchy_carriers(payload,
             exact_reconstruction=store.verify == "full"),
         certificate={"passed": True, "checks": {"complete_source": True}},
         required_certificate_checks=("complete_source",),
         producer={"compiler_revision": 1, "convention": _CONVENTION})
-    return _scalar._freeze_json(result["payload"])
+    # The artifact store isolates each returned tree from its cached value.
+    return _scalar._freeze_json(result["payload"], consume=True)
 
 
 def _materialize_source_image(report, *, legacy_validation=False):
@@ -808,9 +821,12 @@ def _materialize_source_image(report, *, legacy_validation=False):
 
 def validate_tagged_cauchy_carriers(payload, *, exact_reconstruction=False):
     """Check a self-contained source; optional exact recompilation is explicit."""
-    if payload.get("schema") == "ye3t_formal_shell_cauchy_source_v1":
+    if payload.get("schema") in {"ye3t_formal_shell_cauchy_source_v1", "ye3t_formal_shell_cauchy_paths_v1"}:
         from .shell_cauchy import validate_shell_cauchy
         return validate_shell_cauchy(payload, exact_reconstruction=exact_reconstruction)
+    if payload.get("schema") == "ye3t_retained_cauchy_paths_v1":
+        from .retained_cauchy_paths import validate_retained_cauchy_paths
+        return validate_retained_cauchy_paths(payload, exact_reconstruction=exact_reconstruction)
     if payload.get("schema") not in {TAGGED_CAUCHY_CARRIERS_SCHEMA, "ye3t_tagged_cauchy_carriers_v1"}:
         raise ValueError("unknown tagged carrier artifact schema")
     body = {key: value for key, value in payload.items() if key != "self_hash"}
@@ -1048,6 +1064,19 @@ def tagged_cauchy_carrier_schedule(payloads, *, coordinate_ids=None, support_rea
     headers = payloads.headers if cached_sources else payloads
     if not payloads:
         raise ValueError("a tagged schedule requires at least one source")
+    if all("factorized_schedule" in payload for payload in headers):
+        from .cauchy_paths import _pack_factorized_sources
+        if not cached_sources:
+            for payload in payloads:
+                if payload.get("schema") == "ye3t_retained_cauchy_paths_v1":
+                    validate_tagged_cauchy_carriers(payload)
+        if coordinate_ids is None:
+            coordinate_ids = [row["label"]["coordinate_id"] for payload in headers for row in payload["descriptors"]]
+        if support_realization != "ordered_tags":
+            raise ValueError("Factored retained sources require an explicit normalized marginal map before edge marginalization")
+        return _pack_factorized_sources(payloads, coordinate_ids, source_family_plan)
+    if any("factorized_schedule" in payload for payload in headers):
+        raise ValueError("A tagged schedule cannot mix historical polynomial and normalized path coordinates")
     if not cached_sources:
         for payload in payloads:
             validate_tagged_cauchy_carriers(payload)
@@ -1124,7 +1153,8 @@ def tagged_cauchy_carrier_schedule(payloads, *, coordinate_ids=None, support_rea
                 for row in reconstruction),
         }
     output = 0
-    for payload in payloads:
+    for source_index in range(len(payloads)):
+        payload = payloads[source_index]
         local_channels = []
         for channel in payload["request"]["channels"]:
             key = (channel["neighbor_species"], channel["radial_channel"],
@@ -1158,6 +1188,10 @@ def tagged_cauchy_carrier_schedule(payloads, *, coordinate_ids=None, support_rea
                 output += 1
             inventory.append({"label": descriptor["label"], "component_slice": (begin, output),
                               "source_hash": payload["self_hash"]})
+        # The numeric schedule owns its values and compact labels. Release
+        # exact coefficient containers before decoding the next source.
+        descriptor = components = component = term = None
+        del payload
     term_offsets, term_components, term_exponents = [0], [], []
     for monomial in monomials:
         term_components.extend(component for component, _ in monomial)
@@ -1193,6 +1227,13 @@ def tagged_cauchy_carrier_schedule(payloads, *, coordinate_ids=None, support_rea
     shell_degrees = {record["label"]["shell_role_degree"] for record in inventory
                      if "shell_role_degree" in record["label"]}
     if shell_degrees:
+        if any(record["label"].get("fixed_role_indices") for record in inventory):
+            if (source_family_plan is None or not source_family_plan.get("include_background")
+                    or any(record["label"].get("role_dimension") != source_family_plan.get("role_dimension")
+                           or record["label"]["shell_role_degree"] != source_family_plan.get("permuted_role_count")
+                           or tuple(record["label"].get("fixed_role_indices", ())) != (source_family_plan["shell_count"],)
+                           for record in inventory)):
+                raise ValueError("Fixed shell roles require an explicit physical source binding before atomistic scheduling")
         if len(shell_degrees) != 1 or any("shell_role_degree" not in record["label"] for record in inventory):
             raise ValueError("A shell schedule must use one complete shell-role action")
         schedule.pop("tag_swap_certificate")
@@ -1408,7 +1449,7 @@ def tagged_cauchy_carrier_model_plan(compiled, *, sector_policy="tagged_mixed", 
                 support = {"schema": "ye3t_tagged_occurrence_support_v1", "tag_count": tags,
                     "source_tag_count": tags, "root": "center_atom",
                     "row_domain": "same_ordered_distinct_periodic_occurrences",
-                    "density_context": "inclusive", "right_tag_partition": partition}
+                    "density_context": schedule.get("density_context", "inclusive"), "right_tag_partition": partition}
                 if shell_degree:
                     support = {"schema": "ye3t_shell_role_support_v1", "tag_count": 0,
                         "shell_role_degree": degree, "root": "center_atom",
@@ -1466,7 +1507,7 @@ def tagged_cauchy_carrier_model_plan(compiled, *, sector_policy="tagged_mixed", 
                        "source_tag_count": tags, "root": "center_atom",
                        "row_domain": "one_periodic_occurrence_with_exact_other_tag_marginal"
                            if realization == "edge_marginal" else "same_ordered_distinct_periodic_occurrences",
-                       "density_context": "inclusive",
+                       "density_context": schedule.get("density_context", "inclusive"),
                        "inherited_tag_character": character if realization == "edge_marginal" else None}
             inventory.append({"source_index": len(inventory), "path_id": "tagged_input_" + lineage,
                 "source": "tagged_cauchy_occurrence", "rank": rank, "L_R": L,
@@ -1486,7 +1527,8 @@ def tagged_cauchy_carrier_model_plan(compiled, *, sector_policy="tagged_mixed", 
                "source_catalogue_hash": compiled["self_hash"], "schedules": tuple(schedules),
                "source_inventories": tuple(inventories), "hidden_channels": int(hidden_channels),
                "physical_support_manifest": {"source_catalogue_hash": compiled["self_hash"],
-                    "occurrences": "distinct_ordered_periodic", "density_context": "inclusive",
+                    "occurrences": "distinct_ordered_periodic",
+                    "density_context": compiled["request"].get("catalogue", {}).get("density_context", "inclusive"),
                     "support_realization": support_realization,
                     "two_tag_source_support": "one_periodic_occurrence_with_exact_other_tag_marginal"
                         if support_realization == "edge_marginal" else "ordered_distinct_periodic_pair"}}
@@ -1517,6 +1559,11 @@ def tagged_cauchy_marginal_graph_records(compiled, *, target_L, parity, hidden_c
     if support_realization not in {"edge_marginal", "ordered_tags"}:
         raise ValueError("Tagged graph support must be ordered_tags or edge_marginal")
     from ye3t.execution_plan import YE3TCarrierKey, YE3TCarrierLayout, YE3TSourceRealization, YE3T_O3_PRIMARY_CONVENTION
+    convention = compiled["request"].get("catalogue", {}).get("carrier_convention_id", YE3T_O3_PRIMARY_CONVENTION)
+    if convention != YE3T_O3_PRIMARY_CONVENTION and (
+            support_realization != "ordered_tags" or _legacy_zero_tag_action
+            or compiled["schema"].endswith("_v1")):
+        raise ValueError("Real carrier_convention_id requires ordered_tags with the current zero-tag action")
     if output_sectors is not None:
         if not isinstance(output_sectors, (tuple, list)) or not output_sectors or any(
                 not isinstance(row, dict) or set(row) != {"L", "parity"}
@@ -1618,7 +1665,10 @@ def _tagged_occurrence_graph_records(compiled, target_L, parity, hidden_channels
     provided transport carries the same physical occurrences and final scalar
     reduction uses complete irreducible tensors.
     """
-    from ye3t.execution_plan import YE3TCarrierKey, YE3TCarrierLayout, YE3TSourceRealization, YE3T_O3_PRIMARY_CONVENTION
+    from ye3t.execution_plan import (YE3TCarrierKey, YE3TCarrierLayout, YE3TSourceRealization,
+        YE3T_O3_PRIMARY_CONVENTION, YE3T_O3_REAL_TESSERAL_CONVENTION)
+    convention = compiled["request"].get("catalogue", {}).get("carrier_convention_id", YE3T_O3_PRIMARY_CONVENTION)
+    real = convention == YE3T_O3_REAL_TESSERAL_CONVENTION
     sectors = {(int(target_L), int(parity))} if output_sectors is None else {
         (int(row["L"]), {"even": 1, "odd": -1}[row["parity"]]) for row in output_sectors}
     if not sectors or any(ell < 0 or sign not in (-1, 1) for ell, sign in sectors):
@@ -1628,6 +1678,8 @@ def _tagged_occurrence_graph_records(compiled, target_L, parity, hidden_channels
     shell_plans = [schedule["radial_source"] for schedule in source_plan["schedules"]
                    if is_shell_filtered_family(schedule.get("radial_source", {}).get("family_id", ""))]
     physical = {"radial_family": shell_plans[0]["family_id"]} if shell_plans else {}
+    contexts = {schedule["tag_count"]: schedule.get("density_context", "inclusive")
+                for schedule in source_plan["schedules"]}
     records = []
     for family in source_plan["source_inventories"]:
         tags = int(family["tag_count"])
@@ -1650,7 +1702,7 @@ def _tagged_occurrence_graph_records(compiled, target_L, parity, hidden_channels
             partition = tuple(first.get("shell_partition", partition))
             key = (formal.key if degree == 0 and legacy_zero_tag_action else
                    YE3TCarrierKey(degree, partition if degree else (), formal.key.rotation_L,
-                                  YE3T_O3_PRIMARY_CONVENTION, formal.key.parity))
+                                  convention, formal.key.parity))
             channels, magnetic = int(first["input_channel_count"]), formal.magnetic_count
             layout = YE3TCarrierLayout(key, channels, dimension, magnetic)
             # The model inventory is tableau-major. Public carriers are a,t,M.
@@ -1664,7 +1716,7 @@ def _tagged_occurrence_graph_records(compiled, target_L, parity, hidden_channels
             source = YE3TSourceRealization("lifted_density_roles" if shell_degree else "tagged_cauchy_occurrence" if tags else "ordinary_density",
                 formal.key.rank, retain_role_order=bool(degree), injective=bool(tags),
                 metadata={"source_family": "tagged_cauchy", "coordinate_ids": first["source_coordinate_ids"],
-                          "tag_count": tags, "density_context": "inclusive",
+                          "tag_count": tags, "density_context": contexts[tags],
                           "emitted_action": "shell_roles" if shell_degree else "trivial_S0" if tags == 0 and not legacy_zero_tag_action else "right_tags",
                           **({"shell_role_degree": shell_degree} if shell_degree else {}),
                           **physical})
@@ -1675,9 +1727,9 @@ def _tagged_occurrence_graph_records(compiled, target_L, parity, hidden_channels
                 fixed_maps=[{"plan_hash": source_plan["plan_hash"], "map_name": "complete_ordered_tag_source", "orientation": "analysis"}],
                 argument_bindings={"root": "center_atom", "source_tag_count": tags, "support_tag_count": tags,
                     "occurrence_identity": "root_atom_neighbor_atom_lattice_image",
-                    "distinctness": "all_tag_occurrences_distinct", "density_context": "inclusive",
+                    "distinctness": "all_tag_occurrences_distinct", "density_context": contexts[tags],
                     "source_coordinate_ids": first["source_coordinate_ids"], "source_component_indices": indices,
-                    "angular_input": "real_tesseral", "angular_output": "complex_condon_shortley",
+                    "angular_input": "real_tesseral", "angular_output": "real_tesseral" if real else "complex_condon_shortley",
                     "transport": "shared_shell_role_frame_at_every_root" if shell_degree else "same_physical_tag_set_after_root_image_translation",
                     **({"shell_role_degree": shell_degree, "shell_coordinates": "physical_shells",
                         "occurrence_identity": "root_atom", "distinctness": "inclusive_density_moments"} if shell_degree else {})},
@@ -1710,6 +1762,17 @@ def _catalogue_content_key(channels, sizes, tags):
                          for channel, size in zip(channels, sizes, strict=True))), tags)
 
 
+def _catalogue_eta_count(channels, cfg):
+    """Count primitive identities across angular types and retained roles."""
+    plan = cfg.get("source_family_plan")
+    radial_count = (None if plan is None or cfg.get("basis_coordinates") == "formal_cauchy"
+                    else int(plan["radial_count"]))
+    return len({(channel["neighbor_species"], channel["source_family_id"],
+                 channel["radial_channel"] if radial_count is None else
+                 channel["radial_channel"] % radial_count)
+                for channel in channels})
+
+
 def _catalogue_intermediate_representation(cfg):
     from ye3t.representation_config import YE3TRepresentation
     return YE3TRepresentation.from_config({
@@ -1722,6 +1785,34 @@ def _catalogue_intermediate_representation(cfg):
 
 def _catalogue_request(catalogue, species):
     cfg = dict(catalogue)
+    supported = {
+        "ranks", "nmax", "nmax_per_rank", "lmax", "lmax_per_rank",
+        "source_block_partitions_by_rank", "max_source_blocks", "tag_counts",
+        "tag_counts_by_rank", "kappa_policy", "tag_sectors", "input_Lmax",
+        "max_records_per_rank", "max_features_per_rank", "source_family_id",
+        "selection_policy", "source_sectors", "carrier_convention_id",
+        "density_context", "intermediate_selection", "source_family_plan",
+        "basis_coordinates", "angular_basis_backend", "shell_role_action",
+        "shell_occupation_coordinates", "shell_occupancies_by_rank",
+        "source_contents_by_rank",
+        "eta_max_per_rank", "retained_max_per_rank",
+    }
+    unknown = set(cfg) - supported
+    if unknown:
+        from difflib import get_close_matches
+        suggestions = {field: get_close_matches(field, sorted(supported), n=1, cutoff=.75)
+                       for field in sorted(unknown, key=str) if isinstance(field, str)}
+        suggestions = {field: names[0] for field, names in suggestions.items() if names}
+        raise ValueError("catalogue has unsupported fields: " +
+                         repr(sorted(unknown, key=str)) +
+                         (". Nearby supported fields: " + repr(suggestions) if suggestions else "") +
+                         ". Use the documented catalogue fields; no settings are ignored.")
+    context = cfg.get("density_context", "inclusive")
+    if context not in {"inclusive", "motif_excluded"}:
+        raise ValueError("catalogue.density_context must be inclusive or motif_excluded")
+    if context == "motif_excluded" and (cfg.get("angular_basis_backend") != "normalized_cg_paths_v1"
+            or cfg.get("basis_coordinates") == "formal_cauchy"):
+        raise ValueError("motif_excluded catalogue requires normalized retained-tag sources")
     species = tuple(str(value) for value in species or ())
     if not species or len(set(species)) != len(species):
         raise ValueError("tagged catalogues require explicit unique species")
@@ -1805,8 +1896,22 @@ def _catalogue_request(catalogue, species):
         "source_family_id": cfg.get("source_family_id", "orthogonal_shifted_jacobi_origin_regular_v1"),
         "selection_policy": "balanced_content_tag_angular_sector_independent_coordinates_v2",
     }
+    from ye3t.representation_config import _bounded_rank_map
+    for name, minimum in (("eta_max_per_rank", 1), ("retained_max_per_rank", 0)):
+        if name in cfg:
+            normalized[name] = {str(rank): value for rank, value in
+                                _bounded_rank_map(cfg[name], ranks, name, minimum)}
     if "source_sectors" in cfg:
         normalized["source_sectors"] = normalize_sector_selection(cfg["source_sectors"])
+    if "carrier_convention_id" in cfg:
+        from ye3t.execution_plan import YE3T_O3_PRIMARY_CONVENTION, YE3T_O3_REAL_TESSERAL_CONVENTION
+        convention = cfg["carrier_convention_id"]
+        if not isinstance(convention, str) or convention not in {YE3T_O3_PRIMARY_CONVENTION, YE3T_O3_REAL_TESSERAL_CONVENTION}:
+            raise ValueError("catalogue.carrier_convention_id requires a supported complete O(3) carrier convention")
+        if convention != YE3T_O3_PRIMARY_CONVENTION:
+            normalized["carrier_convention_id"] = convention
+    if context != "inclusive":
+        normalized["density_context"] = context
     if "intermediate_selection" in cfg:
         normalized["intermediate_selection"] = cfg["intermediate_selection"]
         normalized["intermediate_selection"] = _catalogue_intermediate_representation(normalized).to_dict()["intermediates"]
@@ -1829,10 +1934,14 @@ def _catalogue_request(catalogue, species):
         if (not is_shell_filtered_family(normalized["source_family_id"])
                 or any(set(counts) != {0} for counts in tag_counts_by_rank.values())):
             raise ValueError("Formal shell Cauchy coordinates require a shell source with tag_counts=[0]")
-        if "source_contents_by_rank" in cfg:
-            raise ValueError("Formal shell Cauchy uses base-channel block partitions; explicit complete shell-channel contents use cauchy_like_pairing")
     if "basis_coordinates" in cfg:
         normalized["basis_coordinates"] = basis_coordinates
+    if "angular_basis_backend" in cfg and cfg.get("shell_role_action") != "permutation":
+        if cfg["angular_basis_backend"] not in {"normalized_cg_paths_v1", "exact_weight_space_v1"}:
+            raise ValueError("Unknown tagged angular coefficient constructor")
+        if is_shell_filtered_family(normalized["source_family_id"]):
+            raise ValueError("Normalized shell coefficients require the explicit shell-role permutation action")
+        normalized["angular_basis_backend"] = cfg["angular_basis_backend"]
     if "shell_role_action" in cfg:
         action = cfg["shell_role_action"]
         if action not in {"permutation", "fixed_channels"} or not is_shell_filtered_family(normalized["source_family_id"]):
@@ -1840,6 +1949,15 @@ def _catalogue_request(catalogue, species):
         if action == "permutation" and basis_coordinates != "formal_cauchy":
             raise ValueError("Shell-role multiplets require basis_coordinates=formal_cauchy")
         normalized["shell_role_action"] = action
+        if action == "permutation":
+            # Older normalized requests had no backend field. Preserve their
+            # coefficient identities; new user requests choose shared paths.
+            historical = "selection_policy" in cfg and "angular_basis_backend" not in cfg
+            angular_backend = cfg.get("angular_basis_backend", "exact_weight_space_v1" if historical else "normalized_cg_paths_v1")
+            if angular_backend not in {"normalized_cg_paths_v1", "exact_weight_space_v1", "legacy_exact"}:
+                raise ValueError("Unknown shared angular coefficient constructor")
+            if not historical:
+                normalized["angular_basis_backend"] = angular_backend
     if is_shell_filtered_family(normalized["source_family_id"]):
         # Shell-decorated channels: q = shell * radial_count + n. The frozen
         # transform plan is part of the request identity; nmax/lmax caps count
@@ -1851,6 +1969,9 @@ def _catalogue_request(catalogue, species):
             raise ValueError("Catalogue radial/angular caps exceed the frozen shell-filtered source plan")
         normalized["source_family_plan"] = json.loads(json.dumps(plan))
         coordinates = cfg.get("shell_occupation_coordinates", plan.get("evaluation_coordinates", "orthogonal_channels"))
+        if (coordinates != "physical_shells" and "retained_max_per_rank" in normalized
+                and any(value < int(rank) for rank, value in normalized["retained_max_per_rank"].items())):
+            raise ValueError("A restrictive shell retained_max_per_rank requires physical_shells occupation coordinates")
         if cfg.get("shell_role_action") == "permutation" and coordinates != "physical_shells":
             raise ValueError("Shell-role permutations act on physical_shells; use shell_occupation_coordinates=physical_shells")
         if coordinates != plan.get("evaluation_coordinates", "orthogonal_channels"):
@@ -1871,10 +1992,14 @@ def _catalogue_request(catalogue, species):
                     raise ValueError("Each shell_occupancies_by_rank entry needs at least one occupancy")
                 selected = set()
                 for row in rows:
-                    if (not isinstance(row, (list, tuple)) or len(row) != int(plan["shell_count"])
+                    if (not isinstance(row, (list, tuple)) or len(row) != int(plan.get("role_dimension", plan["shell_count"]))
                             or any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in row)
                             or sum(row) != rank):
-                        raise ValueError("A shell occupancy lists one nonnegative factor count per shell summing to its rank")
+                        raise ValueError("A shell occupancy lists one nonnegative factor count per source role, including any fixed background, summing to its rank")
+                    if ("retained_max_per_rank" in normalized and
+                            sum(value > 0 for value in row[:int(plan.get("permuted_role_count", plan["shell_count"]))])
+                            > normalized["retained_max_per_rank"][str(rank)]):
+                        raise ValueError("Explicit shell occupancy exceeds retained_max_per_rank")
                     selected.add(tuple(int(value) for value in row))
                 occupancies[str(rank)] = tuple(sorted(selected))
             normalized["shell_occupancies_by_rank"] = occupancies
@@ -1883,9 +2008,9 @@ def _catalogue_request(catalogue, species):
 
     def radial_allowed(radial, rank):
         count = normalized["nmax_per_rank"][str(rank)]
-        if plan is None:
+        if plan is None or basis_coordinates == "formal_cauchy":
             return 0 <= radial < count
-        return 0 <= radial < plan["shell_count"] * plan["radial_count"] and radial % plan["radial_count"] < count
+        return 0 <= radial < plan.get("role_dimension", plan["shell_count"]) * plan["radial_count"] and radial % plan["radial_count"] < count
     if "source_contents_by_rank" in cfg:
         raw = cfg["source_contents_by_rank"]
         if not isinstance(raw, Mapping):
@@ -1931,6 +2056,19 @@ def _catalogue_request(catalogue, species):
                 # Reuse fixed-content validation, including maximal full-channel
                 # blocks. This constructs no labels or numerical coefficients.
                 tagged_cauchy_carriers_request(channels, sizes, tag_count=tags[0])
+                if ("eta_max_per_rank" in normalized and _catalogue_eta_count(channels, normalized)
+                        > normalized["eta_max_per_rank"][str(rank)]):
+                    raise ValueError("Explicit source content exceeds eta_max_per_rank")
+                if "retained_max_per_rank" in normalized:
+                    limit = normalized["retained_max_per_rank"][str(rank)]
+                    if any(tag > limit for tag in tags):
+                        raise ValueError("Explicit source tag count exceeds retained_max_per_rank")
+                    if plan is not None and basis_coordinates != "formal_cauchy":
+                        active = int(plan.get("permuted_role_count", plan["shell_count"]))
+                        occupied = {channel["radial_channel"] // int(plan["radial_count"])
+                                    for channel in channels}
+                        if sum(role < active for role in occupied) > limit:
+                            raise ValueError("Explicit shell source content exceeds retained_max_per_rank")
                 blocks = sorted(zip(sizes, channels, strict=True),
                                 key=lambda item: _catalogue_content_key([item[1]], [item[0]], 0))
                 sizes, channels = zip(*blocks)
@@ -1967,9 +2105,11 @@ def _round_robin_groups(items, key, limit):
     return selected
 
 
-def _occurrence_carrier_inventory(labels, requests=None, *, legacy_zero_tag_action=False):
+def _occurrence_carrier_inventory(labels, requests=None, *, legacy_zero_tag_action=False, convention_id=None):
     """Complete graph input layouts from selected independent source labels."""
     from ye3t.execution_plan import YE3TCarrierKey, YE3TCarrierLayout, YE3T_O3_PRIMARY_CONVENTION
+    convention_id = convention_id or YE3T_O3_PRIMARY_CONVENTION
+    from .retained_cauchy_paths import _source_coupling
     groups = {}
     for label in labels:
         rank, tags = sum(label["block_sizes"]), label["tag_count"]
@@ -1983,7 +2123,7 @@ def _occurrence_carrier_inventory(labels, requests=None, *, legacy_zero_tag_acti
     for (rank, tags, degree, partition, branch, L, parity), selected in groups.items():
         coordinates = [label["coordinate_id"] for label in selected]
         key = YE3TCarrierKey(rank if degree == 0 and legacy_zero_tag_action else degree,
-            (rank,) if degree == 0 and legacy_zero_tag_action else partition, L, YE3T_O3_PRIMARY_CONVENTION, parity)
+            (rank,) if degree == 0 and legacy_zero_tag_action else partition, L, convention_id, parity)
         # Keep stable source IDs; formal N and active S_s are separate metadata.
         name = ("r" + str(rank) + ("_shell" + str(degree) if degree != tags else "_s" + str(tags)) + "_tau" + "_".join(map(str, partition if degree else (0,)))
                 + "_" + branch + "_L" + str(L) + ("_even" if parity == 1 else "_odd"))
@@ -2001,8 +2141,20 @@ def _occurrence_carrier_inventory(labels, requests=None, *, legacy_zero_tag_acti
                     "channels": requests[label["coordinate_id"]]["channels"],
                     "role_content": requests[label["coordinate_id"]]["role_content"],
                     **({"coupling_request": requests[label["coordinate_id"]]["coupling_request"]}
-                       if "coupling_request" in requests[label["coordinate_id"]] else {})}
+                       if "coupling_request" in requests[label["coordinate_id"]] else {}),
+                    **({"coupling_request": _source_coupling(requests[label["coordinate_id"]], label["target_L"])}
+                       if requests[label["coordinate_id"]].get("angular_basis_backend") == "normalized_cg_paths_v1" else {}),
+                    **({"role_binding": {key: requests[label["coordinate_id"]][key]
+                        for key in ("radial_count", "shell_role_action", "permuted_role_count")
+                        if key in requests[label["coordinate_id"]]}}
+                       if "shell_role_degree" in label else {})}
                     for label in selected]}, sort_keys=True))
+            contexts = {requests[label["coordinate_id"]].get("density_context", "inclusive") for label in selected}
+            if len(contexts) != 1:
+                raise ValueError("One source inventory group must have one density_context")
+            context = contexts.pop()
+            if context != "inclusive":
+                result[-1]["full_path"]["density_context"] = context
     return result
 
 
@@ -2030,7 +2182,7 @@ def _catalogue_count(request, *, legacy_validation=False):
         matched = set()
         plan = cfg.get("source_family_plan")
         radial_indices = (range(cfg["nmax_per_rank"][str(rank)]) if plan is None else
-                          [shell * int(plan["radial_count"]) + n for shell in range(int(plan["shell_count"]))
+                          [shell * int(plan["radial_count"]) + n for shell in range(int(plan.get("role_dimension", plan["shell_count"])))
                            for n in range(cfg["nmax_per_rank"][str(rank)])])
         channels = [{"neighbor_species": species, "radial_channel": radial, "l": angular,
                      "source_family_id": cfg["source_family_id"]}
@@ -2046,15 +2198,25 @@ def _catalogue_count(request, *, legacy_validation=False):
                 if any(pattern[a] == pattern[b] and indices[a] > indices[b]
                        for a in range(len(pattern)) for b in range(a + 1, len(pattern))):
                     continue
+                selected_channels = [channels[index] for index in indices]
+                if ("eta_max_per_rank" in cfg and _catalogue_eta_count(selected_channels, cfg)
+                        > cfg["eta_max_per_rank"][str(rank)]):
+                    continue
+                retained_limit = cfg.get("retained_max_per_rank", {}).get(str(rank), rank)
+                if plan is not None and "retained_max_per_rank" in cfg:
+                    active = int(plan.get("permuted_role_count", plan["shell_count"]))
+                    occupied = {channel["radial_channel"] // int(plan["radial_count"])
+                                for channel in selected_channels}
+                    if sum(role < active for role in occupied) > retained_limit:
+                        continue
                 for tags in cfg.get("tag_counts_by_rank", {}).get(
                         str(rank), cfg.get("tag_counts", ())):
-                    if tags > rank:
+                    if tags > rank or tags > retained_limit:
                         continue
-                    selected_channels = [channels[index] for index in indices]
                     if occupancies is not None and tuple(
                             sum(size for channel, size in zip(selected_channels, pattern, strict=True)
                                 if channel["radial_channel"] // int(plan["radial_count"]) == shell)
-                            for shell in range(int(plan["shell_count"]))) not in occupancies:
+                            for shell in range(int(plan.get("role_dimension", plan["shell_count"])))) not in occupancies:
                         continue
                     key = _catalogue_content_key(selected_channels, pattern, tags)
                     if requested is not None and key not in requested:
@@ -2067,7 +2229,9 @@ def _catalogue_count(request, *, legacy_validation=False):
                         "request": tagged_cauchy_carriers_request(selected_channels, pattern, tag_count=tags,
                             target_Ls=range(cfg["input_Lmax"] + 1),
                             kappa_policy=cfg.get("kappa_policy", "all"),
-                            tag_sectors=cfg.get("tag_sectors", "all"))})
+                            tag_sectors=cfg.get("tag_sectors", "all"),
+                            angular_basis_backend=cfg.get("angular_basis_backend"),
+                            density_context=cfg.get("density_context", "inclusive"))})
         if requested is not None and matched != requested:
             raise ValueError("Configured source contents do not match canonical catalogue candidates")
         selected = _round_robin_groups(candidates,
@@ -2172,11 +2336,13 @@ def _catalogue_count(request, *, legacy_validation=False):
                 selected_labels,
                 requests={item["label"]["coordinate_id"]: records[item["record_index"]]["request"]
                           for item in inventory} if not legacy_validation else None,
-                legacy_zero_tag_action=legacy_validation),
+                legacy_zero_tag_action=legacy_validation, convention_id=cfg.get("carrier_convention_id")),
             "multiplet_count": selected_count, "formal_free_source_image_rank": selected_count,
             "physical_image_rank": selected_count if independent_source is not None else None,
             "source_independence": independent_source,
-            "physical_image_scope": "singleton_distinct_tags_independent_free_inclusive_moments",
+            "physical_image_scope": ("independent_shell_moment_generators_at_arbitrary_coordination"
+                                     if is_shell_filtered_family(family) else
+                                     "singleton_distinct_tags_independent_free_" + cfg.get("density_context", "inclusive") + "_moments"),
             "component_count": sum(row["selected_carrier_components"] for row in rank_reports),
             "rank_inventory": tuple(rank_reports), "coefficient_materialization": "not_requested"}
 
@@ -2188,7 +2354,27 @@ def _catalogue_hash(payload):
     Its sources can be encoded independently while preserving precisely the
     bytes of _stable_json(_freeze_json(payload)), including key ordering.
     """
-    return _scalar._stable_record_hash(payload)
+    sources = payload.get("sources")
+    if type(sources) is not _CachedSourceSequence or sources.exact_reconstruction:
+        return _scalar._stable_record_hash(payload)
+    metadata = {key: value for key, value in payload.items() if key != "sources"}
+    context = _scalar._stable_json(_scalar._freeze_json((metadata, sources.headers)))
+    verified = sources._catalogue_verification
+    if verified is not None and verified[0] == context:
+        if sources._file_digests() == verified[1]:
+            if context != _scalar._stable_json(_scalar._freeze_json((
+                    {key: value for key, value in payload.items() if key != "sources"}, sources.headers))):
+                raise RuntimeError("Source catalogue changed during canonical hashing")
+            return verified[2]
+    result = _scalar._stable_record_hash(payload)
+    current = sources._file_digests()
+    if (any(sources.validated_bytes.get(path) != digest for (path, _), digest
+            in zip(sources.entries, current, strict=True)) or
+            context != _scalar._stable_json(_scalar._freeze_json((
+                {key: value for key, value in payload.items() if key != "sources"}, sources.headers)))):
+        raise RuntimeError("Source catalogue changed during canonical hashing")
+    sources._catalogue_verification = (context, current, result)
+    return result
 
 
 class _CachedSourceSequence(Sequence):
@@ -2200,36 +2386,57 @@ class _CachedSourceSequence(Sequence):
     This sequence never enters a saved runtime artifact.
     """
 
-    def __init__(self, entries, validated_bytes=None):
+    def __init__(self, entries, validated_bytes=None, exact_reconstruction=False):
         self.entries = tuple(entries)
         self.headers = tuple(header for _, header in self.entries)
         self.validated_bytes = {} if validated_bytes is None else validated_bytes
+        self.exact_reconstruction = exact_reconstruction
+        self._catalogue_verification = None
+
+    def _file_digests(self):
+        # Recheck actual bytes with a bounded buffer, including on filesystems
+        # whose metadata resolution cannot reliably identify content changes.
+        # No decoded coefficient tree or caller-owned mutable value is retained.
+        result = []
+        for path, _ in self.entries:
+            with path.open("rb") as stream:
+                result.append(hashlib.file_digest(stream, "sha256").hexdigest())
+        return tuple(result)
 
     def __len__(self):
         return len(self.entries)
 
+    def __iter__(self):
+        # Sequence.__iter__ holds its previous value while loading the next.
+        # Exact sources can be large; leave their lifetime to the consumer.
+        for index in range(len(self)):
+            yield self[index]
+
     def __getitem__(self, index):
         if isinstance(index, slice):
-            return _CachedSourceSequence(self.entries[index], self.validated_bytes)
+            return _CachedSourceSequence(self.entries[index], self.validated_bytes, self.exact_reconstruction)
         path, header = self.entries[index]
         encoded = path.read_bytes()
         fingerprint = hashlib.sha256(encoded).hexdigest()
         payload = json.loads(encoded)
         del encoded
         if self.validated_bytes.get(path) != fingerprint:
-            validate_tagged_cauchy_carriers(payload)
+            validate_tagged_cauchy_carriers(payload, exact_reconstruction=self.exact_reconstruction)
         if (payload["self_hash"] != header["self_hash"] or
-                _scalar._freeze_json(payload["request"]) != _scalar._freeze_json(header["request"])):
+                _scalar._freeze_json(payload["request"]) != _scalar._freeze_json(header["request"]) or
+                _scalar._freeze_json(tuple({"label": row["label"]} for row in payload["descriptors"])) !=
+                _scalar._freeze_json(header["descriptors"])):
             raise ValueError("Cached source changed during runtime lowering")
         self.validated_bytes[path] = fingerprint
         return payload
 
     def with_tag_count(self, tags):
         return _CachedSourceSequence(((path, header) for path, header in self.entries
-                                      if header["request"]["tag_count"] == tags), self.validated_bytes)
+                                      if header["request"]["tag_count"] == tags), self.validated_bytes,
+                                     self.exact_reconstruction)
 
 
-def _write_compiled_cache(path, compiled):
+def _write_compiled_cache(path, compiled, *, with_fingerprint=False):
     # Different constructors may finish the same request concurrently. Each
     # writer publishes one complete file using its own temporary name.
     temporary = None
@@ -2238,7 +2445,15 @@ def _write_compiled_cache(path, compiled):
                                 prefix="." + path.name + ".", delete=False) as handle:
             temporary = Path(handle.name)
             json.dump(compiled, handle, sort_keys=True)
+        fingerprint = None
+        if with_fingerprint:
+            # Bind the compiler's validation receipt to its own published bytes,
+            # before another writer can replace the destination. Keep memory
+            # bounded and preserve the existing on-disk representation.
+            with temporary.open("rb") as stream:
+                fingerprint = hashlib.file_digest(stream, "sha256").hexdigest()
         temporary.replace(path)
+        return fingerprint
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
@@ -2249,14 +2464,21 @@ def _compile_catalogue(request, *, cache_dir=None, legacy_validation=False, _str
     # count/plan/compile always use the independent source inventory.
     if legacy_validation and cache_dir is not None:
         raise ValueError("Historical validation must not write a production compiler cache")
-    cache = None if cache_dir is None else Path(cache_dir)
+    from ye3t.cache.artifacts import ArtifactCacheMiss, YE3TArtifactStore
+    store = YE3TArtifactStore()
+    cache_mode = store.mode
+    cache = (None if cache_dir is None or cache_mode == "off" else
+             Path(cache_dir) / COUPLING_TREE_CONVENTION)
+    if cache_mode == "off":
+        _stream_sources = False
     if _stream_sources and cache is None:
         raise ValueError("Streaming source compilation requires a compiler cache directory")
     catalogue_path = None
     if cache is not None:
-        cache.mkdir(parents=True, exist_ok=True)
+        if cache_mode != "read_only":
+            cache.mkdir(parents=True, exist_ok=True)
         catalogue_path = cache / ("catalogue_" + request["request_hash"] + ".json")
-        if catalogue_path.exists() and not _stream_sources:
+        if catalogue_path.exists() and not _stream_sources and cache_mode != "rebuild":
             compiled = json.loads(catalogue_path.read_text(encoding="utf-8"))
             body = {key: value for key, value in compiled.items() if key != "self_hash"}
             if _catalogue_hash(body) != compiled.get("self_hash"):
@@ -2266,7 +2488,7 @@ def _compile_catalogue(request, *, cache_dir=None, legacy_validation=False, _str
             if compiled.get("schema") != "ye3t_tagged_cauchy_carrier_catalogue_v2" or not compiled["certificate"]["passed"]:
                 raise ValueError("tagged catalogue cache certificate failed")
             for source in compiled["sources"]:
-                validate_tagged_cauchy_carriers(source)
+                validate_tagged_cauchy_carriers(source, exact_reconstruction=store.verify == "full")
             return compiled
     report = _catalogue_count(request, legacy_validation=legacy_validation)
     selected_sources, rank_inventory = [], []
@@ -2282,29 +2504,36 @@ def _compile_catalogue(request, *, cache_dir=None, legacy_validation=False, _str
             fixed = record["request"]
             identity = _scalar._stable_hash(_scalar._freeze_json(fixed))
             path = None if cache is None else cache / (identity + ".json")
-            if path is not None and path.exists():
+            if path is not None and path.exists() and cache_mode != "rebuild":
                 encoded = path.read_bytes()
                 fingerprint = hashlib.sha256(encoded).hexdigest()
                 compiled = json.loads(encoded)
                 del encoded
-                validate_tagged_cauchy_carriers(compiled)
+                validate_tagged_cauchy_carriers(compiled, exact_reconstruction=store.verify == "full")
                 if _scalar._freeze_json(compiled["request"]) != _scalar._freeze_json(_request(fixed)):
                     raise ValueError("tagged source cache request mismatch")
                 validated_bytes[path] = fingerprint
             else:
+                if path is not None and cache_mode == "read_only":
+                    raise ArtifactCacheMiss("Missing source catalogue entry in read-only cache: " + str(path))
                 if not legacy_validation and fixed.get("basis_coordinates") == "formal_cauchy":
                     from .shell_cauchy import compile_shell_cauchy
-                    compiled = compile_shell_cauchy(fixed, _block_templates=shell_block_templates)
+                    compiled = compile_shell_cauchy(fixed, _block_templates=shell_block_templates, cache_dir=cache_dir)
                 else:
                     compiled = (_materialize_source_image(_tagged_cauchy_projection_candidates(fixed), legacy_validation=True)
                                 if legacy_validation else compile_tagged_cauchy_carriers(fixed))
                 if path is not None:
-                    _write_compiled_cache(path, compiled)
+                    reuse_validation = _stream_sources and not legacy_validation and store.verify != "full"
+                    fingerprint = _write_compiled_cache(path, compiled, with_fingerprint=reuse_validation)
+                    if reuse_validation:
+                        validated_bytes[path] = fingerprint
             selected_multiplets += compiled["multiplet_count"]
             selected_components += compiled["component_count"]
             if _stream_sources:
                 header = {key: compiled[key] for key in ("request", "self_hash")}
                 header["descriptors"] = tuple({"label": row["label"]} for row in compiled["descriptors"])
+                if "factorized_schedule" in compiled:
+                    header["factorized_schedule"] = True
                 header.update({key: compiled[key] for key in ("validation_report", "certificate") if key in compiled})
                 selected_sources.append((path, header))
                 del compiled
@@ -2324,8 +2553,13 @@ def _compile_catalogue(request, *, cache_dir=None, legacy_validation=False, _str
                 selected_source_multiplets=sum(row["multiplet_count"] for row in accepted),
                 selected_carrier_components=sum(row["component_count"] for row in accepted))
         rank_inventory.append(rank_record)
+        # Source payloads now own their runtime maps. Retain raw block
+        # workspaces only within this rank; the persistent core store supplies
+        # any later reuse without keeping every earlier carrier in memory.
+        shell_block_templates.clear()
     compiled = {"schema": "ye3t_tagged_cauchy_carrier_catalogue_v2", "family": TAGGED_CAUCHY_CARRIERS_FAMILY,
-                "request": request, "sources": (_CachedSourceSequence(selected_sources, validated_bytes) if _stream_sources
+                "request": request, "sources": (_CachedSourceSequence(selected_sources, validated_bytes,
+                    exact_reconstruction=store.verify == "full") if _stream_sources
                                                 else tuple(selected_sources)), "rank_inventory": tuple(rank_inventory),
                 "available_coordinate_inventory": report["available_coordinate_inventory"],
                 "certificate": {"passed": True, "selection_unit": "complete_independent_source_multiplet",
@@ -2334,18 +2568,104 @@ def _compile_catalogue(request, *, cache_dir=None, legacy_validation=False, _str
         compiled["schema"] = "ye3t_tagged_cauchy_carrier_catalogue_v1"
         compiled["certificate"]["selection_unit"] = "complete_certified_original_multiplet"
     compiled["self_hash"] = _catalogue_hash(compiled)
-    if catalogue_path is not None and not _stream_sources:
+    if catalogue_path is not None and not _stream_sources and cache_mode != "read_only":
         _write_compiled_cache(catalogue_path, compiled)
     return compiled
 
 
 def _compile_tagged_graph(request, *, cache_dir=None, graph_options):
-    """Compile the usual graph maps with bounded exact-source residency."""
+    """Compile or reuse canonical graph maps with bounded source residency."""
     request = _request(request)
     if "catalogue" not in request:
         raise ValueError("Carrier graph lowering requires a source catalogue")
-    compiled = _compile_catalogue(request, cache_dir=cache_dir, _stream_sources=cache_dir is not None)
-    return tagged_cauchy_marginal_graph_records(compiled, **graph_options)
+    if (request["catalogue"].get("shell_role_action") == "permutation"
+            and request["catalogue"].get("angular_basis_backend") != "normalized_cg_paths_v1"):
+        # Historical coefficient gauges retain their existing reconstruction.
+        # Shared normalized path sources use the common catalogue/cache below.
+        from .factorized_shell import compile_factorized_shell_catalogue
+        from ye3t.cache.artifacts import YE3TArtifactStore
+        store = YE3TArtifactStore(directory=cache_dir) if cache_dir else YE3TArtifactStore()
+        def factorized_build():
+            compiled = compile_factorized_shell_catalogue(request, cache_dir=cache_dir)
+            return tagged_cauchy_marginal_graph_records(compiled, **graph_options)
+        def factorized_validate(payload):
+            if store.verify == "full" and _scalar._freeze_json(payload) != _scalar._freeze_json(factorized_build()):
+                raise ValueError("Factorized graph differs from canonical construction")
+            return True
+        return store.resolve("shell_factorized_graph", "ye3t_factorized_shell_graph_v2",
+            _scalar._freeze_json({"source_request": request, "graph_options": graph_options,
+                                 "tree_coordinate_convention": COUPLING_TREE_CONVENTION}),
+            builder=factorized_build, validator=factorized_validate,
+            certificate={"passed": True, "checks": {"canonical_source_maps": True}},
+            required_certificate_checks=("canonical_source_maps",), producer={"compiler_revision": 1})["payload"]
+
+    def build():
+        compiled = _compile_catalogue(request, cache_dir=cache_dir, _stream_sources=cache_dir is not None)
+        return tagged_cauchy_marginal_graph_records(compiled, **graph_options)
+
+    if cache_dir is None:
+        return build()
+    from ye3t.cache.artifacts import YE3TArtifactStore
+    store = YE3TArtifactStore(directory=cache_dir)
+    if store.mode == "off":
+        return build()
+    # The exact count supplies the selected source requests before coefficient
+    # materialization. Their current filesystem identities invalidate this
+    # derived graph when a backing coefficient file is replaced or edited.
+    # No host path is included in the portable graph or its mathematical hash.
+    paths = tuple(Path(cache_dir) / COUPLING_TREE_CONVENTION / (_scalar._stable_hash(_scalar._freeze_json(
+        record["request"])) + ".json")
+        for record in _catalogue_count(request)["selected_records"])
+
+    def fingerprints():
+        values = {}
+        for path in paths:
+            try:
+                stat = path.stat()
+            except FileNotFoundError:
+                values[path.name] = None
+            else:
+                values[path.name] = [stat.st_dev, stat.st_ino, stat.st_size,
+                                     stat.st_mtime_ns, stat.st_ctime_ns]
+        return values
+
+    before = fingerprints()
+    built = []
+
+    def canonical_build():
+        result = build()
+        after = fingerprints()
+        if any(value is not None and after[name] != value for name, value in before.items()):
+            raise RuntimeError("Source coefficient files changed during graph compilation; retry with a stable cache")
+        built.append(result)
+        return result
+
+    def validate(payload):
+        # New entries already passed the canonical compiler. Explicit full
+        # verification also rebuilds the maps and compares every coefficient,
+        # coordinate, physical binding and action.
+        expected = built[0] if built else canonical_build()
+        if _scalar._freeze_json(payload) != _scalar._freeze_json(expected):
+            raise ValueError("Cached carrier graph differs from canonical source plans")
+        return True
+
+    if any(value is None for value in before.values()) and store.mode != "read_only":
+        canonical_build()
+        before = fingerprints()
+    settings = dict(artifact_type="tagged_carrier_graph", artifact_schema="ye3t_tagged_graph_cache_v1",
+        builder=lambda: built[0] if built else canonical_build(), validator=validate,
+        certificate={"passed": True, "checks": {"canonical_source_maps": True}},
+        required_certificate_checks=("canonical_source_maps",),
+        producer={"compiler_revision": 1, "convention": _CONVENTION})
+    # Intermediate selectors use integer rank/block-size keys in memory.
+    # Preserve the same canonical JSON form used by the source request hash.
+    identity = _scalar._freeze_json({"source_request": request,
+        "graph_options": graph_options, "source_files": before,
+        "tree_coordinate_convention": COUPLING_TREE_CONVENTION})
+    resolved = store.resolve(request=identity, **settings)
+    if fingerprints() != before:
+        raise RuntimeError("Source coefficient files changed while loading a cached graph")
+    return resolved["payload"]
 
 
 def _reconstruct_legacy_tagged_catalogue_for_validation(request):
@@ -2362,4 +2682,29 @@ def _reconstruct_legacy_tagged_catalogue_for_validation(request):
     request["catalogue"]["selection_policy"] = "balanced_content_tag_angular_sector_original_coordinates_v1"
     request.pop("request_hash")
     request["request_hash"] = _scalar._stable_hash(_scalar._freeze_json(request))
-    return _compile_catalogue(request, legacy_validation=True)
+    # Historical verification has a separate cache namespace. These maps can
+    # validate saved v1 coordinates but cannot become a new-model compiler route.
+    # The application still compares the complete saved map/binding payload.
+    from ye3t.cache.artifacts import YE3TArtifactStore
+    store = YE3TArtifactStore()
+
+    def validate(payload):
+        if (payload.get("schema") != "ye3t_tagged_cauchy_carrier_catalogue_v1"
+                or _catalogue_hash({key: value for key, value in payload.items()
+                                    if key != "self_hash"}) != payload.get("self_hash")
+                or _scalar._freeze_json(payload["request"]) != _scalar._freeze_json(request)
+                or payload.get("certificate", {}).get("passed") is not True):
+            raise ValueError("Historical tagged validation cache differs from its canonical request")
+        for source in payload["sources"]:
+            validate_tagged_cauchy_carriers(source, exact_reconstruction=store.verify == "full")
+        return True
+
+    resolved = store.resolve("legacy_tagged_validation", "ye3t_tagged_cauchy_carrier_catalogue_v1",
+        _scalar._freeze_json(request),
+        builder=lambda: _compile_catalogue(request, legacy_validation=True),
+        validator=validate,
+        certificate={"passed": True, "checks": {"historical_reconstruction": True}},
+        required_certificate_checks=("historical_reconstruction",),
+        producer={"compiler_revision": 1, "convention": _CONVENTION,
+                  "usage": "saved_v1_verification_only"})
+    return resolved["payload"]

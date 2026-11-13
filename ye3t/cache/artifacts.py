@@ -7,7 +7,6 @@ implicit ``repr`` serialization are deliberately unsupported.
 
 from collections import OrderedDict
 from collections.abc import Mapping
-from copy import deepcopy
 import errno
 import hashlib
 from importlib import metadata
@@ -25,7 +24,9 @@ ARTIFACT_STORE_SCHEMA = "ye3t_content_addressed_artifact_v1"
 _ARTIFACT_COMPONENT = re.compile(r"^[A-Za-z0-9_.-]+$")
 _HASH = re.compile(r"^[0-9a-f]{64}$")
 _PROCESS_EVENTS = []
-# Parsed envelopes are private snapshots. Callers always receive fresh values.
+# Serialized envelopes are private immutable snapshots. Callers decode fresh
+# values without keeping a second Python coefficient tree or deep-copying it.
+# Larger entries keep only a verified byte digest; rereads still check the bytes.
 # File identity includes ctime so rewriting equal-size bytes and restoring mtime
 # cannot retain an earlier validation. Bound both memory and event history.
 _READ_CACHE = OrderedDict()
@@ -73,12 +74,47 @@ def _canonical_value(value, path="$"):
 def canonical_json_bytes(value):
     """Return the strict, deterministic JSON encoding used for cache identity."""
 
+    _validate_json_input(value)
+    return _encode_canonical_json(value)
+
+
+def _validate_json_input(value, path="$"):
+    """Check canonical input types without allocating a second coefficient tree."""
+    if value is None or isinstance(value, (str, bool, int)):
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(f"Non-finite float at {path} is not canonical JSON.")
+        return
+    if isinstance(value, (tuple, list)):
+        for index, item in enumerate(value):
+            _validate_json_input(item, f"{path}[{index}]")
+        return
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError(f"Non-string mapping key at {path} is unsupported.")
+            _validate_json_input(item, f"{path}.{key}")
+        return
+    raise TypeError(f"Unsupported canonical JSON value {type(value).__name__} at {path}.")
+
+
+def _json_mapping(value):
+    # JSON already handles tuples. Non-dict mappings need only a shallow view.
+    if isinstance(value, Mapping):
+        return dict(value)
+    raise TypeError(f"Unsupported canonical JSON value {type(value).__name__}.")
+
+
+def _encode_canonical_json(value):
+    """Encode an already-normalized tree without copying every node again."""
     return json.dumps(
-        _canonical_value(value),
+        value,
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=True,
         allow_nan=False,
+        default=_json_mapping,
     ).encode("utf-8")
 
 
@@ -86,6 +122,64 @@ def artifact_hash(value):
     """Hash a canonical JSON value with SHA-256."""
 
     return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
+
+
+def _hash_canonical_json(value):
+    """Hash decoded JSON in bounded container batches with unchanged bytes."""
+    def remaining(item, budget):
+        if isinstance(item, dict):
+            budget -= 2 * len(item)
+            if budget < 0:
+                return budget
+            for key, child in item.items():
+                budget = remaining(child, budget - len(key) // 16)
+                if budget < 0:
+                    break
+        elif isinstance(item, (tuple, list)):
+            budget -= len(item)
+            if budget < 0:
+                return budget
+            for child in item:
+                budget = remaining(child, budget)
+                if budget < 0:
+                    break
+        else:
+            budget -= 1 + (len(item) // 16 if isinstance(item, str) else 0)
+        return budget
+
+    digest = hashlib.sha256()
+
+    def write(item):
+        # Use the C encoder on small subtrees. Large lists are split before
+        # encoding; large maps retain the canonical sorted-key traversal.
+        if remaining(item, 4096) >= 0 or not isinstance(item, (dict, tuple, list)):
+            digest.update(_encode_canonical_json(item))
+        elif isinstance(item, dict):
+            digest.update(b'{')
+            for index, key in enumerate(sorted(item)):
+                if index:
+                    digest.update(b',')
+                digest.update(_encode_canonical_json(key))
+                digest.update(b':')
+                write(item[key])
+            digest.update(b'}')
+        else:
+            digest.update(b'[')
+            for first in range(0, len(item), 64):
+                batch = item[first:first + 64]
+                if first:
+                    digest.update(b',')
+                if remaining(batch, 4096) >= 0:
+                    digest.update(_encode_canonical_json(batch)[1:-1])
+                else:
+                    for index, child in enumerate(batch):
+                        if index:
+                            digest.update(b',')
+                        write(child)
+            digest.update(b']')
+
+    write(value)
+    return digest.hexdigest()
 
 
 def default_artifact_cache_directory():
@@ -154,6 +248,19 @@ def _minimum_certificate(certificate, required_checks):
     return certificate
 
 
+def _artifact_cache_policy(mode=None, verify=None):
+    """Resolve the shared cache controls without inspecting the filesystem."""
+    mode = str(os.environ.get("YE3T_CACHE_MODE", "auto") if mode is None else mode).strip().lower()
+    if mode == "refresh":
+        mode = "rebuild"
+    if mode not in {"auto", "read_only", "rebuild", "off"}:
+        raise ValueError("Artifact-cache mode must be auto, read_only, refresh, rebuild, or off.")
+    verify = str(os.environ.get("YE3T_CACHE_VERIFY", "hash") if verify is None else verify).strip().lower()
+    if verify not in {"hash", "full"}:
+        raise ValueError("Artifact-cache verification must be hash or full.")
+    return mode, verify
+
+
 class YE3TArtifactStore:
     """Resolve canonical artifacts; ``events`` retains the latest 1024 entries."""
 
@@ -161,22 +268,7 @@ class YE3TArtifactStore:
         self.directory = Path(
             default_artifact_cache_directory() if directory is None else directory
         ).expanduser()
-        self.mode = str(
-            os.environ.get("YE3T_CACHE_MODE", "auto") if mode is None else mode
-        ).strip().lower()
-        if self.mode == "refresh":
-            self.mode = "rebuild"
-        if self.mode not in {"auto", "read_only", "rebuild", "off"}:
-            raise ValueError(
-                "Artifact-cache mode must be auto, read_only, refresh, rebuild, or off."
-            )
-        self.verify = str(
-            os.environ.get("YE3T_CACHE_VERIFY", "hash")
-            if verify is None
-            else verify
-        ).strip().lower()
-        if self.verify not in {"hash", "full"}:
-            raise ValueError("Artifact-cache verification must be hash or full.")
+        self.mode, self.verify = _artifact_cache_policy(mode, verify)
         if overlays is None:
             package_overlay = Path(__file__).resolve().parent / "data"
             overlays = (package_overlay,) if package_overlay.is_dir() else ()
@@ -337,7 +429,7 @@ class YE3TArtifactStore:
                 "miss",
             )
             envelope = built["envelope"]
-            encoded = canonical_json_bytes(envelope)
+            encoded = _encode_canonical_json(envelope)
             temporary = path.with_name(
                 "." + path.name + "." + str(os.getpid()) + "." + uuid.uuid4().hex
             )
@@ -351,6 +443,9 @@ class YE3TArtifactStore:
             finally:
                 if temporary.exists():
                     temporary.unlink()
+            # The verified reload owns its own tree. Release the built tree
+            # before parsing it so large cold artifacts do not coexist twice.
+            del built, envelope, encoded
             verified = self._read_and_validate(
                 path,
                 identity,
@@ -377,20 +472,31 @@ class YE3TArtifactStore:
         required_checks,
         status,
     ):
-        payload = _canonical_value(builder())
+        # Normalize via compact JSON bytes. Unlike recursive tree copying,
+        # this releases the builder's graph before allocating normalized lists.
+        # It also preserves the existing isolation of repeated mutable objects.
+        raw_payload = builder()
+        encoded_payload = canonical_json_bytes(raw_payload)
+        del raw_payload
+        payload = json.loads(encoded_payload)
+        del encoded_payload
         if validator is not None:
             validator(payload)
         certificate_value = certificate(payload) if callable(certificate) else certificate
         certificate_value = _minimum_certificate(
             certificate_value, required_checks
         )
+        # Validators may modify the decoded payload, so retain strict input
+        # validation. Hash it in bounded batches rather than allocating a
+        # complete JSON string and byte buffer for each of these two digests.
+        _validate_json_input(payload)
         body = {
             **identity,
             "payload": payload,
-            "payload_hash": artifact_hash(payload),
+            "payload_hash": _hash_canonical_json(payload),
             "certificate": certificate_value,
         }
-        envelope = {**body, "envelope_hash": artifact_hash(body)}
+        envelope = {**body, "envelope_hash": _hash_canonical_json(body)}
         return {
             "payload": payload,
             "artifact_hash": identity["semantic_hash"],
@@ -405,7 +511,7 @@ class YE3TArtifactStore:
                            semantic_validation=True):
         global _READ_CACHE_BYTES
         # Full verification deliberately replays the semantic validator. Normal
-        # reuse avoids parsing and hashing an unchanged file more than once.
+        # reuse checks unchanged bytes without recanonicalizing coefficient trees.
         try:
             stat = path.stat()
         except OSError as error:
@@ -419,30 +525,31 @@ class YE3TArtifactStore:
             cached = _READ_CACHE.get(cache_key)
             if cached is not None and cached[0] == fingerprint:
                 _READ_CACHE.move_to_end(cache_key)
-                envelope = deepcopy(cached[1])
             else:
-                envelope = None
-        if envelope is not None:
-            try:
-                if any(envelope.get(key) != value for key, value in identity.items()):
-                    raise ArtifactCacheValidationError("Artifact identity changed.")
-                _minimum_certificate(envelope.get("certificate"), required_checks)
-                if semantic_validation and self.verify == "full" and validator is not None:
-                    validator(envelope["payload"])
-            except (KeyError, TypeError, ValueError) as error:
-                raise ArtifactCacheValidationError(
-                    f"Artifact envelope failed semantic validation: {error}."
-                ) from error
-            return envelope
+                cached = None
         try:
-            encoded = path.read_bytes()
-            envelope = json.loads(encoded.decode("utf-8"))
+            encoded = cached[1] if cached is not None else None
+            if encoded is None:
+                encoded = path.read_bytes()
+                byte_digest = hashlib.sha256(encoded).digest()
+                verified = cached is not None and byte_digest == cached[3]
+            else:
+                byte_digest, verified = cached[3], True
+            encoded_size = len(encoded)
+            envelope = json.loads(encoded)
+            snapshot = encoded if encoded_size + 1024 <= _READ_CACHE_LIMIT else None
+            # Retain only bounded bytes, never a duplicate parsed tree. The
+            # snapshot precedes semantic callbacks, whose mutations are local.
+            del encoded
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
             raise ArtifactCacheValidationError(
                 f"Artifact envelope cannot be decoded: {error}."
             ) from error
         try:
-            envelope = _canonical_value(envelope)
+            # json.loads already yields string-keyed dicts, lists and JSON
+            # scalars. Strict encoding below rejects non-finite numbers,
+            # including overflowed exponents. Avoid a second complete tree
+            # allocation for large exact coefficient tables.
             if not isinstance(envelope, dict):
                 raise ArtifactCacheValidationError(
                     "Artifact envelope is not a mapping."
@@ -453,7 +560,9 @@ class YE3TArtifactStore:
                 for key, value in envelope.items()
                 if key != "envelope_hash"
             }
-            if actual_envelope_hash != artifact_hash(body):
+            # Encode the decoded JSON directly, preserving both digest checks
+            # and allow_nan=False validation without rebuilding the tree.
+            if not verified and actual_envelope_hash != _hash_canonical_json(body):
                 raise ArtifactCacheValidationError("Artifact envelope hash mismatch.")
             for key, expected in identity.items():
                 if envelope.get(key) != expected:
@@ -461,7 +570,7 @@ class YE3TArtifactStore:
                         f"Artifact is bound to a different {key}."
                     )
             payload = envelope.get("payload")
-            if envelope.get("payload_hash") != artifact_hash(payload):
+            if not verified and envelope.get("payload_hash") != _hash_canonical_json(payload):
                 raise ArtifactCacheValidationError("Artifact payload hash mismatch.")
             _minimum_certificate(envelope.get("certificate"), required_checks)
             if semantic_validation and self.verify == "full" and validator is not None:
@@ -472,8 +581,7 @@ class YE3TArtifactStore:
                 after = None
             if after is not None and (after.st_dev, after.st_ino, after.st_size,
                     after.st_mtime_ns, after.st_ctime_ns) == fingerprint:
-                # JSON object overhead can exceed byte size substantially.
-                cost = max(1024, len(encoded) * 8)
+                cost = 1024 + (len(snapshot) if snapshot is not None else 0)
                 with _READ_CACHE_LOCK:
                     previous = _READ_CACHE.pop(cache_key, None)
                     if previous is not None:
@@ -482,7 +590,7 @@ class YE3TArtifactStore:
                         while _READ_CACHE and _READ_CACHE_BYTES + cost > _READ_CACHE_LIMIT:
                             _, old = _READ_CACHE.popitem(last=False)
                             _READ_CACHE_BYTES -= old[2]
-                        _READ_CACHE[cache_key] = (fingerprint, deepcopy(envelope), cost)
+                        _READ_CACHE[cache_key] = (fingerprint, snapshot, cost, byte_digest)
                         _READ_CACHE_BYTES += cost
             return envelope
         except ArtifactCacheValidationError:

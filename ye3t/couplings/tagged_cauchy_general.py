@@ -8,7 +8,10 @@ coefficients; Jacobi products use rational polynomial back-substitution.
 """
 
 from collections import Counter, OrderedDict
+import base64
 import copy
+import gzip
+import json
 import logging
 from fractions import Fraction
 from functools import lru_cache
@@ -264,12 +267,35 @@ def _general_request(catalogue, species):
     allowed = {"nmax_per_rank", "lmax_per_rank", "source_block_partitions_by_rank",
                "angular_patterns_by_rank", "tag_counts_by_rank", "max_records_per_rank",
                "max_features_per_rank", "selected_basis_coordinates_by_rank",
-               "resource_limits", "angular_basis_backend", "max_tag_set_partitions"}
+               "resource_limits", "angular_basis_backend", "max_tag_set_partitions",
+               "intermediate_selection", "eta_max_per_rank", "retained_max_per_rank",
+               "chemical_patterns_by_rank"}
     if set(catalogue) - allowed:
         raise ValueError(f"Unknown tagged catalogue options: {sorted(set(catalogue)-allowed)}")
+    from ye3t.representation_config import _bounded_rank_map
+    ranks = tuple(sorted(int(value) for value in catalogue["nmax_per_rank"]))
+    if "chemical_patterns_by_rank" in catalogue:
+        chemical = {}
+        for key, rows in catalogue["chemical_patterns_by_rank"].items():
+            rank = int(key)
+            patterns = tuple(sorted({tuple(sorted(str(value) for value in row)) for row in rows}))
+            if (rank not in ranks or not patterns or any(
+                    len(row) != rank or not set(row).issubset(species) for row in patterns)):
+                raise ValueError("chemical_patterns_by_rank requires nonempty rank-length species patterns.")
+            chemical[str(rank)] = patterns
+        catalogue["chemical_patterns_by_rank"] = chemical
+    for name, minimum in (("eta_max_per_rank", 1), ("retained_max_per_rank", 0)):
+        if name in catalogue:
+            catalogue[name] = {str(rank): value for rank, value in
+                               _bounded_rank_map(catalogue[name], ranks, name, minimum)}
     angular_backend = str(catalogue.get("angular_basis_backend", "exact_weight_space_v1"))
     if angular_backend not in {"legacy_exact", "exact_weight_space_v1"}:
         raise ValueError("Unknown tagged angular basis backend.")
+    if "intermediate_selection" in catalogue:
+        from ye3t.couplings.tagged_cauchy_carriers import _catalogue_intermediate_representation
+        configured = {**catalogue, "ranks": sorted(int(n) for n in catalogue["nmax_per_rank"])}
+        catalogue["intermediate_selection"] = _catalogue_intermediate_representation(
+            configured).to_dict()["intermediates"]
     body = {"schema": GENERAL_REQUEST_SCHEMA, "family": "linear_tagged_cauchy_image",
             "species": species, "catalogue": _freeze_json(catalogue),
             "coordinate_policy": "exact_physical_pivots_v1",
@@ -290,6 +316,8 @@ def _content_records(request):
         if rank < 1 or nmax < 1 or lmax < 0:
             raise ValueError("Ranks/radial counts must be positive; lmax must be nonnegative.")
         patterns = _rank_value(catalogue.get("angular_patterns_by_rank", {}), rank)
+        chemical_patterns = _rank_value(catalogue.get("chemical_patterns_by_rank", {}), rank)
+        chemical_patterns = None if chemical_patterns is None else set(map(tuple, chemical_patterns))
         if patterns is not None:
             patterns = {tuple(sorted(int(value) for value in values)) for values in patterns}
             if any(len(values) != rank or min(values) < 0 or max(values) > lmax for values in patterns):
@@ -311,7 +339,9 @@ def _content_records(request):
             if not sizes or min(sizes) < 1 or sum(sizes) != rank:
                 raise ValueError("A complete-channel partition must sum to its rank.")
             for pattern in sorted(patterns) if patterns is not None else (None,):
-                streams.append(_partition_contents(channels, sizes, pattern))
+                streams.append(_partition_contents(channels, sizes, pattern,
+                    eta_max=_rank_value(catalogue.get("eta_max_per_rank", {}), rank),
+                    chemical_patterns=chemical_patterns))
         emitted, seen = 0, set()
         while streams and emitted < limit:
             for stream in tuple(streams):
@@ -330,10 +360,18 @@ def _content_records(request):
                     break
 
 
-def _partition_contents(channels, sizes, pattern):
+def _partition_contents(channels, sizes, pattern, *, eta_max=None, chemical_patterns=None):
     """One lazy stream per partition/angular content, interleaved by the planner."""
+    from ye3t.couplings.tagged_cauchy_carriers import _catalogue_eta_count
     for indices in product(range(len(channels)), repeat=len(sizes)):
         if len(set(indices)) != len(indices):
+            continue
+        if chemical_patterns is not None and tuple(sorted(
+                channels[index]["neighbor_species"] for index, size in zip(indices, sizes)
+                for _ in range(size))) not in chemical_patterns:
+            continue
+        if (eta_max is not None and eta_max < len(indices)
+                and _catalogue_eta_count((channels[index] for index in indices), {}) > eta_max):
             continue
         identity = tuple(sorted(zip(indices, sizes)))
         angular = tuple(sorted(channels[index]["l"] for index, size in zip(indices, sizes)
@@ -366,11 +404,12 @@ def _general_count(request):
     for record in _content_records(request):
         sizes = tuple(record["block_sizes"])
         rank = sum(sizes)
+        retained_max = _rank_value(catalogue.get("retained_max_per_rank", {}), rank, rank)
         for tag_count in _rank_value(catalogue.get("tag_counts_by_rank", {}), rank, (0, 1, 2)):
             tag_count = int(tag_count)
             if tag_count < 0:
                 raise ValueError("Tag counts must be nonnegative.")
-            if tag_count > rank:
+            if tag_count > rank or tag_count > retained_max:
                 continue
             bell = [1]
             for order in range(1, tag_count + 1):
@@ -400,6 +439,13 @@ def _general_count(request):
                         "tensor_order": rank, "label": label.to_dict()}
                 identity = {key: value for key, value in body.items() if key != "component_index"}
                 labels.append({**body, "coordinate_id": "tagged:"+_stable_hash(_freeze_json(identity))})
+    if "intermediate_selection" in catalogue:
+        from ye3t.couplings.tagged_cauchy_carriers import _catalogue_intermediate_representation
+        configured = {**catalogue, "ranks": sorted(int(n) for n in catalogue["nmax_per_rank"])}
+        representation = _catalogue_intermediate_representation(configured)
+        selected = {id(label) for label in representation.select_intermediate_inventory(
+            record["label"] for record in labels)}
+        labels = [record for record in labels if id(record["label"]) in selected]
     body = {"request_hash": request["request_hash"], "labels": labels}
     report = TaggedCauchyImageMultiplicityReport(
         request=_freeze_json(request), labels=tuple(labels), raw_label_count=len(labels),
@@ -480,6 +526,67 @@ def _compiled_general_coordinate(parent, tag_count):
 
 
 def _general_compile(plan):
+    """Reuse the exact assembled image across canonical compiler calls."""
+    from ye3t.couplings.tagged_cauchy_image import CompiledTaggedCauchyImage
+
+    store = YE3TArtifactStore()
+    if store.mode == "off":
+        return _general_compile_uncached(plan)
+    plan_payload = plan.to_dict()
+    built, encoded = [], []
+
+    def build():
+        compiled = _general_compile_uncached(plan)
+        # The artifact store normalizes nested mappings. Keep a compact string
+        # here so it does not duplicate the large coefficient dictionaries.
+        data = json.dumps(compiled.to_dict(), sort_keys=True, separators=(",", ":"),
+                          ensure_ascii=True, allow_nan=False).encode("utf-8")
+        payload = {"encoding": "gzip_base64_json_v1",
+                   "artifact": base64.b64encode(gzip.compress(data, mtime=0)).decode("ascii")}
+        built.append(compiled)
+        encoded.append(payload)
+        return payload
+
+    loaded = []
+
+    def decode(payload):
+        if not loaded:
+            if set(payload) != {"encoding", "artifact"} or payload["encoding"] != "gzip_base64_json_v1":
+                raise ValueError("Unsupported cached tagged image encoding")
+            try:
+                data = json.loads(gzip.decompress(base64.b64decode(payload["artifact"], validate=True)))
+            except (ValueError, OSError, EOFError) as error:
+                raise ValueError("Invalid cached tagged image encoding") from error
+            compiled = CompiledTaggedCauchyImage.from_dict(data,
+                compiler_validation="full" if store.verify == "full" else "integrity")
+            if compiled.plan.to_dict() != plan_payload:
+                raise ValueError("Cached tagged image differs from the requested compiler plan")
+            loaded.append(compiled)
+        return loaded[0]
+
+    def validate(payload):
+        if store.verify == "full" or not encoded or payload != encoded[0]:
+            decode(payload)
+        return True
+
+    try:
+        result = store.resolve("tagged_complete_image", "tagged_complete_image_cache_v1",
+            {"plan": plan_payload}, builder=build, validator=validate,
+            # TODO: follow the shared store's validity-field migration when its
+            # serialized certificate field gains the preferred terminology.
+            certificate={"passed": True, "checks": {"canonical_compile": True}},
+            required_certificate_checks=("canonical_compile",),
+            producer={"compiler_revision": 1, "image_validator_revision": 3})
+    except ArtifactCacheMiss:
+        # Preserve read-only use with an existing per-coordinate store. Missing
+        # complete images can still be assembled without writing a new entry.
+        return _general_compile_uncached(plan)
+    if built and result["payload"] == encoded[0]:
+        return built[0]
+    return decode(result["payload"])
+
+
+def _general_compile_uncached(plan):
     from ye3t.couplings.tagged_cauchy_image import CompiledTaggedCauchyImage
     report = plan.report
     catalogue = report.request["catalogue"]
@@ -614,6 +721,30 @@ def _general_payload(raw_rows, raw_labels, selected, reconstruction, parent_arti
     payload["real_schedule_core"] = core
     payload["real_schedule_core_hash"] = _stable_hash(_freeze_json(core))
     return payload
+
+
+def _validate_general_integrity(value):
+    """Load trusted compiler output without replaying mathematical diagnostics.
+
+    The complete stored identity binds labels, source definitions, exact proof
+    records and numerical schedules. Hashes detect corruption, not malicious
+    authorship. Explicit certificate/full diagnostics remain separate modes.
+    """
+    if value.self_hash != value._content_hash():
+        raise ValueError("General tagged artifact hash mismatch.")
+    payload = value.payload
+    core = payload.get("real_schedule_core", {})
+    count = len(payload.get("image_coordinate_provenance", ()))
+    if (payload.get("schema") != "ye3t_general_tagged_physical_image_v1"
+            or payload.get("coordinate_policy") != "exact_physical_pivots_v1"
+            or payload.get("certificate") != _GENERAL_PHYSICAL_CERTIFICATE
+            or core.get("core_schema") != "ye3t_tagged_cauchy_real_schedule_core_v1"
+            or core.get("coefficient_encoding") != "exact_algebraic_plus_binary64_v1"
+            or int(core.get("feature_count", -1)) != count
+            or not core.get("certificate", {}).get("passed")
+            or value.validation_report.get("passed") is not True):
+        raise ValueError("Unsupported or incomplete stored tagged compiler schedule.")
+    return True
 
 
 def _validate_general_certificate(value):
@@ -818,7 +949,7 @@ def _validate_general(value):
         else:
             try:
                 store.resolve("tagged_image_validation", "tagged_image_validation_v1",
-                    {"artifact": value.self_hash, "validator_revision": 1},
+                    {"artifact": value.self_hash, "validator_revision": 3},
                     builder=validate_once,
                     certificate={"passed": True, "checks": {"independent_replay": True}},
                     required_certificate_checks=("independent_replay",))
@@ -867,7 +998,20 @@ def _replay_general_artifact(value):
         raw_rows.append(rows[0])
     if set(parents) != set(payload["parent_artifacts"]):
         raise ValueError("General tagged parent inventory has unused artifacts.")
-    selected, reconstruction = _exact_pivot_image(raw_rows)
+    selected = tuple(payload["selected_raw_indices"])
+    reconstruction = []
+    for terms in payload["raw_from_image"]:
+        coordinates = {}
+        for term in terms:
+            index = term["feature_index"]
+            if index in coordinates:
+                raise ValueError("Physical-image reconstruction repeats a coefficient index.")
+            coordinates[index] = _exact_scalar_from_payload(term["coefficient"])
+        reconstruction.append(coordinates)
+    reconstruction = tuple(reconstruction)
+    canonical_selected, canonical_reconstruction = _exact_pivot_image(raw_rows)
+    if selected != canonical_selected or reconstruction != canonical_reconstruction:
+        raise ValueError("Exact physical-image reconstruction differs from canonical pivots.")
     expected = _general_payload(raw_rows, payload["raw_labels"], selected, reconstruction,
                                 payload["parent_artifacts"])
     if _freeze_json(payload) != _freeze_json(expected):

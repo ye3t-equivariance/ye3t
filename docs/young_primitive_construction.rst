@@ -487,6 +487,54 @@ message-passing workflows normally enter through higher-level helpers such as
 ``build_operator_ir`` in core or the ACE descriptor/message APIs in
 ``ye3t-methods`` (the separate application package).
 
+Selected physical source spaces
+-------------------------------
+
+The shared ``couplings.count``, ``couplings.plan`` and ``couplings.compile``
+interfaces accept ``family="carrier_subspace"``. Its ``full_path`` uses the
+same canonical construction nodes as carrier products. The first argument
+names the selected target; subsequent arguments name admitted fixed proper
+product images. These inputs retain the parent/intermediate selections and
+physical bindings that define the quotient. Learned parameters cannot define
+the admitted image.
+
+``count`` and ``plan`` return the independent target, primitive and decomposable
+copy counts, complete carrier layout, admitted routes and reduced product
+coordinates. Resolving that image uses existing reduced source/product maps;
+it does not materialize the selected complement or magnetic tensor states.
+An admitted image outside the target produces an error. The target is never
+silently enlarged or replaced by its projection onto an unrelated space.
+
+``compile`` supports ``subspace="full"``, ``"primitive"``, ``"decomposable"``
+and ``"split"``. Full preserves the original basis. Split places normalized
+primitive copies before normalized decomposable copies. Normalization reuses
+the established multiplicity-space complement in the canonical reduced
+physical-coordinate metric. This metric is independent of training samples.
+It is distinct from a fitted covariance or a training-matrix Gram matrix.
+
+If the coefficient embedding is U, the corresponding feature-value map is
+``U.T`` on the copy axis, with identity action on every tableau and magnetic
+component. The coefficient-space projector is ``U U.H G`` for target metric
+G; it is not the feature-value analysis map. Keeping both parts permits the
+original unrestricted target coefficients. Empty subspaces have zero reported
+copies and empty maps; the application must handle that inventory before
+allocating a carrier or weights.
+
+The same splitter consumes ordinary-density, shell, retained-tag and shared
+factor sources through existing physical-coordinate providers. Compatibility
+of physical bindings remains required. Explicitly bound graph requests test
+membership using their exact physical functions. A target pulled back faithfully
+from one independent-edge frame retains its established normalized-coordinate
+metric, including its original fixed-product gauge. Temporary polynomial rows
+establish equality and never supply a new metric. Target unions spanning distinct
+edge frames or dependent edge coordinates require an established joint/quotient
+metric and currently fail with an explanation. Exact reduced images and normalized
+copy maps have bounded in-process reuse.
+
+The application MP interface connects these maps through
+``representation.subspace_products``. Source selection, physical binding and
+calibration remain distinct steps, with complete components preserved.
+
 Examples
 --------
 

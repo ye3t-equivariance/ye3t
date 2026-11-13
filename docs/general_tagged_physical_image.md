@@ -73,7 +73,14 @@ the validated artifact and rehashes all artifact bytes before using a
 process-local validation cache. Version-3 N=4 orthonormal artifacts keep their
 version-3 interpretation.
 
-The loader accepts `compiler_validation="certificate"` to check the stored
+Production general-tagged cache and linear-model loading use
+`compiler_validation="integrity"`: stored identity, schema, coordinate policy,
+feature count and validation-record checks, with no exact coefficient or
+adjoint reconstruction. The complete stored identity includes labels and
+numerical schedules. This mode trusts the qualified compiler algorithm;
+digests detect corruption and do not authenticate authorship.
+
+For an explicit diagnostic, the loader accepts `compiler_validation="certificate"` to check the stored
 validation record without replaying the full physical-image calculation. The
 default `"full"` performs the exact replay described above. Certificate mode checks
 request/plan/certificate identities, source polynomial tables, real forms,
@@ -82,8 +89,10 @@ independently derived runtime adjoint. It does not reconstruct parent couplings,
 perform physical lowering or repeat the sparse independence calculation.
 Integrity hashes provide consistency checks. Use full mode to verify the
 artifact's algebraic claims by replay; a certificate-mode load leaves the
-full-replay cache empty. The application example exposes this choice for cache
-loads and model reloads. Compilation performs full validation before caching.
+full-replay cache empty. Direct `CompiledTaggedCauchyImage.from_dict` keeps its
+diagnostic `"full"` default; public linear loading selects `"integrity"`.
+Cold construction and explicit development diagnostics retain their existing
+mathematical qualification. `YE3T_CACHE_VERIFY=full` requests cache replay.
 
 Image reduction uses exact pivots and nullspaces for role and scalar-angular
 templates. The general workflow selects

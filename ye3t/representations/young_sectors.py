@@ -2740,6 +2740,16 @@ def young_resolved_primitive_quotient(
     factor_route_filter=None, factor_route_name=None, factor_scope="immediate",
     factor_route_policy="all", global_partition=None,
 ):
+    # TODO(YE3T_PRIMITIVE_SOURCE_IMAGE): Reconcile source-aware use with
+    # supplemental_10_9_26.tex, sec:supp_primitive_quotient and
+    # eq:supplowerrankproductmap. Carry the exact physical placement/evaluation
+    # map alongside complete channel content, retained child spaces, target
+    # (lambda,L), intermediate limits and full_path. The adapter must supply
+    # occurrence identities, role action and exact source relations to the
+    # canonical reduced-image planner; this abstract routine must not infer
+    # them from channel labels or sampled geometry. Preserve the distinction
+    # between complete and restricted product images. See workspace review
+    # FINAL_EXECUTION_GUIDE.md for the deferred integration and reference check.
     """Return the exact Young/SO(3)-resolved primitive quotient for one sector.
 
     The default quotient uses the canonical highest-weight basis of the joint

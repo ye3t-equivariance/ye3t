@@ -339,9 +339,10 @@ def test_numeric_projector_rank5_path_remains_available():
 
 
 @pytest.mark.slow
-def test_matrix_unit_subduction_is_isometric_and_deterministic_for_multiplicity_case():
+def test_legacy_matrix_unit_name_forwards_to_the_shared_isometric_split_constructor():
     sp = pytest.importorskip("sympy")
     from ye3t import Partition, subduction_from_matrix_units, validate_young_orthogonal_nary_subduction
+    from ye3t.exact_scalars import _exact_matrix_product
 
     factors = (Partition((2, 1)), Partition((2, 1)))
     target = Partition((3, 2, 1))
@@ -352,10 +353,10 @@ def test_matrix_unit_subduction_is_isometric_and_deterministic_for_multiplicity_
     coefficients = tensor.coefficient_matrix()
 
     assert tensor.coefficient_backend == "matrix_units"
-    assert tensor.codepath == "projector_first_matrix_units_exact"
+    assert tensor.codepath == "canonical_binary_split_composition_v3"
     assert tensor.multiplicity == 2
     assert report.passed is True
-    assert sp.simplify(coefficients.T * coefficients - sp.eye(coefficients.cols)) == sp.zeros(coefficients.cols)
+    assert _exact_matrix_product(coefficients.T, coefficients) == sp.eye(coefficients.cols)
     assert repeated.coefficient_matrix() == coefficients
 
 

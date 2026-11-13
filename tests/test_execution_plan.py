@@ -44,6 +44,41 @@ from ye3t.couplings import (
 pytestmark = pytest.mark.fast
 
 
+def test_shared_plan_hash_preserves_encoding_and_detects_mutation():
+    import hashlib
+    from ye3t.execution_plan import _canonical_payload
+
+    shared = {"channel": [1, 2, 3], "coefficient": 2 - 3j, "label": "κ"}
+    payload = {"first": shared, "again": (shared, shared),
+               "keys": {1: "integer", "1": "string"}, "zero": -0.0}
+    expected = hashlib.sha256(json.dumps(_canonical_payload(payload),
+        sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    assert _stable_hash(payload) == expected
+    shared["channel"][1] = 7
+    assert _stable_hash(payload) != expected
+    copied = _canonical_payload(payload)
+    copied["first"]["channel"][0] = 10
+    assert copied["again"][0]["channel"][0] == 1
+    assert shared["channel"][0] == 1
+
+
+def test_plan_hash_temporary_record_containers_keep_their_values():
+    import hashlib
+    from ye3t.execution_plan import _canonical_payload
+
+    class Record:
+        def __init__(self, value):
+            self.value = value
+
+        def to_dict(self):
+            return {"value": [self.value]}
+
+    payload = [Record(index) for index in range(200)]
+    expected = hashlib.sha256(json.dumps(_canonical_payload(payload),
+        sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    assert _stable_hash(payload) == expected
+
+
 def _channel_transform_certificate(information_claim="exact"):
     return {
         "domain_action": "S_N_x_O3_complete_carrier",

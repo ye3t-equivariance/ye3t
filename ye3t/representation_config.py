@@ -1,6 +1,7 @@
 """Rank-resolved public representation requests for compiler-backed catalogues."""
 
 from collections.abc import Mapping
+import json
 from numbers import Integral
 
 from ye3t._record import recordclass
@@ -46,6 +47,13 @@ def _rank_map(value, ranks, name, minimum):
     return tuple((rank, entries[rank]) for rank in ranks)
 
 
+def _bounded_rank_map(value, ranks, name, minimum):
+    entries = _rank_map(value, ranks, name, minimum)
+    if any(number > rank for rank, number in entries):
+        raise ValueError(f"{name} entries cannot exceed their factor rank.")
+    return entries
+
+
 def _partition(value, rank):
     if isinstance(value, (tuple, list)):
         value = "young:" + ",".join(str(_integer(part, "Young partition part")) for part in value)
@@ -60,7 +68,8 @@ def _partition(value, rank):
     (
         "group", "ranks", "parent_partitions", "L", "parity", "factorization",
         "subspace", "eta_count_per_rank", "l_max_per_rank", "young_kappa",
-        "block_rotation", "source_sectors", "hidden_sectors",
+        "block_rotation", "source_sectors", "hidden_sectors", "output_sectors", "subspace_products",
+        "eta_max_per_rank", "retained_max_per_rank",
     ),
     frozen=True,
 )
@@ -76,13 +85,17 @@ class YE3TRepresentation:
 
     source_sectors = None
     hidden_sectors = None
+    output_sectors = None
+    subspace_products = ()
+    eta_max_per_rank = None
+    retained_max_per_rank = None
 
     @classmethod
     def from_config(cls, config):
         """Validate the public representation section into immutable fields."""
         _keys(config, {
             "group", "ranks", "parent", "factorization", "subspace",
-            "uncoupled_factor_inputs", "intermediates", "source_sectors", "hidden_sectors",
+            "uncoupled_factor_inputs", "intermediates", "source_sectors", "hidden_sectors", "output_sectors", "subspace_products",
         }, "representation")
         group = str(config["group"])
         if group not in {"O3", "SO3"}:
@@ -121,8 +134,16 @@ class YE3TRepresentation:
             raise ValueError("representation.subspace must be full, primitive, or decomposable.")
 
         inputs = config["uncoupled_factor_inputs"]
-        _keys(inputs, {"eta_count_per_rank", "l_max_per_rank"}, "uncoupled_factor_inputs")
-        eta = _rank_map(inputs["eta_count_per_rank"], ranks, "eta_count_per_rank", 1)
+        _keys(inputs, {"eta_count_per_rank", "eta_max_per_rank", "retained_max_per_rank",
+                       "l_max_per_rank"}, "uncoupled_factor_inputs")
+        if "eta_count_per_rank" not in inputs and "eta_max_per_rank" not in inputs:
+            raise ValueError("uncoupled_factor_inputs requires eta_max_per_rank or legacy eta_count_per_rank.")
+        eta = (None if "eta_count_per_rank" not in inputs else
+               _rank_map(inputs["eta_count_per_rank"], ranks, "eta_count_per_rank", 1))
+        eta_max = (None if "eta_max_per_rank" not in inputs else
+                   _bounded_rank_map(inputs["eta_max_per_rank"], ranks, "eta_max_per_rank", 1))
+        retained_max = (None if "retained_max_per_rank" not in inputs else
+                        _bounded_rank_map(inputs["retained_max_per_rank"], ranks, "retained_max_per_rank", 0))
         angular = _rank_map(inputs["l_max_per_rank"], ranks, "l_max_per_rank", 0)
 
         intermediate = config.get("intermediates", {})
@@ -180,13 +201,41 @@ class YE3TRepresentation:
 
         from ye3t.couplings.sector_selection import normalize_sector_selection
         selections = []
-        for name in ("source_sectors", "hidden_sectors"):
+        for name in ("source_sectors", "hidden_sectors", "output_sectors"):
             selection = config.get(name)
             selections.append(None if selection is None else tuple(
                 (key, tuple(value) if isinstance(value, list) else value)
                 for key, value in normalize_sector_selection(selection).items()))
+        products = config.get("subspace_products", [])
+        if not isinstance(products, (tuple, list)):
+            raise ValueError("representation.subspace_products must list target source groups and admitted products")
+        normalized, targets = [], set()
+        for entry in products:
+            _keys(entry, {"target", "products"}, "representation.subspace_products entry")
+            target = entry.get("target")
+            if not isinstance(target, str) or not target or target in targets:
+                raise ValueError("subspace_products.target must be a unique nonempty compiler source-group ID")
+            targets.add(target)
+            routes = entry.get("products")
+            if not isinstance(routes, (tuple, list)):
+                raise ValueError("subspace_products.products must be a list (an empty list admits no products)")
+            parsed = []
+            for route in routes:
+                _keys(route, {"left", "right", "left_intermediates", "right_intermediates"}, "subspace_products product")
+                item = {}
+                for side in ("left", "right"):
+                    if not isinstance(route.get(side), str) or not route[side]:
+                        raise ValueError("subspace_products."+side+" must name a compiler source group")
+                    item[side] = route[side]
+                    field = side+"_intermediates"
+                    if field in route:
+                        restricted = dict(config, intermediates=route[field])
+                        restricted.pop("subspace_products", None)
+                        item[field] = cls.from_config(restricted).to_dict()["intermediates"]
+                parsed.append(item)
+            normalized.append(json.dumps(dict(target=target, products=parsed), sort_keys=True, allow_nan=False))
         return cls(group, ranks, partitions, L, parity, factorization, subspace,
-                   eta, angular, young, rotation, *selections)
+                   eta, angular, young, rotation, *selections, tuple(normalized), eta_max, retained_max)
 
     def select_source_inventory(self, inventory):
         """Inspect selected independent copies from a canonical source plan."""
@@ -244,17 +293,30 @@ class YE3TRepresentation:
     def count_fixed_content(self, content, input_Ls, *, carrier="external_tensor"):
         """Count a full fixed-content sector through the exact compiler API.
 
+        ``content`` supplies non-angular primitive identities, while
+        ``input_Ls`` supplies their angular types. Integer names of primitive
+        identities do not restrict the physical dictionary. The eta bound
+        counts distinct identities, including across different angular types.
+
         A symmetric parent on ordinary density or external factors restricts
         to symmetric repeated-content blocks, so ``symmetric_only`` selects
         the same complete space as ``all_valid`` for those carriers.
         This method does not materialize coupling coefficients.
         """
+        if self.subspace_products:
+            raise ValueError("subspace_products requires the source-group operation planner before counting selected targets")
         content = tuple(content)
         input_Ls = tuple(int(value) for value in input_Ls)
         rank = len(content)
         if len(input_Ls) != rank:
             raise ValueError("content and input_Ls must have the same rank.")
         partition = self.parent_partition(rank)
+        if (self.eta_max_per_rank is not None
+                and len(set(content)) > dict(self.eta_max_per_rank)[rank]):
+            raise ValueError(f"Fixed content exceeds eta_max_per_rank for rank {rank}.")
+        if (self.retained_max_per_rank is not None and carrier != "ACE_density"
+                and dict(self.retained_max_per_rank)[rank] < rank):
+            raise ValueError("A restricted retained_max_per_rank needs a source plan with explicit retained-role identities.")
         symmetric_blocks = (self.young_kappa[0] == "symmetric_only"
                             and partition == (rank,)
                             and carrier in {"ACE_density", "external_tensor"})
@@ -307,14 +369,19 @@ class YE3TRepresentation:
             "factorization": self.factorization,
             "subspace": self.subspace,
             "uncoupled_factor_inputs": {
-                "eta_count_per_rank": dict(self.eta_count_per_rank),
                 "l_max_per_rank": dict(self.l_max_per_rank),
             },
             "intermediates": {"young_kappa": young, "block_rotation": rotation},
         }
-        for name in ("source_sectors", "hidden_sectors"):
+        for name in ("eta_count_per_rank", "eta_max_per_rank", "retained_max_per_rank"):
+            entries = getattr(self, name)
+            if entries is not None:
+                result["uncoupled_factor_inputs"][name] = dict(entries)
+        for name in ("source_sectors", "hidden_sectors", "output_sectors"):
             selection = getattr(self, name)
             if selection is not None:
                 result[name] = {key: list(value) if isinstance(value, tuple) else value
                                 for key, value in selection}
+        if self.subspace_products:
+            result["subspace_products"] = [json.loads(value) for value in self.subspace_products]
         return result

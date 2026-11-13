@@ -441,49 +441,51 @@ def _angular_tree_coefficients(spins, intermediates, magnetic_M):
 @lru_cache(maxsize=8192)
 def _angular_block_recoupling(left_descriptor, right_descriptor, target_descriptor,
                               left_positions, right_positions, left_L, right_L, target_L):
-    """Contract the two child CG trees with the parent block-spin tree."""
+    """Overlap normalized child and parent trees in coupling-path coordinates.
 
+    Shared blocks keep two distinct child factors until their configured merge.
+    Reassociation and reordering reuse the shared angular constructor; there is
+    no expansion over all block magnetic quantum numbers or Gram solve.
+    """
+    from .young_angular_paths import (
+        _coupled_chain_paths, _coupled_path_columns, _permuted_chain_column, _inner)
     left_spins, _, left_intermediates = left_descriptor
     right_spins, _, right_intermediates = right_descriptor
     target_spins, _, target_intermediates = target_descriptor
-    target_vector = _angular_tree_coefficients(target_spins, target_intermediates, target_L)
+    left_path = (left_spins[0],)+tuple(left_intermediates)
+    right_path = (right_spins[0],)+tuple(right_intermediates)
+    if left_path[-1] != left_L or right_path[-1] != right_L:
+        raise ValueError("Child block tree endpoints differ from their selected angular momenta")
+    source = dict(_coupled_chain_paths(left_path, tuple(right_spins), right_path, target_L))
+    if not source:
+        return _sympy().S.Zero
     left_at = {position: index for index, position in enumerate(left_positions)}
     right_at = {position: index for index, position in enumerate(right_positions)}
-    total = ExactRadical.rational(0)
-    for left_M in range(-int(left_L), int(left_L) + 1):
-        right_M = int(target_L) - left_M
-        if abs(right_M) > int(right_L):
-            continue
-        outer = cg_exact(int(left_L), left_M, int(right_L), right_M,
-                         int(target_L), int(target_L))
-        if not outer:
-            continue
-        for left_magnetic, left_value in _angular_tree_coefficients(
-                left_spins, left_intermediates, left_M).items():
-            for right_magnetic, right_value in _angular_tree_coefficients(
-                    right_spins, right_intermediates, right_M).items():
-                parent_magnetic = []
-                coefficient = outer * left_value * right_value
-                for index, parent_spin in enumerate(target_spins):
-                    li, ri = left_at.get(index), right_at.get(index)
-                    if li is None:
-                        parent_magnetic.append(right_magnetic[ri])
-                    elif ri is None:
-                        parent_magnetic.append(left_magnetic[li])
-                    else:
-                        left_m, right_m = left_magnetic[li], right_magnetic[ri]
-                        coefficient *= cg_exact(
-                            int(left_spins[li]), left_m, int(right_spins[ri]), right_m,
-                            int(parent_spin), left_m + right_m,
-                        )
-                        parent_magnetic.append(left_m + right_m)
-                    if not coefficient:
-                        break
-                if coefficient:
-                    parent_value = target_vector.get(tuple(parent_magnetic))
-                    if parent_value is not None:
-                        total += coefficient * parent_value
-    return total._sympy_()
+    target, target_order, target_leaves = {}, [], []
+    for index, parent_spin in enumerate(target_spins):
+        li, ri = left_at.get(index), right_at.get(index)
+        labels = ([] if li is None else [li]) + ([] if ri is None else [len(left_spins)+ri])
+        leaves = tuple((left_spins+right_spins)[label] for label in labels)
+        if not leaves:
+            raise ValueError("Target block has no child factor")
+        if len(leaves) == 1:
+            if leaves[0] != parent_spin:
+                return _sympy().S.Zero
+            path = leaves
+        else:
+            if not abs(leaves[0]-leaves[1]) <= parent_spin <= sum(leaves):
+                return _sympy().S.Zero
+            path = (leaves[0], parent_spin)
+        column = ((path, ExactRadical.rational(1)),)
+        target = (dict(column) if index == 0 else _coupled_path_columns(
+            tuple(target.items()), column, leaves, target_intermediates[index-1]))
+        target_order.extend(labels)
+        target_leaves.extend(leaves)
+    if any(path[-1] != target_L for path in target):
+        raise ValueError("Parent block tree endpoint differs from its selected angular momentum")
+    order = tuple(target_order.index(i) for i in range(len(left_spins)+len(right_spins)))
+    target = _permuted_chain_column(target.items(), tuple(target_leaves), order)
+    return _inner(source, target)._sympy_()
 
 
 @lru_cache(maxsize=512)

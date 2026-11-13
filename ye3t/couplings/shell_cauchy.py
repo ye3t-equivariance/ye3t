@@ -48,6 +48,14 @@ def _request(value):
         if value["shell_role_action"] not in {"permutation", "fixed_channels"}:
             raise ValueError("shell_role_action must be permutation or fixed_channels")
         result["shell_role_action"] = value["shell_role_action"]
+    if "permuted_role_count" in value:
+        active = value["permuted_role_count"]
+        if type(active) is not int or not 1 <= active <= roles:
+            raise ValueError("permuted_role_count must be an integer between one and role_dimension")
+        if value.get("shell_role_action") == "fixed_channels":
+            raise ValueError("permuted_role_count requires a permutation action")
+        if active != roles:
+            result["permuted_role_count"] = active
     return result
 
 
@@ -97,39 +105,58 @@ def count_shell_cauchy(value):
 
 def shell_cauchy_candidates(request, rank):
     """Enumerate base channel contents; role weights resolve shell occupations."""
+    from .tagged_cauchy_carriers import _catalogue_eta_count
     cfg = request["catalogue"]
     plan = cfg["source_family_plan"]
-    roles = plan["shell_count"]
+    roles = plan.get("role_dimension", plan["shell_count"])
     occupations = cfg.get("shell_occupancies_by_rank", {}).get(str(rank))
     if occupations is None:
         occupations = tuple(tuple(word.count(role) for role in range(roles))
                             for word in combinations_with_replacement(range(roles), rank))
+    if "retained_max_per_rank" in cfg:
+        retained_limit = cfg["retained_max_per_rank"][str(rank)]
+        active = int(plan.get("permuted_role_count", plan["shell_count"]))
+        occupations = tuple(row for row in occupations
+                            if sum(value > 0 for value in row[:active]) <= retained_limit)
+        if not occupations:
+            return []
     channels = [{"neighbor_species": species, "radial_channel": radial, "l": ell,
                  "source_family_id": cfg["source_family_id"]}
                 for ell in range(cfg["lmax_per_rank"][str(rank)] + 1)
                 for radial in range(cfg["nmax_per_rank"][str(rank)]) for species in request["species"]]
+    explicit = cfg.get("source_contents_by_rank", {}).get(str(rank))
+    if explicit is not None:
+        if any(tuple(row["tag_counts"]) != (0,) for row in explicit):
+            raise ValueError("Formal shell contents use zero explicit tags")
+        contents = ((row["block_sizes"], row["channels"]) for row in explicit)
+    else:
+        contents = ((pattern, tuple(channels[index] for index in indices))
+            for pattern in cfg["source_block_partitions_by_rank"][str(rank)]
+            for indices in permutations(range(len(channels)), len(pattern))
+            if not any(pattern[a] == pattern[b] and indices[a] > indices[b]
+                       for a in range(len(pattern)) for b in range(a + 1, len(pattern))))
     records = []
-    for pattern in cfg["source_block_partitions_by_rank"][str(rank)]:
-        for indices in permutations(range(len(channels)), len(pattern)):
-            if any(pattern[a] == pattern[b] and indices[a] > indices[b]
-                   for a in range(len(pattern)) for b in range(a + 1, len(pattern))):
-                continue
-            selected = tuple(channels[index] for index in indices)
-            for L in range(cfg["input_Lmax"] + 1):
-                coupling = covariant_cauchy_request(selected, pattern, target_L=L,
-                    role_dimension=roles, role_occupations=occupations, kappa_policy=cfg.get("kappa_policy", "all"))
-                fixed = _request({"coupling_request": coupling, "radial_count": plan["radial_count"],
-                    **({"shell_role_action": cfg["shell_role_action"]} if "shell_role_action" in cfg else {})})
-                if count_shell_cauchy(fixed)["multiplet_count"]:
-                    records.append({"rank": rank, "pattern": pattern,
-                        "max_primitive_l": max(channel["l"] for channel in selected), "request": fixed})
+    for pattern, selected in contents:
+        if ("eta_max_per_rank" in cfg and _catalogue_eta_count(selected, cfg)
+                > cfg["eta_max_per_rank"][str(rank)]):
+            continue
+        for L in range(cfg["input_Lmax"] + 1):
+            coupling = covariant_cauchy_request(selected, pattern, target_L=L,
+                role_dimension=roles, role_occupations=occupations, kappa_policy=cfg.get("kappa_policy", "all"),
+                angular_basis_backend=cfg.get("angular_basis_backend", "exact_weight_space_v1"))
+            fixed = _request({"coupling_request": coupling, "radial_count": plan["radial_count"],
+                **({"permuted_role_count": plan["permuted_role_count"]} if plan.get("include_background") else {}),
+                **({"shell_role_action": cfg["shell_role_action"]} if "shell_role_action" in cfg else {})})
+            if count_shell_cauchy(fixed)["multiplet_count"]:
+                records.append({"rank": rank, "pattern": pattern,
+                    "max_primitive_l": max(channel["l"] for channel in selected), "request": fixed})
     return records
 
 
-def compile_shell_cauchy(value, *, _block_templates=None):
+def compile_shell_cauchy(value, *, _block_templates=None, cache_dir=None):
     """Reuse complete source maps across catalogues through the shared store."""
     request = _request(value)
-    store = YE3TArtifactStore()
+    store = YE3TArtifactStore(directory=cache_dir) if cache_dir else YE3TArtifactStore()
     result = store.resolve("shell_cauchy_source", SCHEMA, request,
         builder=lambda: _compile_shell_cauchy(request, _block_templates=_block_templates),
         validator=lambda payload: validate_shell_cauchy(payload,
@@ -137,12 +164,29 @@ def compile_shell_cauchy(value, *, _block_templates=None):
         certificate={"passed": True, "checks": {"complete_source": True}},
         required_certificate_checks=("complete_source",),
         producer={"compiler_revision": 1, "convention": COVARIANT_CAUCHY_CONVENTION})
-    return scalar._freeze_json(result["payload"])
+    # resolve() returns an isolated decoded tree, including on memory-cache
+    # hits. Consume it here to avoid duplicating every coefficient dictionary.
+    return scalar._freeze_json(result["payload"], consume=True)
 
 
 def _compile_shell_cauchy(value, *, _block_templates=None):
     report = count_shell_cauchy(value)
     request = report["request"]
+    if (request.get("shell_role_action") == "permutation" and
+            request["coupling_request"].get("angular_basis_backend") == "normalized_cg_paths_v1"):
+        from .factorized_shell import _compile_factorized_shell_source
+
+        schedule = _compile_factorized_shell_source(request)
+        payload = {"schema": "ye3t_formal_shell_cauchy_paths_v1", "request": request,
+            "descriptors": tuple({"label": row["label"]} for row in schedule["inventory"]),
+            "factorized_schedule": schedule, "multiplet_count": report["multiplet_count"],
+            "component_count": report["component_count"],
+            "validation_report": {"passed": True, "complete_multiplets": True,
+                "tag_swap": "exact_polynomial_identity",
+                "shell_role_action": "exact_Young_generator_covariance",
+                "coefficient_source": "shared_normalized_Young_and_CG_paths"}}
+        payload["self_hash"] = scalar._stable_record_hash(payload)
+        return payload
     if request.get("shell_role_action") == "permutation":
         from .shell_role_restriction import compile_shell_role_rows, shell_role_inventory
         base_request = {key: value for key, value in request.items()
@@ -155,7 +199,8 @@ def _compile_shell_cauchy(value, *, _block_templates=None):
                        for coordinate in family["input_coordinates"])
         base_payload = compile_shell_cauchy({**base_request, "selected_coordinates": needed}, _block_templates=_block_templates)
         templates = {} if _block_templates is None else _block_templates.setdefault("shell_role_rows", {})
-        descriptors = compile_shell_role_rows(base_payload, base_report, selected, _role_templates=templates)
+        descriptors = compile_shell_role_rows(base_payload, base_report, selected,
+            _role_templates=templates, _consume_source=True)
         payload = {"schema": SCHEMA, "request": request, "descriptors": descriptors,
             "multiplet_count": len(descriptors), "component_count": report["component_count"],
             "coupling_hash": base_payload["self_hash"],
@@ -164,13 +209,14 @@ def _compile_shell_cauchy(value, *, _block_templates=None):
                 "tag_swap": "exact_polynomial_identity",
                 "shell_role_action": "exact_Young_generator_covariance",
                 "counting": "Schur_trace_restriction_to_shell_permutations",
-                "physical_action": "shell_roles:S" + str(request["coupling_request"]["role_dimension"])}}
+                "physical_action": "shell_roles:S" + str(request.get("permuted_role_count", request["coupling_request"]["role_dimension"]))}}
         del base_payload
         payload["self_hash"] = scalar._stable_record_hash(payload)
         return payload
     selected = {label["descriptor_index"]: label for label in report["labels"]}
     coupling_request = {**request["coupling_request"], "selected_multiplicities": tuple(sorted(selected))}
-    compiled = compile_covariant_cauchy(coupling_request, _block_templates=_block_templates)
+    compiled = compile_covariant_cauchy(coupling_request, _block_templates=_block_templates,
+                                      _source_rows_only=True)
     roles = request["coupling_request"]["role_dimension"]
     descriptors = []
     for descriptor in compiled["descriptors"]:
@@ -193,6 +239,13 @@ def _compile_shell_cauchy(value, *, _block_templates=None):
             "counting": "kostka_weight_times_angular_multiplicity",
             "physical_action": "ordinary_density:S0"}}
     del compiled
+    if _block_templates is not None:
+        # Exact source rows now own all coefficients used at runtime. Release
+        # the larger carrier workspaces before artifact serialization; later
+        # source requests can reuse their persistent canonical templates.
+        for key in tuple(_block_templates):
+            if key != "shell_role_rows":
+                del _block_templates[key]
     payload["self_hash"] = scalar._stable_record_hash(payload)
     return payload
 
@@ -206,6 +259,16 @@ def validate_shell_cauchy(payload, *, exact_reconstruction=False):
         raise ValueError("Formal shell source labels differ from the independent plan")
     if not payload["validation_report"]["passed"]:
         raise ValueError("Formal shell source validation failed")
+    if "factorized_schedule" in payload:
+        schedule = payload["factorized_schedule"]
+        if (scalar._stable_record_hash({key: value for key, value in schedule.items() if key != "self_hash"})
+                != schedule.get("self_hash") or schedule["output_dimension"] != report["component_count"]):
+            raise ValueError("Shell shared schedule has invalid identity or output axes")
+        if exact_reconstruction:
+            expected = _compile_shell_cauchy(report["request"])
+            if expected["self_hash"] != payload["self_hash"]:
+                raise ValueError("Shell shared coefficient reconstruction differs")
+        return True
     for descriptor in payload["descriptors"]:
         label = descriptor["label"]
         if len(descriptor["real_terms_by_component"]) != label.get("shell_tableau_count", 1) * (2 * label["target_L"] + 1):
@@ -213,7 +276,7 @@ def validate_shell_cauchy(payload, *, exact_reconstruction=False):
         for component in descriptor["real_terms_by_component"]:
             for term in component["terms"]:
                 if "shell_role_degree" in label:
-                    degree = label["shell_role_degree"]
+                    degree = label.get("role_dimension", label["shell_role_degree"])
                     content = Counter(channel // degree for channel, _, _ in term["coordinates"])
                     expected = Counter(dict(enumerate(label["block_sizes"])))
                     if content != expected or any(role != 0 for _, role, _ in term["coordinates"]):
@@ -227,6 +290,15 @@ def validate_shell_cauchy(payload, *, exact_reconstruction=False):
                     expected[channel] += item["count"]
                 if content != expected or any(role != 0 for _, role, _ in term["coordinates"]):
                     raise ValueError("Formal shell coefficient changes its physical occupation")
-    if exact_reconstruction and _compile_shell_cauchy(report["request"])["self_hash"] != payload["self_hash"]:
-        raise ValueError("Formal shell exact coefficient reconstruction differs")
+    if exact_reconstruction:
+        reconstructed = _compile_shell_cauchy(report["request"])
+        # Upstream hashes identify the stored coupling representation, including
+        # optional ordered reference words. Compare every exact physical map,
+        # label, request and convention across those storage variants. The
+        # original complete payload hash has already been checked above.
+        storage_hashes = {"self_hash", "coupling_hash"}
+        actual = {key: value for key, value in payload.items() if key not in storage_hashes}
+        expected = {key: value for key, value in reconstructed.items() if key not in storage_hashes}
+        if scalar._stable_record_hash(actual) != scalar._stable_record_hash(expected):
+            raise ValueError("Formal shell exact coefficient reconstruction differs")
     return True

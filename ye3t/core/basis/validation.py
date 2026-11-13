@@ -9,6 +9,7 @@ checks are cheap and help fail early on impossible inputs.
 from itertools import combinations_with_replacement
 from collections import Counter
 from math import comb, factorial
+from numbers import Integral
 
 from .characters import cg_allowed
 
@@ -65,15 +66,21 @@ def iter_canonical_leaf_labelings(
     n_values,
     l_values,
     multiplicity_partitions=None,
+    *, eta_max=None,
 ):
     """Enumerate unique canonical leaf labelings under the ``l``-first convention.
 
     ``multiplicity_partitions`` restricts the multiplicities of identical
     ``(n, l)`` pairs.  This bounded route generates only the requested content
     patterns and does not first materialize every rank-``N`` multiset.
+    ``eta_max`` bounds distinct non-angular ``n`` identities across all
+    angular types, while every supplied physical ``n`` remains available.
     """
+    eta_max = _validate_eta_max(eta_max, rank)
     n_values = tuple(int(n) for n in n_values)
     l_values = tuple(int(l) for l in l_values)
+    if eta_max is not None and eta_max >= min(int(rank), len(set(n_values))):
+        eta_max = None
     pair_values = tuple(
         sorted({(n, l) for n in n_values for l in l_values})
     )
@@ -105,6 +112,9 @@ def iter_canonical_leaf_labelings(
             for pair_index in range(lower, len(pair_values)):
                 if pair_index in used:
                     continue
+                if (eta_max is not None and len({pair_values[index][0] for index in selected}
+                                               | {pair_values[pair_index][0]}) > eta_max):
+                    continue
                 used.add(pair_index)
                 selected.append(pair_index)
                 yield from extend(
@@ -121,7 +131,19 @@ def iter_canonical_leaf_labelings(
         return
     seen = set()
     items = []
-    for pair_multiset in combinations_with_replacement(pair_values, int(rank)):
+    def bounded_multisets(lower, selected, identities):
+        if len(selected) == int(rank):
+            yield tuple(selected)
+            return
+        for index in range(lower, len(pair_values)):
+            pair = pair_values[index]
+            selected_identities = identities | {pair[0]}
+            if len(selected_identities) <= eta_max:
+                yield from bounded_multisets(index, selected + [pair], selected_identities)
+
+    multisets = (combinations_with_replacement(pair_values, int(rank)) if eta_max is None
+                 else bounded_multisets(0, [], set()))
+    for pair_multiset in multisets:
         canonical = canonicalize_leaf_quantum_numbers(
             tuple(n for n, _ in pair_multiset),
             tuple(l for _, l in pair_multiset),
@@ -132,6 +154,16 @@ def iter_canonical_leaf_labelings(
         items.append(canonical)
     for item in sorted(items, key=lambda value: (value[1], value[0])):
         yield item
+
+
+def _validate_eta_max(value, rank):
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, Integral):
+        raise TypeError("eta_max must be an integer or None.")
+    if not 1 <= value <= int(rank):
+        raise ValueError("eta_max must lie in 1..rank.")
+    return int(value)
 
 
 def _normalize_leaf_multiplicity_partitions(rank, partitions):
@@ -159,12 +191,14 @@ def count_canonical_leaf_labelings(
     n_values,
     l_values,
     multiplicity_partitions=None,
+    *, eta_max=None,
 ):
     """Count canonical leaf labelings without materializing their tuples."""
 
     rank = int(rank)
     if rank <= 0:
         raise ValueError("rank must be positive.")
+    eta_max = _validate_eta_max(eta_max, rank)
     n_values = tuple(int(n) for n in n_values)
     l_values = tuple(int(l) for l in l_values)
     pair_count = len(
@@ -176,6 +210,30 @@ def count_canonical_leaf_labelings(
     )
     if pair_count == 0:
         return 0
+    if eta_max is not None and eta_max < min(rank, len(set(n_values))):
+        partitions = (None if multiplicity_partitions is None else
+                      _normalize_leaf_multiplicity_partitions(rank, multiplicity_partitions))
+        total = 0
+        # Choose occupied primitive identities, then exclude assignments
+        # missing any chosen identity. Angular types stay independent.
+        for occupied in range(1, eta_max + 1):
+            onto = 0
+            for missing in range(occupied):
+                available_pairs = (occupied - missing) * len(set(l_values))
+                if partitions is None:
+                    assignments = comb(available_pairs + rank - 1, rank)
+                else:
+                    assignments = 0
+                    for partition in partitions:
+                        if len(partition) > available_pairs:
+                            continue
+                        ways = factorial(available_pairs) // factorial(available_pairs - len(partition))
+                        for repeats in Counter(partition).values():
+                            ways //= factorial(repeats)
+                        assignments += ways
+                onto += (-1) ** missing * comb(occupied, missing) * assignments
+            total += comb(len(set(n_values)), occupied) * onto
+        return int(total)
     if multiplicity_partitions is None:
         return comb(pair_count + rank - 1, rank)
     total = 0

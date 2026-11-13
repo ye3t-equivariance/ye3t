@@ -41,7 +41,11 @@ below), reducing each candidate word to ``|class|`` matrix-vector products of
 size ``f`` instead of ``size!`` terms.
 """
 
+from collections import OrderedDict
+from functools import lru_cache
 from math import factorial
+
+from ye3t.exact_scalars import exact_scalar
 
 from .projectors import adjacent_transposition_representation_matrix_native, permute_state_slots
 
@@ -279,19 +283,104 @@ def class_projected_row(w0, word, dimension, generators, class_stabilizer):
 
 def selected_unit_column(dimension, size, class_words, w0, word, generators, class_stabilizer):
     """All tableau components of one matrix-unit column by vector transport."""
+    initial = class_projected_row(w0, word, dimension, generators, class_stabilizer)
+    return _unit_column_from_projected_row(dimension, size, class_words, w0, initial, generators)
+
+
+def _unit_column_from_projected_row(dimension, size, class_words, w0, initial, generators):
+    """Transport one selected linear combination of projected source rows.
+
+    Linearity in D_word[0,:]S permits angular-copy selection before expanding
+    all tableau components. This uses exactly the same coset representatives.
+    Matrix-unit multiplication follows matrix-element orthogonality; see
+    Etingof et al., Introduction to Representation Theory, Proposition 4.7.1.
+    The implementation distributes the existing exact coset sum linearly.
+    """
     sp = _sympy()
-    initial = class_projected_row(w0, word, dimension, generators, class_stabilizer).T
-    prefactor = sp.Rational(int(dimension), factorial(int(size)))
+    initial = tuple(exact_scalar(value) for value in initial)
+    if len(initial) != int(dimension):
+        raise ValueError("Projected source row has the wrong Young dimension.")
+    prefactor = exact_scalar(sp.Rational(int(dimension), factorial(int(size))))
     full = {tableau: {} for tableau in range(int(dimension))}
+    if not any(initial):
+        return full
+    # The Young-orthogonal generators contain real exact radicals. Execute the
+    # same adjacent-generator products in that existing scalar field, visiting
+    # only nonzero entries. Convert to SymPy once per distinct output scalar.
+    # Generator conventions, representative paths and normalization are unchanged.
+    rows = tuple(tuple(tuple((j, exact_scalar(matrix[i, j]))
+        for j in range(int(dimension)) if matrix[i, j] != 0)
+        for i in range(int(dimension))) for matrix in generators)
+    zero = exact_scalar(0)
+
+    @lru_cache(maxsize=4096)
+    def scalar_row(terms):
+        # These exact scalars are local immutable operands of this transport.
+        # Repeated rows share arithmetic, including across different prefixes.
+        return sum((left * right for left, right in terms), zero)
+
+    converted = {}
+    prefixes = OrderedDict()
     for index, target in enumerate(class_words):
         column = initial
+        prefix = ()
         for adjacent in _word_adjacent_path(w0, target):
-            column = generators[adjacent] * column
+            prefix += (adjacent,)
+            if prefix in prefixes:
+                column = prefixes[prefix]
+                prefixes.move_to_end(prefix)
+            else:
+                column = tuple(scalar_row(tuple((value, column[j]) for j, value in row if column[j]))
+                               for row in rows[adjacent])
+                # Reuse only identical generator sequences. The bounded cache
+                # changes neither the representative path nor its exact action.
+                prefixes[prefix] = column
+                if len(prefixes) > 256:
+                    prefixes.popitem(last=False)
         for tableau in range(int(dimension)):
-            value = sp.simplify(prefactor * column[tableau])
-            if value != 0:
-                full[tableau][index] = value
+            value = prefactor * column[tableau]
+            if value:
+                if value not in converted:
+                    converted[value] = value._sympy_()
+                full[tableau][index] = converted[value]
     return full
+
+
+def _reference_unit_columns(dimension, size, class_words, w0, projected_rows, generators):
+    """Only E00 for selected pivots, before resolving angular multiplicities.
+
+    The existing coset formula gives E00[v,w] = d/N! times
+    (D_w[0,:]S) dot D_v[0,:]. Compute D_v's reference row once per target.
+    No full tableau-valued pivot columns or square word matrices are formed.
+    """
+    sp = _sympy()
+    zero, one = exact_scalar(0), exact_scalar(1)
+    prefactor = exact_scalar(sp.Rational(int(dimension), factorial(int(size))))
+    sources = tuple(tuple(exact_scalar(value) for value in row) for row in projected_rows)
+    rows = tuple(tuple(tuple((j, exact_scalar(matrix[i, j]))
+        for j in range(int(dimension)) if matrix[i, j] != 0)
+        for i in range(int(dimension))) for matrix in generators)
+
+    @lru_cache(maxsize=4096)
+    def dot(terms):
+        return sum((a*b for a,b in terms), zero)
+
+    result = tuple({} for _ in sources)
+    converted = {}
+    for index, target in enumerate(class_words):
+        row = (one,)+(zero,)*(int(dimension)-1)
+        # Adjacent generators are symmetric. Reverse path order gives the
+        # same reference row as class_projected_row before multiplying by S.
+        for adjacent in reversed(_word_adjacent_path(w0, target)):
+            row = tuple(dot(tuple((value,row[j]) for j,value in entries if row[j]))
+                        for entries in rows[adjacent])
+        for column, source in zip(result, sources, strict=True):
+            value = prefactor*dot(tuple((a,b) for a,b in zip(source,row,strict=True) if a and b))
+            if value:
+                if value not in converted:
+                    converted[value] = value._sympy_()
+                column[index] = converted[value]
+    return result
 
 
 def class_pivot_indices(dimension, class_words, class_dmap, class_stabilizer, target_count, *, row_for_word=None):

@@ -25,7 +25,7 @@ from threading import RLock
 
 from ye3t._record import recordclass
 from ye3t.cache.artifacts import YE3TArtifactStore, artifact_hash
-from ye3t.exact_scalars import ExactRadical, exact_scalar
+from ye3t.exact_scalars import ExactRadical, exact_scalar, _exact_matrix_product as _metric_product
 from ye3t.representations.builder import (
     GeneralizedExactSymbolicLabeler,
     _exact_single_factor_scalar_vectors,
@@ -85,6 +85,13 @@ LIFTED_CAUCHY_PARENT_PREFIX_GAUGE = (
 )
 LIFTED_CAUCHY_BLOCK_CACHE_SCHEMA = "ye3t_lifted_cauchy_block_template_cache_v1"
 LIFTED_CAUCHY_OUTER_CACHE_SCHEMA = "ye3t_lifted_cauchy_outer_template_cache_v1"
+_LOADED_PAYLOAD_VALIDATOR_REVISION = 1
+_VALIDATED_LOADED_SCALARS = OrderedDict()
+_VALIDATED_CARRIERS = OrderedDict()
+_COMPUTED_CARRIER_GRAMS = OrderedDict()
+_COMPUTED_METRIC_DUALS = OrderedDict()
+_LOADED_VALIDATION_LOCK = RLock()
+_LOADED_VALIDATION_LIMIT = 8192
 
 _FORBIDDEN_CHANNEL_KEYS = {
     "role",
@@ -100,14 +107,20 @@ def _sympy():
     return sp
 
 
+_CANONICAL_JSON_ENCODER = json.JSONEncoder(
+    sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
+
+
 def _stable_json(payload):
-    return json.dumps(
-        payload,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-        allow_nan=False,
-    )
+    # Encoding creates its traversal state per call. Reuse only the fixed
+    # options, never a payload, traversal marker or previously encoded value.
+    return _CANONICAL_JSON_ENCODER.encode(payload)
+
+
+@lru_cache(maxsize=1024)
+def _encoded_short_field(name):
+    """Reuse bounded schema-field encodings without retaining source records."""
+    return _stable_json(name).encode("utf-8")
 
 
 def _stable_hash(payload):
@@ -115,32 +128,51 @@ def _stable_hash(payload):
 
 
 def _stable_record_hash(payload):
-    """Hash canonical compiler JSON with one descriptor-sized temporary.
+    """Hash canonical compiler JSON with one sequence-entry-sized temporary.
 
     Preserve exactly _stable_hash(_freeze_json(payload)). Large source and
     descriptor collections are traversed without copying the entire artifact.
     """
     digest = hashlib.sha256()
-    record_fields = {"sources", "descriptors", "block_templates", "outer_templates"}
+    monomial_fields = {"coordinates", "coefficient", "occupation", "orbit_size",
+        "degree_factorial", "occupation_factorial_product", "lower_degree_occupations",
+        "normalized_coefficient_semantics", "raw_coefficient_semantics"}
 
     def write_record(record):
+        if ("coordinates" in record and "coefficient" in record
+                and record.keys() <= monomial_fields
+                and isinstance(record["coordinates"], (tuple, list))):
+            # Encode one exact monomial at once. Enclosing source/descriptor
+            # collections remain streamed with unchanged canonical bytes.
+            digest.update(_stable_json(_freeze_json(record)).encode("utf-8"))
+            return
         fields = {str(key): value for key, value in record.items()}
         digest.update(b"{")
         for index, name in enumerate(sorted(fields)):
             if index:
                 digest.update(b",")
-            digest.update(_stable_json(name).encode("utf-8"))
+            digest.update(_encoded_short_field(name) if len(name) <= 128 else
+                          _stable_json(name).encode("utf-8"))
             digest.update(b":")
             value = fields[name]
-            if name in record_fields and isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+            if isinstance(value, Mapping):
+                write_record(value)
+            elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
                 digest.update(b"[")
-                for item_index, item in enumerate(value):
+                # enumerate retains its previous (index, item) tuple while
+                # advancing a lazy source iterator. Index directly so only
+                # one decoded source is resident during hashing.
+                for item_index in range(len(value)):
+                    item = value[item_index]
                     if item_index:
                         digest.update(b",")
                     if isinstance(item, Mapping):
                         write_record(item)
                     else:
                         digest.update(_stable_json(_freeze_json(item)).encode("utf-8"))
+                    # Lazy source sequences may decode gigabyte-scale entries.
+                    # Drop this entry before asking the iterator for the next.
+                    del item
                 digest.update(b"]")
             else:
                 digest.update(_stable_json(_freeze_json(value)).encode("utf-8"))
@@ -157,12 +189,27 @@ def _stable_record_hash(payload):
 _JSON_SCALAR_TYPES = (str, int, float, bool, type(None))
 
 
-def _freeze_json(value):
+def _freeze_json(value, *, consume=False):
+    """Normalize JSON containers, optionally consuming a caller-owned tree.
+
+    ``consume`` is only for exclusive payloads returned by the artifact store.
+    It reuses dictionaries and replaces list children as they are processed,
+    releasing old containers before proceeding. Default calls preserve their
+    input, including mappings shared with other compiler structures.
+    """
     # Most leaves are built-in JSON scalars. Avoid an abstract Mapping check
     # for every coefficient/exponent in large compiled catalogues.
     kind = type(value)
     if kind in _JSON_SCALAR_TYPES:
         return value
+    if consume and kind is dict and all(type(key) is str for key in value):
+        for key in value:
+            value[key] = _freeze_json(value[key], consume=True)
+        return value
+    if consume and kind is list:
+        for index in range(len(value)):
+            value[index] = _freeze_json(value[index], consume=True)
+        return tuple(value)
     if kind is dict:
         return {str(key): _freeze_json(item) for key, item in value.items()}
     if isinstance(value, (tuple, list)):
@@ -193,7 +240,16 @@ def _simplified_scalar_cached(value):
     # Repeated exact coefficients dominate shell-source serialization profiles.
     # SymPy scalars are immutable; cache their simplification, while every
     # serialized dictionary below remains a fresh object.
-    return _sympy().simplify(value)
+    sp = _sympy()
+    # Compiler real constants have an exact radical normal form. This avoids
+    # generic symbolic searches during repeated coefficient multiplication
+    # and serialization. Floats retain the established symbolic behavior.
+    if value.is_real is True and not value.has(sp.Float):
+        try:
+            return exact_scalar(value)._sympy_()
+        except (TypeError, ValueError):
+            pass
+    return sp.simplify(value)
 
 
 def _simplified_scalar(value):
@@ -201,37 +257,18 @@ def _simplified_scalar(value):
 
 
 def _exact_component_payload(value):
+    from ye3t.exact_scalars import _radical_component_payload
     component = (
         value
         if isinstance(value, ExactRadical)
         else exact_scalar(_simplified_scalar(value))
     )
-    return tuple(
-        {
-            "radicand_numerator": int(radicand.numerator),
-            "radicand_denominator": int(radicand.denominator),
-            "coefficient_numerator": int(coefficient.numerator),
-            "coefficient_denominator": int(coefficient.denominator),
-        }
-        for radicand, coefficient in component.terms.items()
-    )
+    return _radical_component_payload(component)
 
 
 def _exact_component_from_payload(payload):
-    from fractions import Fraction
-
-    terms = {}
-    for item in payload:
-        radicand = Fraction(
-            int(item["radicand_numerator"]),
-            int(item["radicand_denominator"]),
-        )
-        coefficient = Fraction(
-            int(item["coefficient_numerator"]),
-            int(item["coefficient_denominator"]),
-        )
-        terms[radicand] = coefficient
-    return ExactRadical(terms)
+    from ye3t.exact_scalars import _radical_component_from_payload
+    return _radical_component_from_payload(payload)
 
 
 def _exact_scalar_payload(value):
@@ -261,6 +298,21 @@ def _exact_sympy_scalar_payload_cached(value):
 
 
 def _exact_scalar_from_payload(payload):
+    fields = ("radicand_numerator", "radicand_denominator",
+              "coefficient_numerator", "coefficient_denominator")
+    key = tuple(tuple(tuple(int(item[name]) for name in fields)
+                      for item in payload.get(part, ())) for part in ("real", "imag"))
+    return _exact_scalar_from_key(key)
+
+
+@lru_cache(maxsize=16384)
+def _exact_scalar_from_key(key):
+    # Decoded SymPy scalars are immutable; key construction observes mutations
+    # of every exact coefficient field in the caller's payload.
+    fields = ("radicand_numerator", "radicand_denominator",
+              "coefficient_numerator", "coefficient_denominator")
+    payload = {part: tuple(dict(zip(fields, item)) for item in terms)
+               for part, terms in zip(("real", "imag"), key)}
     real = _exact_component_from_payload(payload.get("real", ()))
     imag = _exact_component_from_payload(payload.get("imag", ()))
     return real._sympy_() + _sympy().I * imag._sympy_()
@@ -277,14 +329,15 @@ def _real_float_from_exact_payload(payload):
 
 @lru_cache(maxsize=4096)
 def _real_float_from_exact_key(key):
-    fields = ("radicand_numerator", "radicand_denominator",
-              "coefficient_numerator", "coefficient_denominator")
-    payload = {part: tuple(dict(zip(fields, item)) for item in terms)
-               for part, terms in zip(("real", "imag"), key)}
-    return float(_exact_scalar_from_payload(payload))
+    return float(_exact_scalar_from_key(key))
 
 
-def _exact_matrix_payload(matrix):
+def _exact_matrix_payload(matrix, *, sparse=False):
+    if sparse:
+        matrix = _sympy().SparseMatrix(matrix)
+        return {"shape": tuple(matrix.shape), "entries": tuple(
+            (row, column, _exact_scalar_payload(value))
+            for (row, column), value in sorted(matrix.todok().items()))}
     matrix = _sympy().Matrix(matrix)
     return tuple(
         tuple(
@@ -296,6 +349,22 @@ def _exact_matrix_payload(matrix):
 
 
 def _exact_matrix_from_payload(payload):
+    if isinstance(payload, dict):
+        if set(payload) != {"shape", "entries"}:
+            raise ValueError("Sparse exact matrix payload has unknown fields.")
+        shape = tuple(payload["shape"])
+        if (len(shape) != 2 or any(not isinstance(size, int) or isinstance(size, bool)
+                                  or size < 0 for size in shape)):
+            raise ValueError("Sparse exact matrix payload has invalid dimensions.")
+        entries = {}
+        for row, column, coefficient in payload["entries"]:
+            if (not isinstance(row, int) or isinstance(row, bool)
+                    or not isinstance(column, int) or isinstance(column, bool)
+                    or not 0 <= row < shape[0] or not 0 <= column < shape[1]
+                    or (row, column) in entries):
+                raise ValueError("Sparse exact matrix payload has invalid or duplicate indices.")
+            entries[row, column] = _exact_scalar_from_payload(coefficient)
+        return _sympy().SparseMatrix(*shape, entries)
     rows = tuple(tuple(row) for row in payload)
     if not rows:
         return _sympy().zeros(0, 0)
@@ -319,25 +388,8 @@ def _real_form_matrix(angular_l):
     ``ye3t.core.tesseral``; no external source code is adapted.
     """
 
-    sp = _sympy()
-    angular_l = int(angular_l)
-    width = 2 * angular_l + 1
-    matrix = sp.zeros(width, width)
-    matrix[angular_l, angular_l] = 1
-    inverse_sqrt_two = 1 / sp.sqrt(2)
-    for magnetic in range(1, angular_l + 1):
-        cosine = angular_l - magnetic
-        sine = angular_l + magnetic
-        negative = angular_l - magnetic
-        positive = angular_l + magnetic
-        phase = (-1) ** magnetic
-        matrix[negative, cosine] = inverse_sqrt_two
-        matrix[negative, sine] = sp.I * inverse_sqrt_two
-        matrix[positive, cosine] = phase * inverse_sqrt_two
-        matrix[positive, sine] = -sp.I * phase * inverse_sqrt_two
-    if sp.simplify(matrix.conjugate().T * matrix) != sp.eye(width):
-        raise RuntimeError("Tesseral real-form map is not exactly unitary.")
-    return matrix
+    from ye3t.core.tesseral import _exact_real_form_matrix
+    return _exact_real_form_matrix(angular_l)
 
 
 def _real_coordinate_order(angular_l):
@@ -1677,7 +1729,7 @@ class CompiledLiftedCauchyScalar:
             validation_report=_freeze_json(plan_payload["validation_report"]),
             provenance=_freeze_json(plan_payload["provenance"]),
         )
-        _validate_compiled_payload(plan, payload["payload"])
+        _validate_loaded_payload(plan, payload["payload"], expected)
         compiled = cls(
             plan=plan,
             payload=_freeze_json(payload["payload"]),
@@ -1687,6 +1739,35 @@ class CompiledLiftedCauchyScalar:
         )
         _validate_lifted_cauchy_identity(compiled)
         return compiled
+
+
+def _validate_loaded_payload(plan, payload, artifact_digest):
+    """Reuse exact parent checks across catalogues within this process.
+
+    The caller checks the complete artifact digest before this function. Keep
+    the validator revision in sync with changes to the independent checks.
+    Whole-model validation uses the shared persistent cache. Keeping parent
+    checks in memory avoids thousands of small validation-record files.
+    Full verification remains available through the common cache settings.
+    """
+    # Reuse the common policy parser, without probing packaged disk overlays.
+    store = YE3TArtifactStore(overlays=())
+
+    if store.verify == "full" or store.mode in {"off", "rebuild"}:
+        _validate_compiled_payload(plan, payload)
+        return
+    key = (_LOADED_PAYLOAD_VALIDATOR_REVISION, artifact_digest)
+    with _LOADED_VALIDATION_LOCK:
+        if key in _VALIDATED_LOADED_SCALARS:
+            _VALIDATED_LOADED_SCALARS.move_to_end(key)
+            return
+    _validate_compiled_payload(plan, payload)
+    # The caller rechecks current artifact content on every load. Store only
+    # completed semantic checks, independent of caller-owned mutable objects.
+    with _LOADED_VALIDATION_LOCK:
+        _VALIDATED_LOADED_SCALARS[key] = True
+        if len(_VALIDATED_LOADED_SCALARS) > _LOADED_VALIDATION_LIMIT:
+            _VALIDATED_LOADED_SCALARS.popitem(last=False)
 
 
 def _validate_normalized_request_payload(request):
@@ -1950,7 +2031,7 @@ def _validate_lifted_cauchy_identity(value, verify_resources=True):
 def _validate_hash_record(payload, hash_key, label):
     payload = dict(payload)
     expected = str(payload.pop(hash_key, ""))
-    actual = _stable_hash(_freeze_json(payload))
+    actual = _stable_record_hash(payload)
     if not expected or expected != actual:
         raise ValueError(f"Lifted-Cauchy {label} hash mismatch.")
 
@@ -4074,39 +4155,84 @@ def _raw_permutation_matrix(states, permutation):
     return sp.SparseMatrix(len(states), len(states), entries)
 
 
+@lru_cache(maxsize=32)
+def _adjacent_permutation_rows(states, factor_count, adjacent):
+    """Rows of P*B for an adjacent factor swap, without a square matrix.
+
+    An adjacent transposition is its own inverse, so its state action gives
+    the input row for every output row. This is the same gather already used
+    to determine the restricted carrier actions.
+    """
+    state_index = {state: index for index, state in enumerate(states)}
+    permutation = list(range(factor_count))
+    permutation[adjacent], permutation[adjacent + 1] = (
+        permutation[adjacent + 1], permutation[adjacent])
+    factors = tuple(range(factor_count))
+    return tuple(state_index[permute_state_slots(state, factors, tuple(permutation))]
+                 for state in states)
+
+
+def _sparse_carrier_columns(vectors):
+    """Assemble exact columns once, avoiding successive copies of the prefix."""
+    sp = _sympy()
+    rows, count, entries = None, 0, {}
+    for column, vector in enumerate(vectors):
+        if rows is None:
+            rows = vector.rows
+        if vector.shape != (rows, 1):
+            raise ValueError("Carrier vectors must have a common row count and one column.")
+        storage = vector._rep.to_sparse()
+        convert = storage.domain.to_sympy
+        for row, values in storage.rep.items():
+            for _local_column, value in values.items():
+                entries[row, column] = convert(value)
+        count += 1
+    return sp.SparseMatrix(0 if rows is None else rows, count, entries)
+
+
 def _restricted_carrier_actions(states, vectors, factor_count):
     sp = _sympy()
     states = tuple(tuple(int(value) for value in state) for state in states)
-    state_index = {state: index for index, state in enumerate(states)}
-    factors = tuple(range(int(factor_count)))
-    basis = sp.Matrix.hstack(*tuple(sp.Matrix(vector) for vector in vectors))
-    _reduced, pivot_rows = basis.T.rref()
+    basis = _sparse_carrier_columns(vectors)
+    # Exact algebraic elimination retains the same canonical pivot rows while
+    # avoiding generic symbolic elimination over the full raw state space.
+    candidate_rows = sorted({row for row, column in basis.todok()})
+    columns = tuple(range(basis.cols))
+    prefix_size = min(len(candidate_rows), max(32, 2 * basis.cols))
+    while True:
+        # Once a prefix contains a full set of independent columns, later
+        # columns cannot change its canonical pivots. Expand the prefix when
+        # needed; exact elimination and the subsequent full action checks
+        # retain the original independence and intertwining requirements.
+        # Establish the exact field only on this prefix. Converting the full
+        # raw carrier first creates a large unused algebraic matrix.
+        transpose_domain = basis.extract(candidate_rows[:prefix_size], columns).T.to_DM(extension=True)
+        _reduced, pivots = transpose_domain.rref()
+        if len(pivots) == basis.cols or prefix_size == len(candidate_rows):
+            pivot_rows = tuple(candidate_rows[index] for index in pivots)
+            break
+        prefix_size = min(2 * prefix_size, len(candidate_rows))
     if len(pivot_rows) != basis.cols:
         raise RuntimeError("Carrier basis columns are not independent.")
     pivot_rows = tuple(int(value) for value in pivot_rows)
-    columns = tuple(range(basis.cols))
     pivot_inverse = sp.simplify(
-        basis.extract(pivot_rows, columns).inv()
+        # Reuse the exact algebraic field already established for pivoting.
+        # Generic symbolic elimination can be costly for mixed-Young carriers.
+        transpose_domain.extract(columns, pivots).transpose().to_field().inv().to_Matrix()
     )
+    del transpose_domain, _reduced
     actions = []
+    exact_rows = (_exact_sparse_rows(basis)
+                  if basis.rows * basis.cols > _DENSE_CARRIER_ENTRY_LIMIT else None)
     for adjacent in range(int(factor_count) - 1):
-        permutation = list(range(int(factor_count)))
-        permutation[adjacent], permutation[adjacent + 1] = (
-            permutation[adjacent + 1],
-            permutation[adjacent],
-        )
         # Adjacent transpositions are their own inverses. Gather the rows of
         # P*basis directly, avoiding a square raw-space permutation matrix.
         # Sparse/dense symbolic multiplication can densify that matrix.
-        rows = tuple(state_index[permute_state_slots(state, factors, tuple(permutation))]
-                     for state in states)
-        transformed = basis.extract(rows, columns)
-        action = sp.simplify(
-            pivot_inverse * transformed.extract(pivot_rows, columns)
-        )
-        if sp.simplify(transformed - basis * action) != sp.zeros(
-            len(states), basis.cols
-        ):
+        rows = _adjacent_permutation_rows(states, int(factor_count), adjacent)
+        transformed_pivots = basis.extract(tuple(rows[row] for row in pivot_rows), columns)
+        from ye3t.exact_scalars import _exact_matrix_product
+        action = _exact_matrix_product(pivot_inverse, transformed_pivots)
+        if not _carrier_action_matches(basis, rows, action, _source_rows=exact_rows):
             raise RuntimeError("Carrier basis is not closed under factor permutations.")
         actions.append(action)
     return tuple(actions)
@@ -4180,42 +4306,245 @@ def _carrier_payload(states, coordinate_order, vectors, copy_keys, factor_count,
     )
 
 
-def _dense_carrier_payload(states, coordinate_order, vectors, copy_keys, factor_count, kind):
-    """Whole-state carrier construction: used for angular carriers.
+_DENSE_CARRIER_ENTRY_LIMIT = 65536
+
+
+def _exact_carrier_gram(basis):
+    """Complete Hermitian Gram, reusing repeated real-radical products."""
+    sp = _sympy()
+    # Even a small complete high-L multiplet can contain many unrelated
+    # radicals. A common algebraic field can then be much more expensive than
+    # these direct products, so use the radical path for small matrices too.
+    if basis.rows and basis.cols:
+        entries = basis.todok()
+        values = tuple(dict.fromkeys(entries.values()))
+        try:
+            # ExactRadical represents real square-root extensions. Other
+            # fields use symbolic multiplication below. Never approximate
+            # floating-point inputs through its rational conversion helper.
+            if any(value.has(sp.Float) for value in values):
+                raise TypeError("Floating-point coefficient requires its original domain.")
+            radicals = tuple(exact_scalar(value) for value in values)
+        except (TypeError, ValueError):
+            pass
+        else:
+            indices = {value: index for index, value in enumerate(values)}
+            columns = [{} for _ in range(basis.cols)]
+            for (row, column), value in entries.items():
+                columns[column][row] = indices[value]
+
+            # Construction and subsequent payload validation use the same
+            # complete matrix. Bind reuse to every current nonzero coefficient,
+            # shape and position; never infer equality from a stored Gram/hash.
+            # Cache only bounded exact inputs/results. There is no serialization
+            # or cryptographic digest for this transient algebraic operation.
+            store = YE3TArtifactStore(overlays=())
+            cache_key = None
+            if (basis.cols <= 256 and len(entries) <= 32768 and store.verify != "full"
+                    and store.mode not in {"off", "rebuild"}):
+                cache_key = sp.ImmutableSparseMatrix(basis)
+                with _LOADED_VALIDATION_LOCK:
+                    cached = _COMPUTED_CARRIER_GRAMS.get(cache_key)
+                    if cached is not None:
+                        _COMPUTED_CARRIER_GRAMS.move_to_end(cache_key)
+                        return sp.Matrix(cached)
+
+            @lru_cache(maxsize=16384)
+            def coefficient_product(left, right):
+                return radicals[left] * radicals[right]
+
+            result = sp.zeros(basis.cols)
+            for left, first in enumerate(columns):
+                for right in range(left, basis.cols):
+                    second = columns[right]
+                    counts = Counter((value, second[row]) for row, value in first.items()
+                                     if row in second)
+                    # Products already have normalized square-free radicands.
+                    # Integer repetition changes only their rational weights.
+                    terms = {}
+                    for (a, b), count in counts.items():
+                        for radicand, coefficient in coefficient_product(a, b)._canonical_terms().items():
+                            terms[radicand] = terms.get(radicand, 0) + coefficient * count
+                    value = ExactRadical._from_normalized_terms(terms)
+                    result[left, right] = result[right, left] = value._sympy_()
+            if cache_key is not None:
+                with _LOADED_VALIDATION_LOCK:
+                    _COMPUTED_CARRIER_GRAMS[cache_key] = sp.ImmutableMatrix(result)
+                    _COMPUTED_CARRIER_GRAMS.move_to_end(cache_key)
+                    if len(_COMPUTED_CARRIER_GRAMS) > 8:
+                        _COMPUTED_CARRIER_GRAMS.popitem(last=False)
+            return result
+    return sp.simplify(basis.conjugate().T * basis)
+
+
+def _exact_sparse_rows(matrix):
+    """Prepare exact rows once for all generators acting on one local basis."""
+    sp = _sympy()
+    storage = matrix._rep.to_sparse()
+    convert = storage.domain.to_sympy
+    scalars, rows = {}, {}
+    try:
+        for row, entries in storage.rep.items():
+            target = rows.setdefault(row, {})
+            for column, item in entries.items():
+                value = convert(item)
+                if value not in scalars:
+                    if value.has(sp.Float):
+                        return None
+                    scalars[value] = exact_scalar(value)
+                target[column] = scalars[value]
+    except (TypeError, ValueError):
+        return None
+    return rows
+
+
+def _carrier_action_matches(basis, rows, action, *, _source_rows=None):
+    """Check every permuted row, reusing exact sparse coefficient products."""
+    sp = _sympy()
+    if action.shape != (basis.cols, basis.cols) or len(rows) != basis.rows:
+        return False
+    if basis.rows * basis.cols > _DENSE_CARRIER_ENTRY_LIMIT:
+        source_rows = _exact_sparse_rows(basis) if _source_rows is None else _source_rows
+        action_rows = _exact_sparse_rows(action)
+        if source_rows is not None and action_rows is not None:
+
+            @lru_cache(maxsize=16384)
+            def multiply(left, right):
+                return left * right
+
+            @lru_cache(maxsize=4096)
+            def apply_row(row):
+                output = {}
+                for inner, value in row:
+                    for column, weight in action_rows.get(inner, {}).items():
+                        terms = output.setdefault(column, {})
+                        for root, coefficient in multiply(value, weight)._canonical_terms().items():
+                            terms[root] = terms.get(root, 0) + coefficient
+                return {column: ExactRadical._from_normalized_terms(terms)
+                        for column, terms in output.items() if any(terms.values())}
+
+            for row, permuted in enumerate(rows):
+                if not 0 <= permuted < basis.rows:
+                    return False
+                source = source_rows.get(row, {})
+                expected = source_rows.get(permuted, {})
+                if not source and not expected:
+                    continue
+                actual = apply_row(tuple(sorted(source.items())))
+                if actual != expected:
+                    return False
+            return True
+    transformed = basis.extract(rows, tuple(range(basis.cols)))
+    return sp.simplify(transformed - basis * sp.SparseMatrix(action)) == sp.zeros(*basis.shape)
+
+
+def _carrier_gram_from_checked_actions(basis, columns, actions, *, reference_basis=None):
+    """Recover the complete Gram from fully checked irreducible actions.
+
+    P B_a = B_a D_a implies D_a^T G_ab D_b = G_ab for real actions.
+    The existing diagonal-pairing proof verifies a one-dimensional invariant
+    space with J[0,0]=1. Thus G_ab = <B_a[:,0],B_b[:,0]> J, including every
+    cross-copy entry. If uniqueness or the real diagonal gauge is unavailable,
+    return None so the caller uses the direct complete Gram.
+
+    Algorithm: Schur's lemma plus the existing Young--Jucys--Murphy uniqueness
+    test; see _diagonal_carrier_pairing, Vershik--Okounkov (2005), Sections
+    3, 6, 7, and Etingof et al., Corollary 2.3.10. Independent implementation.
+    Full verification still forms B.H B.
+    """
+    sp = _sympy()
+    if not columns or not actions[0] or len({len(group) for group in columns}) != 1:
+        return None
+    dimension = len(columns[0])
+    if dimension <= 1:
+        return None
+    transposed = tuple(tuple(sp.ImmutableMatrix(action.T) for action in copy)
+                       for copy in actions)
+    pairings = {}
+    for left in range(len(columns)):
+        for right in range(left, len(columns)):
+            key = transposed[left], transposed[right]
+            if key not in pairings:
+                pairing = _diagonal_carrier_pairing(*key)
+                if pairing is None or pairing[0, 0] != 1:
+                    return None
+                pairings[key] = pairing
+    references = (basis.extract(range(basis.rows), tuple(group[0] for group in columns))
+                  if reference_basis is None else reference_basis)
+    reference_gram = _exact_carrier_gram(references)
+    column_count = basis.cols if basis is not None else sum(map(len, columns))
+    gram = sp.SparseMatrix(column_count, column_count, {})
+    for left, first in enumerate(columns):
+        for right in range(left, len(columns)):
+            pairing = pairings[(transposed[left], transposed[right])]
+            scale = reference_gram[left, right]
+            for (row, column), value in pairing.todok().items():
+                value = _simplified_scalar(scale*value)
+                gram[first[row], columns[right][column]] = value
+                gram[columns[right][column], first[row]] = sp.conjugate(value)
+    return gram
+
+
+def _dense_carrier_payload(states, coordinate_order, vectors, copy_keys, factor_count, kind,
+                           indexed_sparse=False):
+    """Whole-state indexing with sparse storage for large angular carriers.
 
     Angular carrier vectors are graded by total magnetic number (the sum of
     the per-slot magnetic quantum numbers), not by the role content-class
-    equivalence that holds for role words specifically, so this operates on
-    the full state list. ``states``/``coordinate_order``/``copy_keys``/
+    equivalence that holds for role words specifically. The current payload
+    uses the full state list even when construction used restricted weight
+    spaces. ``states``/``coordinate_order``/``copy_keys``/
     ``factor_count`` are already normalized by ``_carrier_payload``.
+
+    TODO: retain compact magnetic-weight indexing through payload assembly,
+    permutation actions and validation. Preserve the existing selected copy
+    gauge and reconstruct physical magnetic words at the polynomial boundary.
+    This removes unused rows; reducing nonzero coefficient storage further
+    requires retaining factorized maps through that boundary.
     """
 
     sp = _sympy()
-    basis = sp.Matrix.hstack(*tuple(sp.Matrix(vectors[key]) for key in coordinate_order))
-    gram = sp.simplify(basis.conjugate().T * basis)
+    if len(set(coordinate_order)) != len(coordinate_order) or len({key for key, _ in copy_keys}) != len(copy_keys):
+        raise ValueError("Carrier coordinates and copy keys must be unique.")
+    matrix = sp.SparseMatrix if len(states) * len(coordinate_order) > _DENSE_CARRIER_ENTRY_LIMIT else sp.Matrix
+    coordinate_index = {key: index for index, key in enumerate(coordinate_order)}
     copy_records = []
     full_actions = []
+    copy_columns = []
     for copy_key, keys in copy_keys:
-        local_vectors = tuple(sp.Matrix(vectors[key]) for key in keys)
-        local_basis = sp.Matrix.hstack(*local_vectors)
-        local_gram = sp.simplify(local_basis.conjugate().T * local_basis)
-        actions = _restricted_carrier_actions(states, local_vectors, factor_count)
+        columns = tuple(coordinate_index[key] for key in keys)
+        actions = getattr(vectors, '_checked_actions', {}).get(tuple(keys))
+        if actions is None:
+            local_vectors = tuple(vectors[key] for key in keys)
+            actions = _restricted_carrier_actions(states, local_vectors, factor_count)
+            del local_vectors
         _check_coxeter_actions(actions)
-        for adjacent, action in enumerate(actions):
-            raw = _raw_permutation_matrix(
-                states,
-                tuple(
-                    index + 1 if index == adjacent else adjacent
-                    if index == adjacent + 1
-                    else index
-                    for index in range(int(factor_count))
-                ),
-            )
-            if sp.simplify(raw * local_basis - local_basis * action) != sp.zeros(
-                len(states), local_basis.cols
-            ):
-                raise RuntimeError("Carrier action does not intertwine its exact basis.")
-            if sp.simplify(action.conjugate().T * local_gram * action - local_gram) != sp.zeros(
+        full_actions.append(actions)
+        copy_columns.append(columns)
+    # Avoid retaining the full concatenated basis while recovering each
+    # copy's actions; that recovery already works directly from its vectors.
+    basis, gram = None, None
+    if indexed_sparse:
+        # The checked irreducible actions determine every cross-copy Gram
+        # block from its reference-tableau inner product. Keep just these
+        # columns together, and serialize the other checked columns directly.
+        references = _sparse_carrier_columns(vectors[keys[0]] for _, keys in copy_keys)
+        gram = _carrier_gram_from_checked_actions(None, copy_columns, full_actions,
+                                                  reference_basis=references)
+        del references
+    if gram is None:
+        basis = (_sparse_carrier_columns(vectors[key] for key in coordinate_order)
+                 if matrix is sp.SparseMatrix else
+                 matrix.hstack(*tuple(matrix(vectors[key]) for key in coordinate_order)))
+        gram = _carrier_gram_from_checked_actions(basis, copy_columns, full_actions)
+    if gram is None:
+        gram = _exact_carrier_gram(basis)
+    for (copy_key, keys), columns, actions in zip(copy_keys, copy_columns, full_actions, strict=True):
+        local_gram = gram.extract(columns, columns)
+        # The action builder checks complete local intertwining. Ordered
+        # concatenation below then gives the complete block-diagonal action.
+        for action in actions:
+            if _metric_product(action.conjugate().T, _metric_product(local_gram, action)) - local_gram != sp.zeros(
                 local_gram.rows, local_gram.cols
             ):
                 raise RuntimeError("Carrier action does not preserve its exact Gram metric.")
@@ -4229,34 +4558,24 @@ def _dense_carrier_payload(states, coordinate_order, vectors, copy_keys, factor_
                 ),
             }
         )
-        full_actions.append(actions)
+    if tuple(key for _copy, keys in copy_keys for key in keys) != tuple(coordinate_order):
+        raise ValueError("Carrier copy ordering differs from its basis columns.")
+    # P B_c = B_c D_c for every complete copy implies
+    # P [B_1 ... B_m] = [B_1 ... B_m] diag(D_1,...,D_m).
+    # Retain the full Gram check, including all cross-copy entries.
     for adjacent in range(max(int(factor_count) - 1, 0)):
         action = _block_diagonal(
             tuple(actions[adjacent] for actions in full_actions)
         )
-        raw = _raw_permutation_matrix(
-            states,
-            tuple(
-                index + 1 if index == adjacent else adjacent
-                if index == adjacent + 1
-                else index
-                for index in range(int(factor_count))
-            ),
-        )
-        if sp.simplify(raw * basis - basis * action) != sp.zeros(
-            len(states), basis.cols
-        ):
-            raise RuntimeError("Full carrier basis fails exact permutation intertwining.")
-        if sp.simplify(action.conjugate().T * gram * action - gram) != sp.zeros(
-            gram.rows, gram.cols
-        ):
+        action = sp.SparseMatrix(action)
+        residual = action.conjugate().T * sp.SparseMatrix(gram) * action - sp.SparseMatrix(gram)
+        if any(_simplified_scalar(value) != 0 for value in residual.todok().values()):
             raise RuntimeError("Full carrier Gram is not permutation invariant.")
     payload = {
         "kind": str(kind),
         "state_order": states,
         "coordinate_order": coordinate_order,
-        "basis_columns": _exact_matrix_payload(basis),
-        "gram": _exact_matrix_payload(gram),
+        "gram": _exact_matrix_payload(gram, sparse=indexed_sparse),
         "copy_records": tuple(copy_records),
         "factor_count": int(factor_count),
         "validation": {
@@ -4266,7 +4585,65 @@ def _dense_carrier_payload(states, coordinate_order, vectors, copy_keys, factor_
             "cross_copy_gram_retained": True,
         },
     }
-    payload["carrier_hash"] = _stable_hash(_freeze_json(payload))
+    def ordered_entries():
+        # Canonical column/row order without a second whole-carrier dictionary
+        # and a sorted list of all nonzeros. At most one column is materialized.
+        for column, key in enumerate(coordinate_order):
+            storage = vectors[key]._rep.to_sparse()
+            convert = storage.domain.to_sympy
+            for row in sorted(storage.rep):
+                yield (row, column), convert(storage.rep[row][0])
+
+    if indexed_sparse or len(states) * len(coordinate_order) > _DENSE_CARRIER_ENTRY_LIMIT:
+        if indexed_sparse:
+            payload["storage"] = "indexed_sparse"
+            scalar_indices, row_indices, column_indices, coefficients = [], [], [], {}
+            for (row, column), value in ordered_entries():
+                if value != 0:
+                    row_indices.append(int(row))
+                    column_indices.append(int(column))
+                    scalar_indices.append(coefficients.setdefault(value, len(coefficients)))
+            payload["basis_columns_indexed"] = dict(rows=row_indices, columns=column_indices,
+                scalar_indices=scalar_indices,
+                scalars=tuple(_exact_scalar_payload(value) for value in coefficients))
+        else:
+            payload["storage"] = "sparse"
+            payload["basis_columns_sparse"] = tuple(
+                (int(row), int(column), _exact_scalar_payload(value))
+                for (row, column), value in ordered_entries() if value != 0)
+    else:
+        payload["basis_columns"] = _exact_matrix_payload(basis)
+    # The complete exact action/metric checks above precede serialization.
+    # Verify every serialized basis coefficient and every small proof matrix
+    # against those checked objects before reusing that result. Hash validation
+    # subsequently binds reuse to the current payload; full mode replays all
+    # independent semantic checks. No mutable basis matrix is cached.
+    if payload.get("storage") in {"sparse", "indexed_sparse"}:
+        encoded = iter(_carrier_sparse_entries(payload))
+        for (row, column), value in ordered_entries():
+            if value == 0:
+                continue
+            record = next(encoded, None)
+            if (record is None or (record[0], record[1]) != (row, column)
+                    or _exact_scalar_from_payload(record[2]) != value):
+                raise ArithmeticError("Serialized carrier basis differs from its checked coefficients.")
+        if next(encoded, None) is not None:
+            raise ArithmeticError("Serialized carrier basis contains unexpected coefficients.")
+    elif _exact_matrix_from_payload(payload["basis_columns"]) != basis:
+        raise ArithmeticError("Serialized carrier basis differs from its checked coefficients.")
+    if _exact_matrix_from_payload(payload["gram"]) != gram:
+        raise ArithmeticError("Serialized carrier Gram differs from its checked metric.")
+    checked_actions, checked_grams = {}, {}
+    for record, actions in zip(copy_records, full_actions, strict=True):
+        key = tuple(record["copy_key"])
+        columns = tuple(coordinate_index[tuple(coordinate)] for coordinate in record["coordinate_order"])
+        local_gram = gram.extract(columns, columns)
+        encoded_actions = tuple(_exact_matrix_from_payload(value) for value in record["adjacent_actions"])
+        if encoded_actions != actions or _exact_matrix_from_payload(record["gram"]) != local_gram:
+            raise ArithmeticError("Serialized carrier action or metric differs from its checked value.")
+        checked_actions[key], checked_grams[key] = actions, local_gram
+    payload["carrier_hash"] = _stable_record_hash(payload)
+    _remember_carrier_validation(payload["carrier_hash"], checked_actions, checked_grams)
     return payload
 
 
@@ -4288,6 +4665,10 @@ def _role_carrier_payload(states, coordinate_order, vectors, copy_keys, factor_c
     """
 
     sp = _sympy()
+    if (len(set(coordinate_order)) != len(coordinate_order)
+            or len({key for key, _ in copy_keys}) != len(copy_keys)
+            or tuple(key for _, keys in copy_keys for key in keys) != tuple(coordinate_order)):
+        raise ValueError("Role carrier copy coordinates must be unique and ordered.")
     global_index = {state: index for index, state in enumerate(states)}
 
     class_states = {}
@@ -4326,23 +4707,6 @@ def _role_carrier_payload(states, coordinate_order, vectors, copy_keys, factor_c
                 restricted[class_local_index[states[row]], 0] = value
         return restricted
 
-    raw_action_cache = {}
-
-    def raw_actions_for_class(key):
-        if key not in raw_action_cache:
-            members = class_states[key]
-            built = []
-            for adjacent in range(max(factor_count - 1, 0)):
-                permutation = tuple(
-                    index + 1 if index == adjacent else adjacent
-                    if index == adjacent + 1
-                    else index
-                    for index in range(factor_count)
-                )
-                built.append(_raw_permutation_matrix(members, permutation))
-            raw_action_cache[key] = tuple(built)
-        return raw_action_cache[key]
-
     copy_records = []
     full_actions = []
     copy_class_key = []
@@ -4360,17 +4724,17 @@ def _role_carrier_payload(states, coordinate_order, vectors, copy_keys, factor_c
                 )
             local_vectors.append(restrict_to_class(vector, class_key))
         local_basis = sp.Matrix.hstack(*local_vectors)
-        local_gram = sp.simplify(local_basis.conjugate().T * local_basis)
         actions = _restricted_carrier_actions(members, local_vectors, factor_count)
         _check_coxeter_actions(actions)
-        class_raw = raw_actions_for_class(class_key)
+        local_gram = _carrier_gram_from_checked_actions(
+            local_basis, (tuple(range(local_basis.cols)),), (actions,))
+        if local_gram is None:
+            local_gram = _exact_carrier_gram(local_basis)
         for adjacent, action in enumerate(actions):
-            raw = class_raw[adjacent]
-            if sp.simplify(raw * local_basis - local_basis * action) != sp.zeros(
-                len(members), local_basis.cols
-            ):
+            rows = _adjacent_permutation_rows(members, factor_count, adjacent)
+            if not _carrier_action_matches(local_basis, rows, action):
                 raise RuntimeError("Carrier action does not intertwine its exact basis.")
-            if sp.simplify(action.conjugate().T * local_gram * action - local_gram) != sp.zeros(
+            if _metric_product(action.conjugate().T, _metric_product(local_gram, action)) - local_gram != sp.zeros(
                 local_gram.rows, local_gram.cols
             ):
                 raise RuntimeError("Carrier action does not preserve its exact Gram metric.")
@@ -4400,7 +4764,15 @@ def _role_carrier_payload(states, coordinate_order, vectors, copy_keys, factor_c
         group_basis = sp.Matrix.hstack(
             *(copy_local_basis[position] for position in positions)
         )
-        group_gram = sp.simplify(group_basis.conjugate().T * group_basis)
+        group_offsets = [0]
+        for position in positions:
+            group_offsets.append(group_offsets[-1] + copy_local_basis[position].cols)
+        local_columns = tuple(tuple(range(begin, end))
+                              for begin, end in zip(group_offsets[:-1], group_offsets[1:]))
+        group_gram = _carrier_gram_from_checked_actions(group_basis, local_columns,
+            tuple(full_actions[position] for position in positions))
+        if group_gram is None:
+            group_gram = _exact_carrier_gram(group_basis)
         group_columns = tuple(
             coordinate_index[key]
             for position in positions
@@ -4409,19 +4781,19 @@ def _role_carrier_payload(states, coordinate_order, vectors, copy_keys, factor_c
         for row_offset, row_index in enumerate(group_columns):
             for column_offset, column_index in enumerate(group_columns):
                 gram[row_index, column_index] = group_gram[row_offset, column_offset]
-        class_raw = raw_actions_for_class(class_key)
+        exact_rows = (_exact_sparse_rows(group_basis)
+                      if group_basis.rows * group_basis.cols > _DENSE_CARRIER_ENTRY_LIMIT else None)
         for adjacent in range(max(factor_count - 1, 0)):
-            action = _block_diagonal(
+            action = sp.SparseMatrix(_block_diagonal(
                 tuple(full_actions[position][adjacent] for position in positions)
-            )
-            raw = class_raw[adjacent]
-            if sp.simplify(raw * group_basis - group_basis * action) != sp.zeros(
-                len(members), group_basis.cols
-            ):
+            ))
+            rows = _adjacent_permutation_rows(members, factor_count, adjacent)
+            # Keep the complete cross-copy identity while reusing the exact
+            # sparse row checker used for angular carriers and restricted actions.
+            if not _carrier_action_matches(group_basis, rows, action, _source_rows=exact_rows):
                 raise RuntimeError("Full carrier basis fails exact permutation intertwining.")
-            if sp.simplify(
-                action.conjugate().T * group_gram * action - group_gram
-            ) != sp.zeros(group_gram.rows, group_gram.cols):
+            if (_metric_product(action.conjugate().T, _metric_product(group_gram, action))
+                    - group_gram != sp.zeros(group_gram.rows, group_gram.cols)):
                 raise RuntimeError("Full carrier Gram is not permutation invariant.")
 
     role_dimension = 1 + max(
@@ -4468,35 +4840,142 @@ def _role_carrier_payload(states, coordinate_order, vectors, copy_keys, factor_c
         "metric_invariance_exact": True,
         "cross_copy_gram_retained": True,
     }
-    payload["carrier_hash"] = _stable_hash(_freeze_json(payload))
+    # Construction checked every action, complete Gram and cross-copy block.
+    # Bind that work to the emitted exact coefficients, as for angular maps,
+    # rather than rebuilding the same carrier during containing-block checks.
+    if role_dimension >= 3:
+        encoded = iter(payload["basis_columns_sparse"])
+        for position, (_, keys) in enumerate(copy_keys):
+            local_basis = copy_local_basis[position]
+            members = class_states[copy_class_key[position]]
+            for column, key in enumerate(keys):
+                for row in range(local_basis.rows):
+                    value = local_basis[row, column]
+                    if value == 0:
+                        continue
+                    record = next(encoded, None)
+                    if (record is None or tuple(record[:2]) != (global_index[members[row]], coordinate_index[key])
+                            or _exact_scalar_from_payload(record[2]) != value):
+                        raise ArithmeticError("Serialized role basis differs from its checked coefficients.")
+        if next(encoded, None) is not None:
+            raise ArithmeticError("Serialized role basis has unexpected coefficients.")
+    elif _exact_matrix_from_payload(payload["basis_columns"]) != basis:
+        raise ArithmeticError("Serialized role basis differs from its checked coefficients.")
+    if _exact_matrix_from_payload(payload["gram"]) != gram:
+        raise ArithmeticError("Serialized role Gram differs from its checked metric.")
+    checked_actions, checked_grams = {}, {}
+    for record, actions in zip(copy_records, full_actions, strict=True):
+        key = tuple(record["copy_key"])
+        columns = tuple(coordinate_index[coordinate] for coordinate in record["coordinate_order"])
+        local_gram = gram.extract(columns, columns)
+        if (tuple(_exact_matrix_from_payload(value) for value in record["adjacent_actions"]) != actions
+                or _exact_matrix_from_payload(record["gram"]) != local_gram):
+            raise ArithmeticError("Serialized role action or metric differs from its checked value.")
+        checked_actions[key], checked_grams[key] = actions, local_gram
+    payload["carrier_hash"] = _stable_record_hash(payload)
+    _remember_carrier_validation(payload["carrier_hash"], checked_actions, checked_grams)
     return payload
 
 
-def _basis_matrix_from_carrier_payload(payload, rows, cols):
-    """Reconstruct a carrier's dense basis matrix from either payload format.
+def _carrier_sparse_entries(payload):
+    """Iterate exact sparse entries from legacy or coefficient-indexed storage."""
+    if payload.get("storage") == "indexed_sparse":
+        table = payload["basis_columns_indexed"]
+        rows, columns, indices = table["rows"], table["columns"], table["scalar_indices"]
+        scalars = table["scalars"]
+        if len(rows) != len(columns) or len(rows) != len(indices):
+            raise ValueError("Indexed carrier arrays have different lengths.")
+        for row, column, index in zip(rows, columns, indices, strict=True):
+            if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < len(scalars):
+                raise ValueError("Indexed carrier coefficient index is out of range.")
+            yield row, column, scalars[index]
+    else:
+        yield from payload["basis_columns_sparse"]
 
-    Every angular carrier and every role carrier at role_dimension <= 2
-    stores ``basis_columns`` densely.  A role carrier at role_dimension >= 3 instead stores only the
-    nonzero entries under ``basis_columns_sparse`` (see
-    ``_role_carrier_payload``); this reconstructs the identical dense
-    matrix from either representation so every check below is unchanged.
+
+def _basis_matrix_from_carrier_payload(payload, rows, cols):
+    """Reconstruct a carrier basis, preserving sparse payload storage.
+
+    Large angular carriers and role carriers with at least three roles store
+    nonzero entries under ``basis_columns_sparse``. Reconstruction preserves
+    the full state order, all columns and every validation below.
     """
 
     sp = _sympy()
-    if payload.get("storage") == "sparse":
-        matrix = sp.zeros(int(rows), int(cols))
-        for state_index, column_index, value_payload in payload["basis_columns_sparse"]:
-            matrix[int(state_index), int(column_index)] = _exact_scalar_from_payload(
-                value_payload
-            )
-        return matrix
+    if payload.get("storage") in {"sparse", "indexed_sparse"}:
+        entries = {(int(row), int(column)): _exact_scalar_from_payload(value)
+                   for row, column, value in _carrier_sparse_entries(payload)}
+        return sp.SparseMatrix(int(rows), int(cols), entries)
     return _exact_matrix_from_payload(payload["basis_columns"])
 
 
+def _basis_vectors_from_carrier_payload(payload, rows, coordinate_order, selected_rows=None):
+    """Decode column vectors directly, avoiding repeated full-matrix extraction."""
+    sp = _sympy()
+    rows = int(rows)
+    coordinates = tuple(tuple(key) for key in coordinate_order)
+    if len(set(coordinates)) != len(coordinates):
+        raise ValueError("Carrier vector coordinates must be unique.")
+    if payload.get("storage") not in {"sparse", "indexed_sparse"}:
+        matrix = _basis_matrix_from_carrier_payload(payload, rows, len(coordinates))
+        if matrix.shape != (rows, len(coordinates)):
+            raise ValueError("Carrier vector matrix shape is invalid.")
+        return {key: matrix[:, column] for column, key in enumerate(coordinates)}
+    columns = [{} for _ in coordinates]
+    for row, column, value in _carrier_sparse_entries(payload):
+        row, column = int(row), int(column)
+        if not 0 <= row < rows or not 0 <= column < len(coordinates):
+            raise ValueError("Sparse carrier vector index is out of range.")
+        if selected_rows is not None and row not in selected_rows:
+            continue
+        columns[column][(row, 0)] = _exact_scalar_from_payload(value)
+    vectors = {}
+    for column, key in enumerate(coordinates):
+        entries, columns[column] = columns[column], None
+        vectors[key] = sp.SparseMatrix(rows, 1, entries)
+    return vectors
+
+
+def _remember_carrier_validation(key, actions, grams):
+    """Keep immutable small action/metric results after a successful check."""
+    sp = _sympy()
+    cached = (
+        tuple((copy, tuple(sp.ImmutableMatrix(action) for action in values))
+              for copy, values in actions.items()),
+        tuple((copy, sp.ImmutableMatrix(gram)) for copy, gram in grams.items()),
+    )
+    with _LOADED_VALIDATION_LOCK:
+        _VALIDATED_CARRIERS[key] = cached
+        _VALIDATED_CARRIERS.move_to_end(key)
+        if len(_VALIDATED_CARRIERS) > 32:
+            _VALIDATED_CARRIERS.popitem(last=False)
+    return cached
+
+
 def _validate_carrier_payload(payload):
+    """Reuse successful carrier checks after verifying current content."""
+    sp = _sympy()
+    _validate_hash_record(payload, "carrier_hash", "carrier")
+    store = YE3TArtifactStore(overlays=())
+    if store.verify == "full" or store.mode in {"off", "rebuild"}:
+        return _validate_carrier_payload_uncached(payload)
+    key = payload["carrier_hash"]
+    with _LOADED_VALIDATION_LOCK:
+        cached = _VALIDATED_CARRIERS.get(key)
+        if cached is not None:
+            _VALIDATED_CARRIERS.move_to_end(key)
+    if cached is None:
+        actions, grams = _validate_carrier_payload_uncached(payload)
+        cached = _remember_carrier_validation(key, actions, grams)
+    return ({copy: tuple(sp.Matrix(action) for action in actions)
+             for copy, actions in cached[0]},
+            {copy: sp.Matrix(gram) for copy, gram in cached[1]})
+
+
+def _validate_carrier_payload_uncached(payload):
+    """Complete semantic checks after the caller verifies the payload hash."""
     sp = _sympy()
     payload = dict(payload)
-    _validate_hash_record(payload, "carrier_hash", "carrier")
     states = tuple(tuple(int(value) for value in state) for state in payload["state_order"])
     coordinate_order = tuple(
         tuple(int(value) for value in item) for item in payload["coordinate_order"]
@@ -4505,7 +4984,7 @@ def _validate_carrier_payload(payload):
     gram = _exact_matrix_from_payload(payload["gram"])
     if basis.rows != len(states) or basis.cols != len(coordinate_order):
         raise ValueError("Lifted-Cauchy carrier basis shape is invalid.")
-    if sp.simplify(basis.conjugate().T * basis - gram) != sp.zeros(
+    if sp.simplify(_exact_carrier_gram(basis) - gram) != sp.zeros(
         gram.rows, gram.cols
     ):
         raise ValueError("Lifted-Cauchy carrier Gram does not match its basis.")
@@ -4522,7 +5001,9 @@ def _validate_carrier_payload(payload):
         columns = tuple(coordinate_index[key] for key in keys)
         local_basis = basis[:, columns]
         local_gram = _exact_matrix_from_payload(record["gram"])
-        if sp.simplify(local_basis.conjugate().T * local_basis - local_gram) != sp.zeros(
+        # The complete basis Gram was verified above, including cross-copy
+        # entries. Its principal submatrix is exactly this local basis Gram.
+        if sp.simplify(gram.extract(columns, columns) - local_gram) != sp.zeros(
             local_gram.rows, local_gram.cols
         ):
             raise ValueError("Lifted-Cauchy carrier copy Gram is invalid.")
@@ -4537,15 +5018,8 @@ def _validate_carrier_payload(payload):
         except RuntimeError as error:
             raise ValueError(str(error)) from error
         for adjacent, action in enumerate(actions):
-            permutation = list(range(factor_count))
-            permutation[adjacent], permutation[adjacent + 1] = (
-                permutation[adjacent + 1],
-                permutation[adjacent],
-            )
-            raw = _raw_permutation_matrix(states, tuple(permutation))
-            if sp.simplify(raw * local_basis - local_basis * action) != sp.zeros(
-                len(states), local_basis.cols
-            ):
+            rows = _adjacent_permutation_rows(states, factor_count, adjacent)
+            if not _carrier_action_matches(local_basis, rows, action):
                 raise ValueError("Lifted-Cauchy carrier intertwining is invalid.")
             if sp.simplify(action.conjugate().T * local_gram * action - local_gram) != sp.zeros(
                 local_gram.rows, local_gram.cols
@@ -4559,18 +5033,10 @@ def _validate_carrier_payload(payload):
     )
     if flattened_keys != coordinate_order:
         raise ValueError("Lifted-Cauchy carrier copy ordering is invalid.")
+    # Complete per-copy intertwining plus this exact column ordering proves
+    # complete intertwining by concatenation. Cross-copy metric checks remain.
     for adjacent in range(max(factor_count - 1, 0)):
         action = _block_diagonal(tuple(actions[adjacent] for actions in full_actions))
-        permutation = list(range(factor_count))
-        permutation[adjacent], permutation[adjacent + 1] = (
-            permutation[adjacent + 1],
-            permutation[adjacent],
-        )
-        raw = _raw_permutation_matrix(states, tuple(permutation))
-        if sp.simplify(raw * basis - basis * action) != sp.zeros(
-            len(states), basis.cols
-        ):
-            raise ValueError("Lifted-Cauchy full carrier intertwining is invalid.")
         if sp.simplify(action.conjugate().T * gram * action - gram) != sp.zeros(
             gram.rows, gram.cols
         ):
@@ -4590,40 +5056,110 @@ def _validate_carrier_payload(payload):
 
 
 def _invariant_pairing(role_actions, angular_actions):
+    """Reuse pairings for identical exact actions across multiplicity copies."""
+    sp = _sympy()
+    role_actions = tuple(sp.ImmutableMatrix(value) for value in role_actions)
+    angular_actions = tuple(sp.ImmutableMatrix(value) for value in angular_actions)
+    # Return a fresh matrix: a caller cannot mutate a cached pairing.
+    return sp.Matrix(_invariant_pairing_cached(role_actions, angular_actions))
+
+
+def _diagonal_carrier_pairing(role_actions, angular_actions):
+    """Return an exact diagonal pairing only after proving its uniqueness.
+
+    Diagonal Young--Jucys--Murphy operators with distinct joint spectra force
+    the commutant to be diagonal. Connected generator support then forces it
+    to be scalar. An invertible intertwiner consequently spans all pairings.
+    Unmatched gauges continue through the general exact nullspace solver.
+
+    Reference: Vershik and Okounkov (2005), arXiv:math/0503040, Sections 3, 6,
+    and 7; J_(k+1)=s_k J_k s_k+s_k follows from Eq. (0.1).
+    Independent implementation; no external source code copied.
+    """
+    sp = _sympy()
+    dimension = role_actions[0].rows
+    roles = tuple(sp.SparseMatrix(action) for action in role_actions)
+    angular = tuple(sp.SparseMatrix(action) for action in angular_actions)
+    entries = tuple(action.todok() for action in roles + angular)
+    if any(value.has(sp.Float) or value.is_real is not True
+           for action in entries for value in action.values()):
+        return None
+    transfers = [[] for _ in range(dimension)]
+    for left, right in zip(entries[:len(roles)], entries[len(roles):], strict=True):
+        if set(left) != {(j, i) for i, j in right}:
+            return None
+        for (i, j), value in left.items():
+            if i == j:
+                if _simplified_scalar(value - right[(j, i)]) != 0:
+                    return None
+            else:
+                ratio = _simplified_scalar(right[(j, i)] / value)
+                if ratio == 0:
+                    return None
+                transfers[i].append((j, ratio))
+                transfers[j].append((i, _simplified_scalar(1 / ratio)))
+    scales = {0: sp.Integer(1)}
+    pending = [0]
+    for i in pending:
+        for j, ratio in transfers[i]:
+            value = _simplified_scalar(scales[i] * ratio)
+            if j in scales:
+                if _simplified_scalar(scales[j] - value) != 0:
+                    return None
+            else:
+                scales[j] = value
+                pending.append(j)
+    if len(scales) != dimension:
+        return None
+    previous = sp.SparseMatrix.zeros(dimension, dimension)
+    spectra = []
+    for action in roles:
+        raw = (action * previous * action + action).todok()
+        current = {key: value for key, raw_value in raw.items()
+                   if (value := _simplified_scalar(raw_value)) != 0}
+        if any(i != j for i, j in current):
+            return None
+        spectra.append(tuple(current.get((i, i), sp.Integer(0)) for i in range(dimension)))
+        previous = sp.SparseMatrix(dimension, dimension, current)
+    if len(set(zip(*spectra))) != dimension:
+        return None
+    pairing = sp.diag(*(scales[i] for i in range(dimension)))
+    for role, angle in zip(roles, angular, strict=True):
+        residual = role * sp.SparseMatrix(pairing) * angle.T - pairing
+        if any(_simplified_scalar(value) != 0 for value in residual.todok().values()):
+            return None
+    return pairing
+
+
+@lru_cache(maxsize=32)
+def _invariant_pairing_cached(role_actions, angular_actions):
     sp = _sympy()
     role_actions = tuple(sp.Matrix(value) for value in role_actions)
     angular_actions = tuple(sp.Matrix(value) for value in angular_actions)
     if len(role_actions) != len(angular_actions) or not role_actions:
         if role_actions or angular_actions:
             raise ValueError("Role and angular carrier generators must align.")
-        return sp.ones(1, 1)
+        return sp.ImmutableMatrix([[1]])
     dimension = int(role_actions[0].rows)
     if any(
         matrix.shape != (dimension, dimension)
         for matrix in role_actions + angular_actions
     ):
         raise ValueError("Role and angular carrier actions must have one dimension.")
-    rows = []
-    for role_matrix, angular_matrix in zip(
-        role_actions, angular_actions, strict=True
-    ):
-        for left in range(dimension):
-            for right in range(dimension):
-                row = []
-                for source_left in range(dimension):
-                    for source_right in range(dimension):
-                        value = (
-                            role_matrix[left, source_left]
-                            * angular_matrix[right, source_right]
-                        )
-                        if left == source_left and right == source_right:
-                            value -= 1
-                        row.append(sp.simplify(value))
-                rows.append(row)
-    nullspace = sp.Matrix(rows).nullspace()
-    if len(nullspace) != 1:
-        raise RuntimeError("Equal Young carriers did not have one invariant pairing.")
-    pairing = sp.Matrix(nullspace[0]).reshape(dimension, dimension)
+    # Row-major vectorization of R*P*A.T=P gives (R tensor A-I) vec(P)=0.
+    # Keep the original equations, but assemble only their sparse entries and
+    # solve over the exact coefficient domain rather than generic expressions.
+    pairing = _diagonal_carrier_pairing(role_actions, angular_actions)
+    if pairing is None:
+        identity = sp.SparseMatrix.eye(dimension * dimension)
+        equations = sp.SparseMatrix.vstack(*(
+            sp.kronecker_product(sp.SparseMatrix(role), sp.SparseMatrix(angular)) - identity
+            for role, angular in zip(role_actions, angular_actions, strict=True)
+        ))
+        nullspace = equations.to_DM(extension=True).nullspace().to_Matrix()
+        if nullspace.rows != 1:
+            raise RuntimeError("Equal Young carriers did not have one invariant pairing.")
+        pairing = sp.Matrix(nullspace[0, :]).reshape(dimension, dimension)
     norm = sp.sqrt(sp.simplify((pairing.T * pairing).trace()))
     pairing = sp.simplify(pairing / norm)
     first = next((value for value in pairing if value != 0), sp.Integer(1))
@@ -4637,7 +5173,7 @@ def _invariant_pairing(role_actions, angular_actions):
         )
         if residual != sp.zeros(dimension, dimension):
             raise RuntimeError("Young-carrier pairing failed exact invariance.")
-    return pairing
+    return sp.ImmutableMatrix(pairing)
 
 
 def _exact_sparse_matrix_is_zero(matrix):
@@ -4871,7 +5407,7 @@ def _selected_role_schur_vectors(role_dimension, size, partition, role_copy):
             raise RuntimeError("Role-Schur matrix unit produced a zero carrier vector.")
         vector = sp.zeros(len(states), 1)
         for row, value in full[tableau].items():
-            vector[row, 0] = sp.simplify(value / pivot_scalar)
+            vector[row, 0] = _simplified_scalar(value / pivot_scalar)
         vectors[(role_copy, tableau)] = vector
     return states, vectors, {}
 
@@ -5107,7 +5643,14 @@ def _role_schur_vectors(role_dimension, size, partition):
     return _role_schur_vectors_coset(role_dimension, size, partition)
 
 
-def _angular_schur_vectors(size, angular_l, partition, output_L, angular_basis_backend="legacy_exact"):
+def _angular_schur_vectors(size, angular_l, partition, output_L, angular_basis_backend="legacy_exact", *, compact_vectors=False):
+    """Construct the requested angular carrier in its configured copy gauge.
+
+    For nonzero output_L, legacy_exact is the full-sector reference builder.
+    Production Cauchy requests select exact_weight_space_v1 and retain only
+    the requested angular multiplicity space. Keep the legacy gauge explicit
+    when reproducing old artifacts or independent bounded reference tests.
+    """
     if angular_basis_backend not in {"legacy_exact", "exact_weight_space_v1"}:
         raise ValueError("unknown angular Schur basis backend")
     if int(output_L) == 0:
@@ -5124,6 +5667,7 @@ def _angular_schur_vectors(size, angular_l, partition, output_L, angular_basis_b
                     (Partition(tuple(partition)),)
                 ),
                 backend="exact_coset" if angular_basis_backend == "exact_weight_space_v1" else "auto",
+                compact_vectors=compact_vectors,
             )
         )
         if multiplicity <= 0:
@@ -5134,7 +5678,8 @@ def _angular_schur_vectors(size, angular_l, partition, output_L, angular_basis_b
     if angular_basis_backend == "exact_weight_space_v1":
         labeler = GeneralizedExactSymbolicLabeler((0,)*size, (angular_l,)*size, spatial_symmetry="O3")
         return _exact_single_factor_weight_vectors((0,)*size, (angular_l,)*size,
-            labeler.permutation_irrep((Partition(tuple(partition)),)), output_L)
+            labeler.permutation_irrep((Partition(tuple(partition)),)), output_L,
+            compact_vectors=compact_vectors)
     labeler = GeneralizedExactSymbolicLabeler(
         tuple(0 for _ in range(int(size))),
         tuple(int(angular_l) for _ in range(int(size))),
@@ -5174,25 +5719,99 @@ def _coalesce_terms(terms):
     return result
 
 
+def _radical_gram_inverse(gram):
+    """Exact LDL inverse for real radical Grams supported by ExactRadical.
+
+    Standard A=L*D*L.T factorization, as in SymPy's LDLdecomposition
+    documentation. Independent arithmetic implementation using YE3T scalars.
+    Other scalar domains retain the existing symbolic inverse.
+    """
+    sp = _sympy()
+    if any(value.has(sp.Float) for value in gram):
+        return None
+    try:
+        values = [[exact_scalar(gram[i, j]) for j in range(gram.cols)]
+                  for i in range(gram.rows)]
+    except (TypeError, ValueError):
+        return None
+    size = gram.rows
+    zero, one = exact_scalar(0), exact_scalar(1)
+    lower = [[zero for _ in range(size)] for _ in range(size)]
+    diagonal = []
+    try:
+        for j in range(size):
+            lower[j][j] = one
+            pivot = values[j][j]-sum((lower[j][k]*lower[j][k]*diagonal[k]
+                                     for k in range(j)), zero)
+            if not pivot:
+                raise RuntimeError("Synthesis columns are not independent.")
+            diagonal.append(pivot)
+            for i in range(j+1, size):
+                lower[i][j] = (values[i][j]-sum((lower[i][k]*lower[j][k]*diagonal[k]
+                                               for k in range(j)), zero))/pivot
+        inverse_lower = [[zero for _ in range(size)] for _ in range(size)]
+        for i in range(size):
+            inverse_lower[i][i] = one
+            for j in range(i):
+                inverse_lower[i][j] = -sum((lower[i][k]*inverse_lower[k][j]
+                                            for k in range(j, i)), zero)
+        inverse = [[sum((inverse_lower[k][i]*inverse_lower[k][j]/diagonal[k]
+                         for k in range(max(i, j), size)), zero)
+                    for j in range(size)] for i in range(size)]
+    except ValueError:
+        # ExactRadical supports a limited set of exact divisors. No numerical
+        # substitution is used when a pivot needs a more general domain.
+        return None
+    for i in range(size):
+        for j in range(size):
+            if sum((values[i][k]*inverse[k][j] for k in range(size)), zero) != (one if i == j else zero):
+                raise ArithmeticError("Exact radical metric inverse failed its identity check.")
+    return sp.Matrix([[value._sympy_() for value in row] for row in inverse])
+
+
 def _metric_dual_analysis(synthesis):
     sp = _sympy()
     synthesis = sp.Matrix(synthesis)
-    gram = sp.simplify(synthesis.conjugate().T * synthesis)
-    if int(gram.rank()) != int(synthesis.cols):
-        raise RuntimeError("Synthesis columns are not independent.")
-    analysis = sp.simplify(gram.inv() * synthesis.conjugate().T)
-    if sp.simplify(analysis * synthesis) != sp.eye(synthesis.cols):
+    # Construction and payload validation can request the identical local map.
+    # Key on every exact matrix entry and return independent matrices. This
+    # bounded in-process cache needs no serialized proof or new content digest.
+    store = YE3TArtifactStore(overlays=())
+    cache_key = None
+    if (synthesis.rows*synthesis.cols <= 32768 and store.verify != "full"
+            and store.mode not in {"off", "rebuild"}):
+        cache_key = sp.ImmutableSparseMatrix(synthesis)
+        with _LOADED_VALIDATION_LOCK:
+            cached = _COMPUTED_METRIC_DUALS.get(cache_key)
+            if cached is not None:
+                _COMPUTED_METRIC_DUALS.move_to_end(cache_key)
+                return tuple(sp.Matrix(value) for value in cached)
+    # Reuse the exact carrier arithmetic for repeated radical coefficients.
+    # This avoids large unsimplified symbolic sums in local orbit metrics.
+    gram = _exact_carrier_gram(synthesis)
+    inverse = _radical_gram_inverse(gram)
+    if inverse is None:
+        if int(gram.rank()) != int(synthesis.cols):
+            raise RuntimeError("Synthesis columns are not independent.")
+        inverse = gram.inv()
+    analysis = _metric_product(inverse, synthesis.conjugate().T)
+    if _metric_product(analysis, synthesis) != sp.eye(synthesis.cols):
         raise RuntimeError("Metric analysis is not dual to synthesis.")
+    if cache_key is not None:
+        with _LOADED_VALIDATION_LOCK:
+            _COMPUTED_METRIC_DUALS[cache_key] = (sp.ImmutableMatrix(gram), sp.ImmutableMatrix(analysis))
+            _COMPUTED_METRIC_DUALS.move_to_end(cache_key)
+            if len(_COMPUTED_METRIC_DUALS) > 32:
+                _COMPUTED_METRIC_DUALS.popitem(last=False)
     return gram, analysis
 
 
 def _vector_support(vector):
-    sp = _sympy()
-    return tuple(
-        (index, sp.simplify(value))
-        for index, value in enumerate(vector)
-        if sp.simplify(value) != 0
-    )
+    entries = []
+    for index, value in enumerate(vector):
+        value = _simplified_scalar(value)
+        if value != 0:
+            entries.append((index, value))
+    return tuple(entries)
 
 
 def _joint_synthesis_columns(
@@ -5380,7 +5999,129 @@ def _validate_joint_synthesis_invariance(synthesis_columns, size):
                     )
 
 
-def _term_records(terms):
+def _symmetric_power_magnetic_rows(role_states, role_vectors, role_copies, angular_l, output_L):
+    """Rows accessed by the canonical joint-orbit contraction.
+
+    This selects evaluation rows of a previously validated angular carrier.
+    It does not remove angular copies, tableaux or magnetic components.
+    """
+    contents = set()
+    role_dimension = max(role_states[-1])+1
+    for copy in role_copies:
+        vector = role_vectors[(copy, 0)]
+        if hasattr(vector, "todok"):
+            row = min(index[0] for index, value in vector.todok().items() if value != 0)
+        else:
+            row = next(index for index, value in enumerate(vector) if value != 0)
+        counts = Counter(role_states[row])
+        contents.add(tuple(counts[role] for role in range(role_dimension)))
+    selected = set()
+    dimension = 2*angular_l+1
+    for content in contents:
+        choices = [tuple(combinations_with_replacement(range(-angular_l, angular_l+1), count))
+                   for count in content]
+        for blocks in product(*choices):
+            word = tuple(value for block in blocks for value in block)
+            if not -output_L <= sum(word) <= output_L:
+                continue
+            index = 0
+            for value in word:
+                index = index*dimension+value+angular_l
+            selected.add(index)
+    return selected
+
+
+def _joint_symmetric_power_metric_dual(role_states, magnetic_states, coordinate_labels,
+        role_vectors, angular_vectors, pairings, tableau_count):
+    """Evaluate invariant synthesis on one representative of each joint orbit.
+
+    Carrier intertwining and the invariant pairing give a constant coefficient
+    on each simultaneous-factor orbit. If its size is w and that coefficient is
+    c, the normalized symmetric-power coordinate is sqrt(w)*c. Applying the
+    existing metric dual there and multiplying analysis by sqrt(w) gives the
+    raw coalesced monomial coefficients. This is the orbit metric specified in
+    docs/linear_lifted_cauchy_basis.md, without expanding ordered reference words.
+    """
+    sp = _sympy()
+    size = len(role_states[0])
+    role_dimension = max(role_states[-1]) + 1
+    angular_l = max(magnetic_states[-1])
+    angular_dimension = 2*angular_l + 1
+    role_contents = {}
+    for role_copy, _, _ in coordinate_labels:
+        if role_copy not in role_contents:
+            row = next(index for index, value in enumerate(role_vectors[(role_copy, 0)]) if value != 0)
+            counts = Counter(role_states[row])
+            role_contents[role_copy] = tuple(counts[role] for role in range(role_dimension))
+    groups = defaultdict(list)
+    for index, (role_copy, _, magnetic) in enumerate(coordinate_labels):
+        groups[(role_contents[role_copy], magnetic)].append(index)
+    gram = sp.zeros(len(coordinate_labels), len(coordinate_labels))
+    analysis_rows = [None]*len(coordinate_labels)
+    for (content, magnetic), positions in groups.items():
+        role_word = tuple(role for role, count in enumerate(content) for _ in range(count))
+        role_index = 0
+        for role in role_word:
+            role_index = role_index*role_dimension + role
+        if role_states[role_index] != role_word:
+            raise ValueError('Joint symmetric-power rows require lexicographic role states.')
+        labels = [coordinate_labels[position] for position in positions]
+        role_pairings = []
+        for role_copy, angular_copy, _ in labels:
+            pairing = pairings[(role_copy, angular_copy)]
+            role_row = sp.Matrix([[role_vectors[(role_copy, left)][role_index]
+                                   for left in range(tableau_count)]])
+            role_pairings.append(tuple(_metric_product(role_row, pairing)))
+        words, scales, magnetic_indices = [], [], []
+        choices = [tuple(combinations_with_replacement(range(-angular_l, angular_l+1), count))
+                   for count in content]
+        for blocks in product(*choices):
+            magnetic_word = tuple(value for block in blocks for value in block)
+            if sum(magnetic_word) != magnetic:
+                continue
+            magnetic_index = 0
+            for value in magnetic_word:
+                magnetic_index = magnetic_index*angular_dimension + value + angular_l
+            if magnetic_states[magnetic_index] != magnetic_word:
+                raise ValueError('Joint symmetric-power rows require lexicographic magnetic states.')
+            word = tuple(zip(role_word, magnetic_word))
+            orbit_size = factorial(size)
+            for count in Counter(word).values():
+                orbit_size //= factorial(count)
+            scale = sp.sqrt(orbit_size)
+            words.append(word)
+            scales.append(scale)
+            magnetic_indices.append(magnetic_index)
+        # Each orbit uses the same small tableau pairing. Contract all selected
+        # role copies together per angular copy, sharing exact radical products
+        # instead of constructing a new symbolic sum for every orbit/copy.
+        synthesis = sp.zeros(len(words), len(labels))
+        angular_groups = defaultdict(list)
+        for column, (_, angular_copy, _) in enumerate(labels):
+            angular_groups[angular_copy].append(column)
+        for angular_copy, columns in angular_groups.items():
+            angular_rows = sp.Matrix([[angular_vectors[(angular_copy, right, magnetic)][index]
+                                      for right in range(tableau_count)]
+                                     for index in magnetic_indices])
+            coefficients = sp.Matrix([role_pairings[column] for column in columns]).T
+            contracted = _metric_product(angular_rows, coefficients)
+            for row, scale in enumerate(scales):
+                for local, column in enumerate(columns):
+                    synthesis[row, column] = _simplified_scalar(scale*contracted[row, local])
+        retained = [row for row in range(synthesis.rows) if any(synthesis[row, :])]
+        synthesis = synthesis.extract(retained, range(synthesis.cols))
+        words = [words[row] for row in retained]
+        scales = [scales[row] for row in retained]
+        local_gram, analysis = _metric_dual_analysis(synthesis)
+        for row, position in enumerate(positions):
+            analysis_rows[position] = {word: value for column, word in enumerate(words)
+                if (value := _simplified_scalar(analysis[row, column]*scales[column])) != 0}
+            for column, other in enumerate(positions):
+                gram[position, other] = local_gram[row, column]
+    return gram, tuple(analysis_rows)
+
+
+def _term_records(terms, *, execution_only=False):
     def coordinate_record(coordinate):
         if isinstance(coordinate, int):
             return (int(coordinate),)
@@ -5391,6 +6132,10 @@ def _term_records(terms):
         if _simplified_scalar(coefficient) == 0:
             continue
         normalized = tuple(coordinate_record(coordinate) for coordinate in coordinates)
+        if execution_only:
+            records.append({"coordinates": normalized,
+                            "coefficient": _exact_scalar_payload(coefficient)})
+            continue
         counts = Counter(normalized)
         orbit_size = factorial(len(normalized))
         occupation_factorial = 1
@@ -5611,7 +6356,21 @@ def _symmetric_power_plan(template_id, canonical_rows):
     return payload
 
 
-def _validate_block_template(payload):
+def _block_role_copies(key, selected=None):
+    """Keep each requested role-weight Gram block complete for the metric dual."""
+    available = _hook_content_dimension(tuple(key[2]), int(key[0]))
+    copies = tuple(range(available)) if selected is None else tuple(map(int, selected))
+    if not copies or tuple(sorted(set(copies))) != copies or any(
+            copy < 0 or copy >= available for copy in copies):
+        raise ValueError("Block role copies must be sorted, distinct available indices.")
+    if len(copies) != available:
+        metadata = _role_schur_pivot_metadata(int(key[0]), int(key[1]), tuple(key[2]))
+        contents = {metadata[copy][1] for copy in copies}
+        copies = tuple(copy for copy, (_, content) in enumerate(metadata) if content in contents)
+    return copies
+
+
+def _validate_block_template(payload, *, execution_rows_only=False):
     sp = _sympy()
     payload = dict(payload)
     role_actions, role_grams = _validate_carrier_payload(payload["role_carrier"])
@@ -5623,6 +6382,10 @@ def _validate_block_template(payload):
     angular_l = int(payload["input_l"])
     output_L = int(payload["output_Lambda"])
     role_count = int(payload["role_copy_count"])
+    role_copies = _block_role_copies((role_dimension, size, payload["kappa"]),
+        payload.get("role_copy_indices"))
+    if len(role_copies) != role_count:
+        raise ValueError("Lifted-Cauchy selected role-copy count is invalid.")
     angular_count = int(payload["angular_copy_count"])
     tableau_count = int(payload["tableau_count"])
     if tuple(int(value) for value in payload["tableau_order"]) != tuple(
@@ -5645,24 +6408,14 @@ def _validate_block_template(payload):
     )
     if role_states != expected_role_states or magnetic_states != expected_magnetic_states:
         raise ValueError("Lifted-Cauchy carrier state ordering is invalid.")
-    role_basis = _basis_matrix_from_carrier_payload(
-        role_carrier, len(role_states), len(role_carrier["coordinate_order"])
-    )
-    angular_basis = _basis_matrix_from_carrier_payload(
-        angular_carrier, len(magnetic_states), len(angular_carrier["coordinate_order"])
-    )
-    role_columns = {
-        tuple(int(value) for value in coordinate): index
-        for index, coordinate in enumerate(role_carrier["coordinate_order"])
-    }
-    angular_columns = {
-        tuple(int(value) for value in coordinate): index
-        for index, coordinate in enumerate(angular_carrier["coordinate_order"])
-    }
+    role_coordinates = tuple(tuple(int(value) for value in coordinate)
+        for coordinate in role_carrier["coordinate_order"])
+    angular_coordinates = tuple(tuple(int(value) for value in coordinate)
+        for coordinate in angular_carrier["coordinate_order"])
     pairing_records = tuple(payload["pairings"])
     expected_pair_keys = {
         (role_copy, angular_copy)
-        for role_copy in range(role_count)
+        for role_copy in role_copies
         for angular_copy in range(angular_count)
     }
     if {
@@ -5715,28 +6468,27 @@ def _validate_block_template(payload):
                 )
     coordinate_labels = tuple(
         (role_copy, angular_copy, M)
-        for role_copy in range(role_count)
+        for role_copy in role_copies
         for angular_copy in range(angular_count)
         for M in range(-output_L, output_L + 1)
     )
-    role_vectors = {
-        coordinate: role_basis[:, column]
-        for coordinate, column in role_columns.items()
-    }
-    angular_vectors = {
-        coordinate: angular_basis[:, column]
-        for coordinate, column in angular_columns.items()
-    }
-    gram, analysis_rows, synthesis_columns = _joint_synthesis_metric_dual(
-        role_states,
-        magnetic_states,
-        coordinate_labels,
-        role_vectors,
-        angular_vectors,
-        pairings,
-        tableau_count,
-    )
-    _validate_joint_synthesis_invariance(synthesis_columns, size)
+    role_vectors = _basis_vectors_from_carrier_payload(
+        role_carrier, len(role_states), role_coordinates)
+    angular_vectors = _basis_vectors_from_carrier_payload(
+        angular_carrier, len(magnetic_states), angular_coordinates,
+        selected_rows=(_symmetric_power_magnetic_rows(role_states, role_vectors,
+            role_copies, angular_l, output_L) if execution_rows_only else None))
+    ordered_reference = any('ordered_terms' in row for row in payload['analysis_rows'])
+    arguments = (role_states, magnetic_states, coordinate_labels, role_vectors,
+                 angular_vectors, pairings, tableau_count)
+    if ordered_reference:
+        gram, analysis_rows, synthesis_columns = _joint_synthesis_metric_dual(*arguments)
+        _validate_joint_synthesis_invariance(synthesis_columns, size)
+    else:
+        # Complete carrier intertwining and the invariant pairing were checked
+        # above. The orbit metric then gives the same exact dual on symmetric
+        # coordinates, without recreating the ordered reference expansion.
+        gram, analysis_rows = _joint_symmetric_power_metric_dual(*arguments)
     if gram != _exact_matrix_from_payload(payload["synthesis_gram"]):
         raise ValueError("Lifted-Cauchy joint synthesis Gram is invalid.")
     rows = tuple(payload["analysis_rows"])
@@ -5768,16 +6520,19 @@ def _validate_block_template(payload):
             actual_ordered = _terms_from_records(row["ordered_terms"])
             if actual_ordered != expected_ordered:
                 raise ValueError("Lifted-Cauchy block ordered analysis is invalid.")
-        expected_canonical = _coalesce_terms(expected_ordered)
+        expected_canonical = (_coalesce_terms(expected_ordered)
+                              if ordered_reference else expected_ordered)
         actual_canonical = _terms_from_records(row["symmetric_power_terms"])
         if actual_canonical != expected_canonical:
             raise ValueError("Lifted-Cauchy block symmetric-power analysis is invalid.")
         canonical_rows[coordinate_label] = actual_canonical
-    expected_plan = _symmetric_power_plan(
-        str(payload["template_id"]), canonical_rows
-    )
-    if _freeze_json(payload["symmetric_power_plan"]) != _freeze_json(expected_plan):
-        raise ValueError("Lifted-Cauchy symmetric-power DAG is invalid.")
+    if execution_rows_only:
+        if "symmetric_power_plan" in payload:
+            raise ValueError("Execution-row validation received an unvalidated derivative plan.")
+    else:
+        expected_plan = _symmetric_power_plan(str(payload["template_id"]), canonical_rows)
+        if _freeze_json(payload["symmetric_power_plan"]) != _freeze_json(expected_plan):
+            raise ValueError("Lifted-Cauchy symmetric-power DAG is invalid.")
 
 
 def _validate_outer_template(payload):
@@ -5822,29 +6577,163 @@ def _validate_outer_template(payload):
             raise ValueError("Lifted-Cauchy outer metric analysis is invalid.")
 
 
-def _build_block_template(key, angular_basis_backend="legacy_exact"):
+def _angular_carrier_from_vectors(states, vectors, multiplicity, size, partition, output_L,
+                                  indexed_sparse=False):
+    dimension = int(Partition(tuple(partition)).dimension)
+    coordinates = tuple((copy, tableau, M)
+        for copy in range(multiplicity)
+        for M in range(-output_L, output_L + 1)
+        for tableau in range(dimension))
+    copies = tuple(((copy, M), tuple((copy, tableau, M)
+        for tableau in range(dimension)))
+        for copy in range(multiplicity)
+        for M in range(-output_L, output_L + 1))
+    return _dense_carrier_payload(states, coordinates, vectors, copies, size,
+                                  "angular_schur", indexed_sparse=indexed_sparse)
+
+
+def _compile_angular_carrier(size, angular_l, partition, output_L, angular_basis_backend,
+                             prepared_payload=None, compact_read=False):
+    """Persist exact angular maps independently of physical role dimension."""
+    size, angular_l, output_L = int(size), int(angular_l), int(output_L)
+    partition = tuple(int(value) for value in partition)
+    if output_L == 0:
+        angular_basis_backend = "legacy_exact"
+    multiplicity = int(_angular_counts(size, angular_l, partition).get(output_L, 0))
+    dimension = int(Partition(partition).dimension)
+    if multiplicity <= 0:
+        raise ValueError("Requested angular carrier has zero multiplicity.")
+    entries = (2*angular_l+1)**size * dimension * multiplicity * (2*output_L+1)
+    request = {
+        "tensor_order": size, "kappa": partition, "input_l": angular_l,
+        "output_Lambda": output_L, "angular_basis_backend": angular_basis_backend,
+        "magnetic_state_order": "lexicographic_product_minus_l_to_plus_l",
+        "tableau_order": "ye3t_standard_tableaux_v1",
+        "phase_normalization": "complex_condon_shortley_metric_dual_v1",
+        "scalar_encoding": "ye3t_exact_radical_json_v1",
+        "storage": "sparse_v1" if entries > _DENSE_CARRIER_ENTRY_LIMIT else "dense_v1",
+    }
+    legacy_request = request
+    indexed_sparse = bool(compact_read and entries > _DENSE_CARRIER_ENTRY_LIMIT)
+    version = 3 if indexed_sparse else 1
+    producer = {"implementation": f"cauchy_angular_carrier_v{version}"}
+    if indexed_sparse:
+        request = {**request, "storage": "indexed_sparse_v1", "metric_storage": "sparse_v1"}
+    store = YE3TArtifactStore()
+
+    def build():
+        states, vectors, count = _angular_schur_vectors(size, angular_l, partition,
+            output_L, angular_basis_backend=angular_basis_backend, compact_vectors=indexed_sparse)
+        if count != multiplicity:
+            raise ArithmeticError("Angular carrier differs from its exact multiplicity count.")
+        return _angular_carrier_from_vectors(states, vectors, count, size, partition,
+                                             output_L, indexed_sparse=indexed_sparse)
+
+    def validate(payload):
+        _validate_hash_record(payload, "carrier_hash", "angular-carrier")
+        states = tuple(tuple(state) for state in payload["state_order"])
+        coordinates = tuple(tuple(row) for row in payload["coordinate_order"])
+        expected = tuple((copy, tableau, M) for copy in range(multiplicity)
+            for M in range(-output_L, output_L+1) for tableau in range(dimension))
+        if (payload["kind"] != "angular_schur" or payload["factor_count"] != size
+                or states != tuple(product(range(-angular_l, angular_l+1), repeat=size))
+                or coordinates != expected):
+            raise ValueError("Cached angular carrier is bound to a different representation.")
+        _validate_carrier_payload(payload)
+        if store.verify == "full" and _freeze_json(payload) != _freeze_json(build()):
+            raise ValueError("Cached angular carrier differs from exact reconstruction.")
+
+    resolved = None
+    if compact_read and store.mode not in {"off", "rebuild"} and store.verify == "hash":
+        from ye3t.cache.projected_json import read_projected_payload
+        identities = [store.identity("cauchy_angular_carrier", version, request, producer=producer)]
+        if indexed_sparse:
+            identities.append(store.identity("cauchy_angular_carrier", 2,
+                {**legacy_request, "storage": "indexed_sparse_v1"},
+                producer={"implementation": "cauchy_angular_carrier_v2"}))
+            identities.append(store.identity("cauchy_angular_carrier", 1, legacy_request,
+                producer={"implementation": "cauchy_angular_carrier_v1"}))
+        for identity in identities:
+            for root in (*store.overlays, store.directory):
+                path = store.path_for_identity(identity, root)
+                if path.is_file():
+                    payload = read_projected_payload(path, identity, None,
+                        ("exact_carrier_actions_and_metric",), share_exact_scalars=True,
+                        indexed_sparse=True)
+                    resolved = {"payload": payload, "status": "hit", "integrity_checked": True}
+                    break
+            if resolved is not None:
+                break
+    if resolved is None:
+        resolved = store.resolve("cauchy_angular_carrier", version, request,
+            build if prepared_payload is None else lambda: prepared_payload,
+            validator=validate,
+            certificate={"passed": True, "checks": {"exact_carrier_actions_and_metric": True}},
+            required_certificate_checks=("exact_carrier_actions_and_metric",),
+            producer=producer)
+    payload = resolved["payload"]
+    if (resolved["status"] == "hit" and store.verify == "hash"
+            and store.mode in {"auto", "read_only"}):
+        # The store checked identity, envelope/payload integrity and the prior
+        # complete semantic-validation result. Share that result with containing
+        # block validation, following the same persistent-cache policy. Full,
+        # off and rebuild modes still replay all semantic checks.
+        # The projected reader already verified this exact digest directly
+        # from the full stored bytes. Re-encoding every sparse entry here adds
+        # no integrity check. Other readers retain their existing check.
+        if not resolved.get("integrity_checked", False):
+            _validate_hash_record(payload, "carrier_hash", "angular-carrier")
+        actions = {tuple(record["copy_key"]): tuple(
+            _exact_matrix_from_payload(action) for action in record["adjacent_actions"])
+            for record in payload["copy_records"]}
+        grams = {tuple(record["copy_key"]): _exact_matrix_from_payload(record["gram"])
+            for record in payload["copy_records"]}
+        _remember_carrier_validation(payload["carrier_hash"], actions, grams)
+    return payload
+
+
+def _build_block_template(key, angular_basis_backend="legacy_exact", emit_ordered_reference=True,
+                          role_copy_indices=None, reuse_angular_carrier=False, execution_rows_only=False):
     sp = _sympy()
     role_dimension, size, partition, angular_l, output_L = key
     if int(output_L) == 0:
         angular_basis_backend = "legacy_exact"  # Identical scalar gauge/cache.
-    role_states, role_vectors, role_units = _role_schur_vectors(
-        role_dimension,
-        size,
-        partition,
-    )
-    magnetic_states, angular_vectors, angular_count = _angular_schur_vectors(
-        size,
-        angular_l,
-        partition,
-        output_L,
-        angular_basis_backend=angular_basis_backend,
-    )
+    role_copies = _block_role_copies(key, role_copy_indices)
+    all_role_copies = tuple(range(_hook_content_dimension(partition, role_dimension)))
+    if role_copies == all_role_copies:
+        role_states, role_vectors, role_units = _role_schur_vectors(
+            role_dimension, size, partition)
+    else:
+        role_states = tuple(product(range(role_dimension), repeat=size))
+        role_index = {state: index for index, state in enumerate(role_states)}
+        role_vectors, role_units = {}, {}
+        for copy in role_copies:
+            states, vectors, _ = _selected_role_schur_vectors(
+                role_dimension, size, tuple(partition), copy)
+            indices = tuple(role_index[state] for state in states)
+            for coordinate, vector in vectors.items():
+                role_vectors[coordinate] = sp.SparseMatrix(len(role_states), 1,
+                    {(indices[row], 0): value for row, value in enumerate(vector) if value != 0})
+    if reuse_angular_carrier:
+        angular_carrier = _compile_angular_carrier(size, angular_l, partition,
+            output_L, angular_basis_backend, compact_read=execution_rows_only)
+        magnetic_states = tuple(tuple(state) for state in angular_carrier["state_order"])
+        coordinates = tuple(tuple(row) for row in angular_carrier["coordinate_order"])
+        angular_vectors = _basis_vectors_from_carrier_payload(angular_carrier,
+            len(magnetic_states), coordinates,
+            selected_rows=(_symmetric_power_magnetic_rows(role_states, role_vectors,
+                role_copies, angular_l, output_L) if execution_rows_only else None))
+        angular_count = int(_angular_counts(size, angular_l, tuple(partition))[output_L])
+    else:
+        magnetic_states, angular_vectors, angular_count = _angular_schur_vectors(
+            size, angular_l, partition, output_L,
+            angular_basis_backend=angular_basis_backend)
     tableau_count = int(Partition(tuple(partition)).dimension)
-    role_count = _hook_content_dimension(partition, role_dimension)
+    role_count = len(role_copies)
     angular_count = int(angular_count)
     role_coordinate_order = tuple(
         (role_copy, tableau)
-        for role_copy in range(role_count)
+        for role_copy in role_copies
         for tableau in range(tableau_count)
     )
     role_carrier = _carrier_payload(
@@ -5859,35 +6748,14 @@ def _build_block_template(key, angular_basis_backend="legacy_exact"):
                     for tableau in range(tableau_count)
                 ),
             )
-            for role_copy in range(role_count)
+            for role_copy in role_copies
         ),
         size,
         "role_schur",
     )
-    angular_coordinate_order = tuple(
-        (angular_copy, tableau, M)
-        for angular_copy in range(angular_count)
-        for M in range(-int(output_L), int(output_L) + 1)
-        for tableau in range(tableau_count)
-    )
-    angular_carrier = _carrier_payload(
-        magnetic_states,
-        angular_coordinate_order,
-        angular_vectors,
-        tuple(
-            (
-                (angular_copy, M),
-                tuple(
-                    (angular_copy, tableau, M)
-                    for tableau in range(tableau_count)
-                ),
-            )
-            for angular_copy in range(angular_count)
-            for M in range(-int(output_L), int(output_L) + 1)
-        ),
-        size,
-        "angular_schur",
-    )
+    if not reuse_angular_carrier:
+        angular_carrier = _angular_carrier_from_vectors(magnetic_states,
+            angular_vectors, angular_count, size, partition, output_L)
     role_actions = {
         int(record["copy_key"][0]): tuple(
             _exact_matrix_from_payload(action)
@@ -5928,7 +6796,7 @@ def _build_block_template(key, angular_basis_backend="legacy_exact"):
             )
     pairings = {}
     pairing_records = []
-    for role_copy in range(role_count):
+    for role_copy in role_copies:
         for angular_copy in range(angular_count):
             pairing = _invariant_pairing(
                 role_actions[role_copy],
@@ -5954,20 +6822,18 @@ def _build_block_template(key, angular_basis_backend="legacy_exact"):
             )
     coordinate_labels = tuple(
         (role_copy, angular_copy, M)
-        for role_copy in range(role_count)
+        for role_copy in role_copies
         for angular_copy in range(angular_count)
         for M in range(-int(output_L), int(output_L) + 1)
     )
-    gram, analysis_rows, synthesis_columns = _joint_synthesis_metric_dual(
-        role_states,
-        magnetic_states,
-        coordinate_labels,
-        role_vectors,
-        angular_vectors,
-        pairings,
-        tableau_count,
-    )
-    _validate_joint_synthesis_invariance(synthesis_columns, size)
+    arguments = (role_states, magnetic_states, coordinate_labels, role_vectors,
+                 angular_vectors, pairings, tableau_count)
+    if emit_ordered_reference:
+        gram, analysis_rows, synthesis_columns = _joint_synthesis_metric_dual(*arguments)
+        _validate_joint_synthesis_invariance(synthesis_columns, size)
+        del synthesis_columns
+    else:
+        gram, analysis_rows = _joint_symmetric_power_metric_dual(*arguments)
     ordered_rows = {
         coordinate_label: {
             tuple(
@@ -5982,10 +6848,15 @@ def _build_block_template(key, angular_basis_backend="legacy_exact"):
             strict=True,
         )
     }
-    canonical_rows = {
-        coordinate_label: _coalesce_terms(ordered)
-        for coordinate_label, ordered in ordered_rows.items()
-    }
+    canonical_rows = ({coordinate_label: _coalesce_terms(ordered)
+                      for coordinate_label, ordered in ordered_rows.items()}
+                     if emit_ordered_reference else ordered_rows)
+    # Production contractions consume the symmetric-power rows. Ordered words
+    # remain available for explicit reference requests; serializing every word
+    # repeats the same invariant coefficient over its permutation orbit.
+    del analysis_rows
+    if not emit_ordered_reference:
+        ordered_rows = {}
     template_id = "block_" + _stable_hash(
         {
             "role_dimension": role_dimension,
@@ -5996,7 +6867,7 @@ def _build_block_template(key, angular_basis_backend="legacy_exact"):
             "convention": _request_convention({"angular_basis_backend": angular_basis_backend}),
         }
     )[:16]
-    symmetric_power_plan = _symmetric_power_plan(template_id, canonical_rows)
+    symmetric_power_plan = (None if execution_rows_only else _symmetric_power_plan(template_id, canonical_rows))
     payload = {
         "template_id": template_id,
         "role_dimension": int(role_dimension),
@@ -6005,6 +6876,7 @@ def _build_block_template(key, angular_basis_backend="legacy_exact"):
         "input_l": int(angular_l),
         "output_Lambda": int(output_L),
         "role_copy_count": int(role_count),
+        **({"role_copy_indices": role_copies} if role_copies != all_role_copies else {}),
         "angular_copy_count": int(angular_count),
         "tableau_count": int(tableau_count),
         "tableau_order": tuple(range(tableau_count)),
@@ -6017,16 +6889,17 @@ def _build_block_template(key, angular_basis_backend="legacy_exact"):
                 "role_copy_index": int(role_copy),
                 "angular_copy_index": int(angular_copy),
                 "M": int(M),
-                "ordered_terms": _term_records(
+                **({"ordered_terms": _term_records(
                     ordered_rows[(role_copy, angular_copy, M)]
-                ),
+                )} if emit_ordered_reference else {}),
                 "symmetric_power_terms": _term_records(
-                    canonical_rows[(role_copy, angular_copy, M)]
+                    canonical_rows[(role_copy, angular_copy, M)],
+                    execution_only=execution_rows_only
                 ),
             }
             for role_copy, angular_copy, M in coordinate_labels
         ),
-        "symmetric_power_plan": symmetric_power_plan,
+        **({} if execution_rows_only else {"symmetric_power_plan": symmetric_power_plan}),
         "validation_report": {
             "passed": True,
             "matrix_unit_algebra_source": "ye3t.representations.projectors.subgroup_matrix_units_for_factor",
@@ -6046,7 +6919,11 @@ def _build_block_template(key, angular_basis_backend="legacy_exact"):
             "vjp_convention": "algebraic_transpose_of_compiled_analysis",
         },
     }
-    payload["template_hash"] = _stable_hash(_freeze_json(payload))
+    if not execution_rows_only:
+        payload["template_hash"] = _stable_record_hash(payload)
+    # Execution-only proofs are transient. The compact cache binds their
+    # validated carrier identities and selected rows; do not reserialize the
+    # complete carrier proofs just to digest this temporary aggregate.
     return {
         "payload": payload,
         "ordered_rows": ordered_rows,
@@ -6082,7 +6959,7 @@ def _build_outer_template(block_Ls, target_L):
                 "metric_analysis_identity_exact": True,
             },
         }
-        payload["template_hash"] = _stable_hash(_freeze_json(payload))
+        payload["template_hash"] = _stable_record_hash(payload)
         return {
             "payload": payload,
             "rows": rows,
@@ -6145,7 +7022,7 @@ def _build_outer_template(block_Ls, target_L):
             "metric_analysis_identity_exact": True,
         },
     }
-    payload["template_hash"] = _stable_hash(_freeze_json(payload))
+    payload["template_hash"] = _stable_record_hash(payload)
     return {"payload": payload, "rows": rows}
 
 
@@ -6162,8 +7039,14 @@ def _template_cache_certificate(payload):
     }
 
 
-def _block_cache_request(key, angular_basis_backend="legacy_exact"):
+def _block_cache_request(key, angular_basis_backend="legacy_exact", emit_ordered_reference=True,
+                         role_copy_indices=None):
     role_dimension, size, partition, angular_l, output_L = key
+    role_copies = _block_role_copies(key, role_copy_indices)
+    all_role_copies = tuple(range(_hook_content_dimension(partition, role_dimension)))
+    angular_entries = ((2*int(angular_l)+1)**int(size) * (2*int(output_L)+1)
+        * int(Partition(tuple(partition)).dimension)
+        * int(_angular_counts(size, angular_l, tuple(partition)).get(int(output_L), 0)))
     return {
         "exactness": "exact",
         "mathematical_convention": _request_convention({"angular_basis_backend": angular_basis_backend}),
@@ -6173,13 +7056,17 @@ def _block_cache_request(key, angular_basis_backend="legacy_exact"):
         "kappa": tuple(int(value) for value in partition),
         "input_l": int(angular_l),
         "output_Lambda": int(output_L),
+        **({"role_copy_indices": role_copies} if role_copies != all_role_copies else {}),
         "role_state_order": "lexicographic_product_range_role_dimension",
         "magnetic_state_order": "lexicographic_product_minus_l_to_plus_l",
+        **({"angular_carrier_storage": "sparse_v1"}
+           if angular_entries > _DENSE_CARRIER_ENTRY_LIMIT else {}),
         "tableau_order": "ye3t_standard_tableaux_v1",
         "permutation_action": "simultaneous_left_slot_action_v1",
         "phase_normalization": "complex_condon_shortley_metric_dual_v1",
         "orientation": "synthesis_columns_and_metric_dual_analysis_rows",
-        "payload_variant": "exact_joint_rows_symmetric_power_and_vjp_v1",
+        "payload_variant": ("exact_joint_rows_symmetric_power_and_vjp_v1"
+            if emit_ordered_reference else "exact_symmetric_power_and_vjp_v1"),
     }
 
 
@@ -6206,7 +7093,8 @@ def _block_cache_dependencies(request):
     }
 
 
-def _validate_cached_block_template(payload, key, verify_construction=False, angular_basis_backend="legacy_exact"):
+def _validate_cached_block_template(payload, key, verify_construction=False, angular_basis_backend="legacy_exact", emit_ordered_reference=True,
+                                    role_copy_indices=None):
     role_dimension, size, partition, angular_l, output_L = key
     expected = {
         "role_dimension": int(role_dimension),
@@ -6226,9 +7114,15 @@ def _validate_cached_block_template(payload, key, verify_construction=False, ang
                 f"Cached lifted-Cauchy block has an invalid {name} binding."
             )
     _validate_hash_record(payload, "template_hash", "block-template")
+    if _block_role_copies(key, payload.get("role_copy_indices")) != _block_role_copies(key, role_copy_indices):
+        raise ValueError("Cached block role-copy selection differs from its request.")
+    if any(("ordered_terms" in row) != emit_ordered_reference
+            for row in payload["analysis_rows"]):
+        raise ValueError("Cached block ordered-reference storage differs from its request.")
     _validate_block_template(payload)
     if verify_construction:
-        expected = _build_block_template(key, angular_basis_backend=angular_basis_backend)["payload"]
+        expected = _build_block_template(key, angular_basis_backend=angular_basis_backend,
+            emit_ordered_reference=emit_ordered_reference, role_copy_indices=role_copy_indices)["payload"]
         if _freeze_json(expected) != _freeze_json(payload):
             raise ValueError(
                 "Cached lifted-Cauchy block differs from exact reconstruction."
@@ -6244,7 +7138,8 @@ def _block_template_from_payload(payload):
             int(row["angular_copy_index"]),
             int(row["M"]),
         )
-        ordered_rows[coordinate] = _terms_from_records(row["ordered_terms"])
+        if "ordered_terms" in row:
+            ordered_rows[coordinate] = _terms_from_records(row["ordered_terms"])
         canonical_rows[coordinate] = _terms_from_records(
             row["symmetric_power_terms"]
         )
@@ -6255,7 +7150,8 @@ def _block_template_from_payload(payload):
     }
 
 
-def _compile_block_template(key, angular_basis_backend="legacy_exact"):
+def _compile_block_template(key, angular_basis_backend="legacy_exact", emit_ordered_reference=True,
+                            role_copy_indices=None, compact=False, decode_rows=True):
     key = (
         int(key[0]),
         int(key[1]),
@@ -6265,15 +7161,109 @@ def _compile_block_template(key, angular_basis_backend="legacy_exact"):
     )
     if key[4] == 0:
         angular_basis_backend = "legacy_exact"
-    request = _block_cache_request(key, angular_basis_backend=angular_basis_backend)
+    request = _block_cache_request(key, angular_basis_backend=angular_basis_backend,
+        emit_ordered_reference=emit_ordered_reference, role_copy_indices=role_copy_indices)
     store = YE3TArtifactStore()
+    if compact:
+        if emit_ordered_reference:
+            raise ValueError("Compact blocks require symmetric-power rows only.")
+
+        def build_compact():
+            # The full compiler validates the intertwining maps once. Execution
+            # needs the selected local rows, not carrier proof matrices. Keep
+            # the compact result in its own cache so subsequent compilations
+            # never decode those proof matrices.
+            fields = (
+                "template_id", "role_dimension", "size", "kappa", "input_l",
+                "output_Lambda", "analysis_rows", "validation_report", "template_hash")
+            full = None
+            if store.mode not in {"off", "rebuild"} and store.verify != "full":
+                from ye3t.cache.projected_json import read_projected_payload
+                previous = store.identity("lifted_cauchy_block_execution", "ye3t_local_block_execution_v1",
+                    request, dependency_hashes=_block_cache_dependencies(request))
+                for root in (*store.overlays, store.directory):
+                    path = store.path_for_identity(previous, root)
+                    if path.is_file():
+                        full = read_projected_payload(path, previous,
+                            fields+("source_template_hash",),
+                            ("pairing_invariance_exact", "metric_analysis_identity_exact"),
+                            minimal_terms=True)
+                        break
+                identity = store.identity("lifted_cauchy_block_template", LIFTED_CAUCHY_BLOCK_CACHE_SCHEMA,
+                    request, dependency_hashes=_block_cache_dependencies(request),
+                    producer={"compiler_convention": request["mathematical_convention"],
+                              "implementation": "lifted_cauchy_joint_block_v1"})
+                for root in (*store.overlays, store.directory):
+                    if full is not None:
+                        break
+                    path = store.path_for_identity(identity, root)
+                    if path.is_file():
+                        full = read_projected_payload(path, identity, fields,
+                            ("pairing_invariance_exact", "metric_analysis_identity_exact"),
+                            minimal_terms=True)
+                        break
+            if full is None:
+                # The staged runtime differentiates these rows directly. Avoid
+                # constructing and caching an unused expanded derivative DAG.
+                full = _build_block_template(key, angular_basis_backend,
+                    emit_ordered_reference=False, role_copy_indices=role_copy_indices,
+                    reuse_angular_carrier=True, execution_rows_only=True)["payload"]
+                _validate_block_template(full, execution_rows_only=True)
+            payload = {name: full[name] for name in fields if name != "template_hash"}
+            origin = full.get("source_template_hash", full.get("template_hash"))
+            if origin is None:
+                origin = _stable_record_hash({"request": request,
+                    "role_carrier": full["role_carrier"]["carrier_hash"],
+                    "angular_carrier": full["angular_carrier"]["carrier_hash"]})
+            payload["source_template_hash"] = origin
+            payload["role_copy_indices"] = _block_role_copies(key, role_copy_indices)
+            payload["template_hash"] = _stable_record_hash(payload)
+            return payload
+
+        def validate_compact(payload):
+            _validate_hash_record(payload, "template_hash", "compact-block-template")
+            expected_copies = _block_role_copies(key, role_copy_indices)
+            coordinates = tuple((copy, angular, M) for copy in expected_copies
+                for angular in range(_angular_counts(key[1], key[3], key[2])[key[4]])
+                for M in range(-key[4], key[4]+1))
+            actual = tuple((row["role_copy_index"], row["angular_copy_index"], row["M"])
+                for row in payload["analysis_rows"])
+            if coordinates != actual:
+                raise ValueError("Compact block coordinates differ from exact counts.")
+            if store.verify == "full":
+                # Old proofs also stored a derivative DAG. Its storage digest
+                # differs from fresh execution-only proofs; compare every
+                # execution field and validation result independently of that.
+                expected = build_compact()
+                ignored = {"source_template_hash", "template_hash"}
+                if _freeze_json({k: v for k, v in payload.items() if k not in ignored}) != _freeze_json(
+                        {k: v for k, v in expected.items() if k not in ignored}):
+                    raise ValueError("Compact block differs from exact reconstruction.")
+
+        result = store.resolve("lifted_cauchy_block_execution", "ye3t_local_block_execution_v2",
+            request, build_compact, validator=validate_compact,
+            certificate=_template_cache_certificate,
+            required_certificate_checks=("pairing_invariance_exact", "metric_analysis_identity_exact"),
+            dependency_hashes=_block_cache_dependencies(request))
+        if not decode_rows:
+            # Retain one immutable coordinate tuple and exact scalar record
+            # for repeated local monomials. The store has already validated
+            # this owned payload; sharing changes no coefficient or JSON byte.
+            # Keep its fast ordinary JSON reader for compact execution tables.
+            from ye3t.cache.projected_json import _share_execution_rows
+            _share_execution_rows(result["payload"]["analysis_rows"])
+            return {"payload": result["payload"]}
+        return _block_template_from_payload(result["payload"])
     result = store.resolve(
         "lifted_cauchy_block_template",
         LIFTED_CAUCHY_BLOCK_CACHE_SCHEMA,
         request,
-        lambda: _build_block_template(key, angular_basis_backend=angular_basis_backend)["payload"],
+        lambda: _build_block_template(key, angular_basis_backend=angular_basis_backend,
+            emit_ordered_reference=emit_ordered_reference, role_copy_indices=role_copy_indices,
+            reuse_angular_carrier=True)["payload"],
         validator=lambda payload: _validate_cached_block_template(
-            payload, key, verify_construction=store.verify == "full", angular_basis_backend=angular_basis_backend
+            payload, key, verify_construction=store.verify == "full", angular_basis_backend=angular_basis_backend,
+            emit_ordered_reference=emit_ordered_reference, role_copy_indices=role_copy_indices
         ),
         certificate=_template_cache_certificate,
         required_certificate_checks=(
@@ -6289,6 +7279,11 @@ def _compile_block_template(key, angular_basis_backend="legacy_exact"):
             "implementation": "lifted_cauchy_joint_block_v1",
         },
     )
+    if result["status"] == "hit" and store.mode == "auto":
+        # Older complete block artifacts already contain the validated angular
+        # carrier. Populate the shared cache without rebuilding its coefficients.
+        _compile_angular_carrier(key[1], key[3], key[2], key[4], angular_basis_backend,
+            prepared_payload=result["payload"]["angular_carrier"])
     return _block_template_from_payload(result["payload"])
 
 
@@ -6743,24 +7738,31 @@ def _combine_block_rows(block_rows, outer_terms):
     """Expand one outer coupling row over complete block polynomials."""
 
     sp = _sympy()
-    terms = defaultdict(lambda: sp.Integer(0))
+    # Block synthesis and angular CG entries are real exact radicals here.
+    # Real-tesseral phases are applied later. Convert each block entry once;
+    # simplifying a symbolic product for every Cartesian choice is expensive.
+    blocks = [{magnetic: tuple((coordinates, exact_scalar(value))
+                              for coordinates, value in row.items())
+               for magnetic, row in block.items()} for block in block_rows]
+    terms = defaultdict(lambda: ExactRadical.rational(0))
     for magnetic_tuple, outer_coefficient in outer_terms.items():
         selected = [
-            block_rows[index][int(magnetic)]
+            blocks[index][int(magnetic)]
             for index, magnetic in enumerate(magnetic_tuple)
         ]
-        for choices in product(*[tuple(row.items()) for row in selected]):
+        outer_coefficient = exact_scalar(outer_coefficient)
+        for choices in product(*selected):
             coordinates = tuple(
                 coordinate
                 for block_choice in choices
                 for coordinate in block_choice[0]
             )
-            coefficient = _simplified_scalar(
-                outer_coefficient
-                * sp.prod(block_choice[1] for block_choice in choices)
-            )
+            coefficient = outer_coefficient
+            for block_choice in choices:
+                coefficient *= block_choice[1]
             terms[coordinates] += coefficient
-    return terms
+    return defaultdict(lambda: sp.Integer(0),
+                       {coordinates: value._sympy_() for coordinates, value in terms.items()})
 
 
 def _instantiate_descriptor(
@@ -6932,7 +7934,8 @@ def compile_lifted_cauchy_scalar(request):
             )
             if key not in by_key:
                 by_key[key] = _compile_block_template(key,
-                    angular_basis_backend=request_payload.get("angular_basis_backend", "legacy_exact"))
+                    angular_basis_backend=request_payload.get("angular_basis_backend", "legacy_exact"),
+                    emit_ordered_reference=request_payload["emit_ordered_reference"])
     outer_by_key = {}
     descriptors = []
     shared_block_nodes = {}

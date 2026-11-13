@@ -46,9 +46,31 @@ def test_angular_pivot_transfer_matches_full_native_units(size, angular_l, parti
                                                count_only=True, spatial_symmetry="O3")
     assert count == len(coefficients) == int(expected_count.counts_by_L.get(weight, 0))
     assert set(actual) == set(reference)
+    full_columns = sp.Matrix.hstack(*(actual[key] for key in sorted(actual)))
+    assert full_columns.to_DM(extension=True).rank() == count * dimension
     for key in reference:
         assert (actual[key]-reference[key]).applyfunc(sp.simplify) == sp.zeros(len(states), 1)
         assert (raising*actual[key]).applyfunc(sp.simplify) == sp.zeros(len(raised), 1)
+
+
+@pytest.mark.parametrize("normalize", [False, True])
+def test_multiplicity_check_rejects_dependent_complete_copies(monkeypatch, normalize):
+    size, angular_l = 3, 2
+    partition = Partition((2, 1))
+    states = tuple(word for word in product(range(-2, 3), repeat=size) if sum(word) == 2)
+    raised = tuple(word for word in product(range(-2, 3), repeat=size) if sum(word) == 3)
+    raising = builder._weight_raising_matrix((angular_l,)*size, states, raised)
+    original = builder._exact_independent_basis
+
+    def duplicate_copy(columns):
+        independent = original(columns)
+        assert len(independent) == 2
+        return (independent[0], independent[0])
+
+    monkeypatch.setattr(builder, "_exact_independent_basis", duplicate_copy)
+    with pytest.raises(RuntimeError, match="not exactly linearly independent"):
+        builder._angular_scalar_vectors_coset(states, raising, tuple(range(size)),
+            angular_l, partition, partition.dimension, normalize_tableaux=normalize)
 
 
 def test_angular_construction_only_builds_selected_matrix_unit_columns(monkeypatch):
@@ -66,3 +88,33 @@ def test_angular_construction_only_builds_selected_matrix_unit_columns(monkeypat
     assert count == 1
     assert len(vectors) == 1
     assert len(states) == 81
+
+
+def test_full_tableau_expansion_follows_angular_copy_selection(monkeypatch):
+    selected = []
+    expanded = []
+    original_solve = builder._exact_domain_nullspace
+    original_expand = coset_units._unit_column_from_projected_row
+
+    def solve(matrix):
+        assert isinstance(matrix, sp.MutableSparseMatrix)
+        result = original_solve(matrix)
+        selected.append(len(result))
+        return result
+
+    def expand(*args, **kwargs):
+        assert selected and selected[0] > 0
+        expanded.append(True)
+        return original_expand(*args, **kwargs)
+
+    monkeypatch.setattr(builder, '_exact_domain_nullspace', solve)
+    monkeypatch.setattr(coset_units, '_unit_column_from_projected_row', expand)
+    size, ell, L = 3, 2, 2
+    states = tuple(word for word in product(range(-ell,ell+1),repeat=size) if sum(word)==L)
+    raised = tuple(word for word in product(range(-ell,ell+1),repeat=size) if sum(word)==L+1)
+    raising = builder._weight_raising_matrix((ell,)*size, states, raised)
+    partition = Partition((2,1))
+    vectors, count = builder._angular_scalar_vectors_coset(states,raising,
+        tuple(range(size)),ell,partition,partition.dimension)
+    assert selected[0] == count == 2
+    assert expanded and len(vectors) == 2*partition.dimension

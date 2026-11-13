@@ -252,6 +252,8 @@ def count_coupling_cases(representation, basis):
     from ye3t.representation_config import _integer_key_map
     import json
 
+    if representation.subspace_products:
+        raise ValueError("subspace_products requires the source-group operation planner; count the raw target then apply its compiler subspace request")
     if representation.source_sectors is not None:
         return _selected_coupling_cases(representation, basis)
 
@@ -355,12 +357,17 @@ def _coupling_case_full_path(case):
     if isinstance(case["request"], dict):
         inputs["channels"] = case["request"]["channels"]
         inputs["role_dimension"] = case["request"]["role_dimension"]
-    return json.loads(json.dumps({"schema": "ye3t_source_full_path_v1",
+    result = {"schema": "ye3t_source_full_path_v1",
         "carrier": case["carrier"], "factor_rank": case["rank"], "inputs": inputs,
         "target_L": case["target_L"],
         "available_multiplicity_count": case.get("available_multiplicity_count", case["multiplicity_count"]),
         "multiplicity_indices": list(case.get("selected_multiplicities", range(len(labels)))),
-        "labels": labels}, sort_keys=True))
+        "labels": labels}
+    if case["carrier"] == "ACE_density":
+        from ye3t.couplings.density_product_images import _ordinary_occupation_inventory
+        result.update(tag_count=0, coordinates=_ordinary_occupation_inventory(labels),
+                      evaluated_action="ordinary_density:S0")
+    return json.loads(json.dumps(result, sort_keys=True))
 
 
 def _selected_coupling_cases(representation, basis):

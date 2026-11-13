@@ -11,6 +11,8 @@ import hashlib
 import json
 import math
 
+from ye3t.representations.young_orthogonal import SPLIT_COORDINATE_CONVENTION
+
 from .young_coset_transport import (
     adjacent_generator_columns, bind_young_restriction,
     canonical_factor_coset, direct_restricted_young_values,
@@ -131,9 +133,7 @@ def ordered_role_cauchy_count(request):
 
 
 def _young_table(local_parents, target, bracketing):
-    from ye3t.global_coupler import (
-        _build_young_subgroup_specht_coupling, standard_tableaux,
-    )
+    from ye3t.global_coupler import standard_tableaux
 
     rank = sum(sum(item) for item in local_parents)
     if target == (rank,) or target == (1,) * rank:
@@ -149,34 +149,15 @@ def _young_table(local_parents, target, bracketing):
     dimensions = tuple(len(standard_tableaux(item)) for item in local_parents)
     local_dim = math.prod(dimensions)
     target_dim = len(standard_tableaux(target))
-    matrix_units = all(sum(item) == 1 for item in local_parents)
-    if matrix_units:
-        gamma_count = target_dim
-        scale = math.sqrt(target_dim / math.factorial(rank))
-        restricted = ((tuple(scale if col == gamma else 0.0
-                             for gamma in range(gamma_count)
-                             for col in range(target_dim)),)
-                      if rank <= 4 else None)
-    else:
-        restricted, gamma_count = direct_restricted_young_values(
-            local_parents, target
-        )
+    restricted, gamma_count = direct_restricted_young_values(
+        local_parents, target, bracketing
+    )
     if (local_dim < 1 or gamma_count < 1 or restricted is not None and (
         len(restricted) != local_dim or any(
             len(row) != gamma_count * target_dim for row in restricted
         )
     )):
         raise ArithmeticError("Direct ordered Cauchy Young axes are invalid.")
-    if rank <= 4:
-        reference = _build_young_subgroup_specht_coupling(
-            local_parents, target, bracketing=bracketing
-        )
-        full = reference.coefficient_matrix()
-        if (not reference.validation.passed
-                or full.cols != gamma_count * target_dim
-                or any(abs(float(full[row, col]) - restricted[row][col]) > 1e-10
-                       for row in range(local_dim) for col in range(full.cols))):
-            raise ArithmeticError("Direct ordered Cauchy Young map disagrees with exact orbit reference.")
     return {
         "local_parents": local_parents,
         "analytic_character": None,
@@ -184,11 +165,11 @@ def _young_table(local_parents, target, bracketing):
         "target_tableau_dim": target_dim,
         "gamma_count": gamma_count,
         "target_partition": target,
-        **({"restricted_kind": "matrix_units", "restricted_scale": scale}
-           if matrix_units else {"restricted_values": restricted}),
+        "restricted_values": restricted,
+        "coordinate_convention": SPLIT_COORDINATE_CONVENTION,
         "adjacent_generators": adjacent_generator_columns(target),
-        "coset_transport_residual": 0.0,
-        "transport_validation": "exact_subgroup_generators_and_reduced_gram",
+        "coset_transport_residual": None,
+        "transport_validation": "trusted_canonical_split_composition",
         "storage": "identity_coset_plus_sparse_adjacent_generators_v1",
     }, None
 
@@ -324,6 +305,7 @@ def compile_ordered_role_cauchy(request):
         orbit_count //= math.factorial(size)
     payload = {
         "schema": "ye3t_ordered_role_cauchy_compiled_v2",
+        "coordinate_convention": SPLIT_COORDINATE_CONVENTION,
         "request": request,
         "labels": report["labels"],
         **({"available_multiplet_count": report["available_multiplet_count"]}
@@ -362,24 +344,30 @@ def _payload_hash(payload):
 
 
 def validate_ordered_role_cauchy(compiled):
-    """Check the complete serialized schedule before evaluating it."""
+    """Check stored axes and integrity without constructing coefficients.
+
+    Historical schedules retain their own coordinates. Mathematical comparison
+    with a constructor is an explicit development diagnostic, not a load step.
+    """
 
     if compiled.get("schema") != "ye3t_ordered_role_cauchy_compiled_v2":
         raise ValueError("Unknown ordered-role Cauchy artifact schema.")
     if _payload_hash(compiled) != compiled.get("self_hash"):
         raise ValueError("Ordered-role Cauchy artifact hash mismatch.")
-    report = ordered_role_cauchy_count(compiled["request"])
-    if (json.dumps(compiled["labels"], sort_keys=True) !=
-            json.dumps(report["labels"], sort_keys=True)
-            or int(compiled["multiplet_count"]) != report["multiplet_count"]
-            or int(compiled["tableau_count"]) != report["tableau_count"]
-            or int(compiled["component_count"]) != report["component_count"]
-            or compiled.get("available_multiplet_count") != report.get("available_multiplet_count")):
+    from ye3t.representations.generalized_irreps import Partition
+
+    labels = tuple(compiled["labels"])
+    target = compiled["request"]["target"]
+    tableau_count = int(Partition(tuple(target["young_partition"])).dimension)
+    if (int(compiled["multiplet_count"]) != len(labels)
+            or int(compiled["tableau_count"]) != tableau_count
+            or int(compiled["component_count"]) !=
+            len(labels) * tableau_count * (2 * int(target["L"]) + 1)):
         raise ValueError("Ordered-role Cauchy multiplicity labels are invalid.")
     routes = tuple(compiled["routes"])
     if (len(routes) != int(compiled["multiplet_count"])
             or tuple(int(item["multiplicity_index"]) for item in routes)
-            != tuple(item["multiplicity_index"] for item in report["labels"])
+            != tuple(item["multiplicity_index"] for item in labels)
             or not compiled["validation_report"].get("passed", False)):
         raise ValueError("Ordered-role Cauchy route inventory is invalid.")
     sizes = tuple(int(value) for value in compiled["request"]["block_sizes"])
@@ -431,36 +419,34 @@ def validate_ordered_role_cauchy(compiled):
         for route in routes
     ):
         raise ValueError("Ordered-role Cauchy route table indices are invalid.")
-    request_json = json.dumps(compiled["request"], sort_keys=True,
-                              allow_nan=False, separators=(",", ":"))
-    if any("values" in young for young in compiled["young_tables"]):
-        # The v2 pre-compact table is still readable. Its hash and every route,
-        # local map, and Young coefficient must match the current compiler.
-        import numpy as np
-        from ye3t.representations.young_orthogonal import (
-            _young_subgroup_shuffle_representatives,
-        )
-
-        current = _recompiled_payload(request_json)
-        if tuple(tuple(row) for row in cosets) != _young_subgroup_shuffle_representatives(sizes):
-            raise ValueError("Legacy ordered-role coset order differs from the canonical source.")
-        for key in ("labels", "blocks", "factor_types", "local_tables",
-                    "angular_trees", "routes"):
-            if json.dumps(compiled[key], sort_keys=True) != json.dumps(current[key], sort_keys=True):
-                raise ValueError("Legacy ordered-role Cauchy schedule differs from compiler replay.")
-        for old, new in zip(compiled["young_tables"], current["young_tables"], strict=True):
-            if "values" not in old:
-                if json.dumps(old, sort_keys=True) != json.dumps(new, sort_keys=True):
-                    raise ValueError("Legacy ordered-role Young character differs from compiler replay.")
-                continue
-            if (json.dumps(old["local_parents"]) != json.dumps(new["local_parents"])
-                    or old["gamma_count"] != new["gamma_count"]
-                    or not np.allclose(np.asarray(old["values"], dtype=np.float64),
-                                       expanded_young_values(new, cosets),
-                                       atol=1e-8, rtol=1e-8)):
-                raise ValueError("Legacy ordered-role Young coefficients differ from compiler replay.")
-    elif _recompiled_hash(request_json) != compiled["self_hash"]:
-        raise ValueError("Ordered-role Cauchy coefficients failed compiler replay.")
+    for route, label in zip(routes, labels, strict=True):
+        young = compiled["young_tables"][route["young_index"]]
+        if (not 0 <= int(route["young_copy"]) < int(young["gamma_count"])
+                or route["young_copy"] != label["young_copy"]
+                or len(route["local_copy_indices"]) != len(sizes)
+                or any(not 0 <= int(copy) < len(compiled["local_tables"][index]["family_order"])
+                       for copy, index in zip(route["local_copy_indices"], route["local_indices"], strict=True))):
+            raise ValueError("Ordered-role Cauchy copy indices are invalid.")
+    for young in compiled["young_tables"]:
+        if young["analytic_character"] is not None:
+            continue
+        rows = int(young["local_tableau_dim"])
+        columns = int(young["gamma_count"]) * int(young["target_tableau_dim"])
+        if "values" in young:
+            values = young["values"]
+            if cosets is None or len(values) != len(cosets) * rows:
+                raise ValueError("Stored Young orbit axes are invalid.")
+        elif young.get("restricted_kind") == "matrix_units":
+            if rows != 1 or young.get("restricted_scale", 0) <= 0:
+                raise ValueError("Stored Young matrix-unit axes are invalid.")
+            continue
+        else:
+            values = young["restricted_values"]
+            if len(values) != rows:
+                raise ValueError("Stored Young restriction axes are invalid.")
+        if any(len(row) != columns or any(not math.isfinite(float(value)) for value in row)
+               for row in values):
+            raise ValueError("Stored Young coefficient axes or values are invalid.")
     return True
 
 

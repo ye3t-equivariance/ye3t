@@ -13,6 +13,7 @@ import math
 from collections.abc import Mapping
 
 from ye3t._record import recordclass
+from ye3t.cache.graph_json import _iter_canonical_json_bytes
 from ye3t.representations.projectors import inverse_permutation
 from ye3t.representations.slot_groups import (
     induced_factor_role_permutations,
@@ -112,28 +113,35 @@ YE3T_MODEL_STAGE_BARRIER_KINDS = (
 )
 
 
-def _canonical_payload(value):
+def _canonical_payload(value, _memo=None):
     if hasattr(value, "to_dict"):
-        return _canonical_payload(value.to_dict())
+        return _canonical_payload(value.to_dict(), _memo)
+    identity = id(value)
+    if _memo is not None and identity in _memo:
+        return _memo[identity][1]
     if isinstance(value, dict):
-        return {
-            str(key): _canonical_payload(item)
+        result = {
+            str(key): _canonical_payload(item, _memo)
             for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
         }
-    if isinstance(value, (tuple, list)):
-        return [_canonical_payload(item) for item in value]
-    if isinstance(value, complex):
+    elif isinstance(value, (tuple, list)):
+        result = [_canonical_payload(item, _memo) for item in value]
+    elif isinstance(value, complex):
         return [float(value.real), float(value.imag)]
-    return value
+    else:
+        return value
+    if _memo is not None:
+        # Keep temporary to_dict containers alive until this hash finishes;
+        # their ids must not be reused by another temporary conversion.
+        _memo[identity] = (value, result)
+    return result
 
 
 def _stable_hash(value):
-    encoded = json.dumps(
-        _canonical_payload(value),
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    digest = hashlib.sha256()
+    for chunk in _iter_canonical_json_bytes(_canonical_payload(value, {})):
+        digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _is_lower_sha256(value):
@@ -2102,6 +2110,7 @@ def _normalized_model_stage_program(
     stages = []
     stage_index_by_id = {}
     carriers_by_full_id = {}
+    metadata_memo = {}
     for stage_index, raw_stage in enumerate(
         program.get("stage_records", ())
     ):
@@ -2122,7 +2131,7 @@ def _normalized_model_stage_program(
                 "model carrier stage compiler_metadata must be a mapping"
             )
         compiler_metadata = _canonical_payload(
-            dict(compiler_metadata)
+            dict(compiler_metadata), metadata_memo
         )
         stage_index_by_id[stage_id] = int(stage_index)
         input_stage_ids = tuple(
@@ -4706,6 +4715,7 @@ def _compile_model_stage_carrier_arena_plan(
     carrier_records_by_id = {}
     arena_cursor = 0
     inferred_conventions = []
+    metadata_memo = {}
     for stage_index, raw_stage in enumerate(model_stage_records):
         raw_stage = dict(raw_stage)
         stage_id = str(raw_stage["stage_id"])
@@ -4724,7 +4734,7 @@ def _compile_model_stage_carrier_arena_plan(
                 "model carrier stage compiler_metadata must be a mapping"
             )
         compiler_metadata = _canonical_payload(
-            dict(compiler_metadata)
+            dict(compiler_metadata), metadata_memo
         )
         local_cursor = 0
         carriers = []
@@ -5776,8 +5786,8 @@ class YE3TSourceRealization:
                 raise ValueError("tagged occurrence source requires an admissible explicit tag_count")
             if not bool(self.injective):
                 raise ValueError("explicit tagged occurrences must be distinct")
-            if dict(self.metadata).get("density_context") != "inclusive":
-                raise ValueError("tagged occurrence source requires inclusive density context")
+            if dict(self.metadata).get("density_context") not in {"inclusive", "motif_excluded"}:
+                raise ValueError("tagged occurrence source requires density_context inclusive or motif_excluded")
         if kind == "ordered_role_cauchy":
             role_dimension = dict(self.metadata).get("role_dimension")
             if not isinstance(role_dimension, int) or isinstance(role_dimension, bool) or role_dimension < 1:
@@ -5792,6 +5802,9 @@ class YE3TSourceRealization:
         object.__setattr__(self, "retain_role_order", retain_role_order)
         object.__setattr__(self, "automorphisms", automorphisms)
         object.__setattr__(self, "metadata", dict(self.metadata))
+        if self.metadata.get("emitted_action") == "shared_factor_groups":
+            from ye3t.couplings.shared_permutation_factors import validate_shared_factor_action
+            validate_shared_factor_action(self)
 
     def validate_for_carrier(self, carrier_key):
         if not isinstance(carrier_key, YE3TCarrierKey):
@@ -5799,10 +5812,14 @@ class YE3TSourceRealization:
         right_tags = self.kind == "tagged_cauchy_occurrence" and self.metadata.get("emitted_action") == "right_tags"
         empty_tags = self.kind == "ordinary_density" and self.metadata.get("emitted_action") == "trivial_S0"
         shell_roles = self.kind == "lifted_density_roles" and self.metadata.get("emitted_action") == "shell_roles"
+        shared_groups = self.metadata.get("emitted_action") == "shared_factor_groups"
         if empty_tags and self.metadata.get("tag_count") != 0:
             raise ValueError("A trivial S0 source requires an empty physical tag set")
         degree = (self.metadata.get("shell_role_degree") if shell_roles else
                   0 if empty_tags else self.metadata["tag_count"] if right_tags else self.rank)
+        if shared_groups:
+            from ye3t.couplings.shared_permutation_factors import validate_shared_factor_action
+            degree = validate_shared_factor_action(self)
         if shell_roles and (type(degree) is not int or degree < 1):
             raise ValueError("Shell-role sources require a positive shell_role_degree")
         if int(carrier_key.rank) != int(degree):
@@ -6648,7 +6665,7 @@ class YE3TExecutionPlan:
                 table = metadata.get("table")
                 if (metadata.get("schema") != "ye3t_typed_joint_factor_execution_v1"
                         or not isinstance(table, Mapping)
-                        or table.get("kind") != "typed_joint_factorized_v1"):
+                        or table.get("kind") not in {"typed_joint_factorized_v1", "shared_permutation_factors_v1"}):
                     raise ValueError("typed factor instruction needs its factorized table")
                 digest = "sha256:" + hashlib.sha256(json.dumps(
                     {key: value for key, value in table.items() if key != "hash"},
@@ -6657,10 +6674,15 @@ class YE3TExecutionPlan:
                 if table.get("hash") != digest or metadata.get("table_hash") != digest:
                     raise ValueError("typed factor instruction table hash is invalid")
                 output = instruction.output_carrier
+                shared_action = table.get("kind") == "shared_permutation_factors_v1"
+                factor_rank = table["factor_rank"] if shared_action else output.rank
+                if shared_action and (output.rank != table["action_degree"]
+                        or output.to_dict() != table["output_layout"]["key"]):
+                    raise ValueError("Shared factor rank/action or output type differs from compiler table")
                 routes = tuple(table["routes"])
                 tableau_count = len(standard_tableaux(output.partition))
-                if (len(instruction.input_carriers) != output.rank
-                        or len(table["input_factor_types"]) != output.rank
+                if (len(instruction.input_carriers) != factor_rank
+                        or len(table["input_factor_types"]) != factor_rank
                         or int(table["shape"][1]) != len(routes)
                         * tableau_count * (2 * output.rotation_L + 1)
                         or (output.parity is not None and output.parity !=

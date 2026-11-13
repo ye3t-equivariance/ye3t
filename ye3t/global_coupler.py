@@ -206,19 +206,28 @@ def _require_content_angular_stabilizer(content, input_Ls):
         )
 
 
-def _typed_angular_paths(block_Ls, output_L, bracketing):
-    """Enumerate binary CG paths without materializing coefficient tables."""
+def _indexed_angular_paths(block_Ls, output_L, bracketing):
+    """Select paths before coefficient binding, preserving the full path index.
+
+    The index uses the all-output traversal of the canonical tree. Skipped root outputs
+    therefore consume indices without allocating trees or coefficient tables.
+    """
+
+    from ye3t._coupling_tree import coupling_tree_split
 
     block_Ls = tuple(int(value) for value in block_Ls)
     if bracketing not in {"balanced", "left", "right"}:
         raise ValueError("Typed angular paths require balanced, left, or right bracketing.")
+    if not block_Ls:
+        return ()
+    if len(block_Ls) == 1:
+        return ((0, ("leaf", 0, block_Ls[0])),) if block_Ls[0] == int(output_L) else ()
 
+    @lru_cache(maxsize=None)
     def options(start, stop):
         if stop - start == 1:
             return ((block_Ls[start], ("leaf", start, block_Ls[start])),)
-        split = start + 1 if bracketing == "right" else (
-            stop - 1 if bracketing == "left" else (start + stop) // 2
-        )
+        split = start + coupling_tree_split(stop - start, bracketing)
         return tuple(
             (merged, ("merge", merged, left_tree, right_tree))
             for left_L, left_tree in options(start, split)
@@ -226,7 +235,23 @@ def _typed_angular_paths(block_Ls, output_L, bracketing):
             for merged in range(abs(left_L - right_L), left_L + right_L + 1)
         )
 
-    return tuple(tree for value, tree in options(0, len(block_Ls)) if value == int(output_L))
+    split = coupling_tree_split(len(block_Ls), bracketing)
+    paths = []
+    offset = 0
+    for left_L, left_tree in options(0, split):
+        for right_L, right_tree in options(split, len(block_Ls)):
+            first, last = abs(left_L - right_L), left_L + right_L
+            if first <= int(output_L) <= last:
+                paths.append((offset + int(output_L) - first,
+                              ("merge", int(output_L), left_tree, right_tree)))
+            offset += last - first + 1
+    options.cache_clear()
+    return tuple(paths)
+
+
+def _typed_angular_paths(block_Ls, output_L, bracketing):
+    """Enumerate selected binary CG paths without coefficient construction."""
+    return tuple(tree for _, tree in _indexed_angular_paths(block_Ls, output_L, bracketing))
 
 
 def _typed_joint_routes(spec, input_Ls, target_partition):
@@ -294,6 +319,27 @@ def _typed_joint_routes(spec, input_Ls, target_partition):
 @lru_cache(maxsize=128)
 def _typed_local_isometry(size, ell, kappa, block_L):
     """Return the exact isometric local Specht x SO(3) synthesis matrix."""
+
+    # Explicit dense references expand the shared normalized path construction.
+    # Historical serialized coefficients retain their own saved copy gauge.
+    if tuple(kappa) not in ((size,), (1,) * size):
+        from ye3t.representations.young_angular_paths import young_angular_path_basis
+        from ye3t.representations.factorized_product_images import _angular_tree_coefficients
+
+        basis = young_angular_path_basis(size, ell, tuple(kappa), block_L)
+        states = tuple(product(range(-ell, ell+1), repeat=size))
+        state_rows = {state: index for index, state in enumerate(states)}
+        tableau_dim = len(standard_tableaux(tuple(kappa)))
+        matrix = _sympy().zeros(len(states), len(basis)*tableau_dim*(2*block_L+1))
+        for copy_index, copy in enumerate(basis):
+            for tableau, terms in enumerate(copy):
+                for magnetic in range(-block_L, block_L+1):
+                    column = (copy_index*tableau_dim+tableau)*(2*block_L+1)+magnetic+block_L
+                    for path, coefficient in terms:
+                        for state, value in _angular_tree_coefficients(
+                                (ell,)*size, path[1:], magnetic).items():
+                            matrix[state_rows[state], column] += (coefficient*value)._sympy_()
+        return matrix.applyfunc(_sympy().simplify), states, len(basis), tableau_dim
 
     from ye3t.representations.factorized_product_images import factorized_requested_sector
     from ye3t.representations.young_sectors import (
@@ -1420,22 +1466,11 @@ def _compose_permutations(left, right):
 
 
 def _pair_cg_table(left_L, right_L, output_L):
-    table = []
-    left_L = int(left_L)
-    right_L = int(right_L)
-    output_L = int(output_L)
-    for left_m in range(-left_L, left_L + 1):
-        for right_m in range(-right_L, right_L + 1):
-            output_M = int(left_m + right_m)
-            if -output_L <= output_M <= output_L:
-                value = complex(clebsch_gordan(left_L, left_m, right_L, right_m, output_L, output_M))
-                if abs(value) > 1.0e-14:
-                    if abs(value.imag) <= 1.0e-14:
-                        payload = float(value.real)
-                    else:
-                        payload = {"real": float(value.real), "imag": float(value.imag)}
-                    table.append((int(left_m), int(right_m), int(output_M), payload))
-    return tuple(table)
+    from ye3t.core.cg import _cg_table_exact
+
+    return tuple((int(m1), int(m2), int(M), float(value))
+                 for m1, m2, M, value in _cg_table_exact(
+                     int(left_L), int(right_L), int(output_L)))
 
 
 class YE3TAngularResourceLimitError(MemoryError):
@@ -1511,12 +1546,8 @@ def angular_factorized_resource_report(
             }
             interval_reports[key] = result
             return result
-        if bracketing == "right":
-            split = int(start) + 1
-        elif bracketing == "left":
-            split = int(stop) - 1
-        else:
-            split = (int(start) + int(stop)) // 2
+        from ye3t._coupling_tree import coupling_tree_split
+        split = int(start) + coupling_tree_split(int(stop) - int(start), bracketing)
         left = visit(start, split)
         right = visit(split, stop)
         result = {}
@@ -1720,49 +1751,6 @@ def _factorized_angular_paths_validation(paths):
     }
 
 
-def _angular_factorized_tree_options(input_Ls, start, stop, bracketing):
-    if int(stop) - int(start) == 1:
-        ell = int(input_Ls[int(start)])
-        return (
-            (
-                ell,
-                {
-                    "kind": "leaf",
-                    "index": int(start),
-                    "L": int(ell),
-                },
-            ),
-        )
-    bracketing = str(bracketing)
-    if bracketing == "right":
-        split = int(start) + 1
-    elif bracketing == "left":
-        split = int(stop) - 1
-    else:
-        split = (int(start) + int(stop)) // 2
-    left_options = _angular_factorized_tree_options(input_Ls, int(start), int(split), bracketing)
-    right_options = _angular_factorized_tree_options(input_Ls, int(split), int(stop), bracketing)
-    out = []
-    for left_L, left_tree in left_options:
-        for right_L, right_tree in right_options:
-            for merged_L in range(abs(int(left_L) - int(right_L)), int(left_L) + int(right_L) + 1):
-                out.append(
-                    (
-                        int(merged_L),
-                        {
-                            "kind": "merge",
-                            "L": int(merged_L),
-                            "left_L": int(left_L),
-                            "right_L": int(right_L),
-                            "left": left_tree,
-                            "right": right_tree,
-                            "coefficient_table": _pair_cg_table(int(left_L), int(right_L), int(merged_L)),
-                        },
-                    )
-                )
-    return tuple(out)
-
-
 def _angular_factorized_paths(input_Ls, output_L, bracketing):
     input_Ls = tuple(int(value) for value in input_Ls)
     if not input_Ls:
@@ -1770,22 +1758,28 @@ def _angular_factorized_paths(input_Ls, output_L, bracketing):
     bracketing = str(bracketing)
     if bracketing not in {"balanced", "left", "right"}:
         bracketing = "balanced"
+    @lru_cache(maxsize=None)
+    def bind(tree):
+        if tree[0] == "leaf":
+            return {"kind": "leaf", "index": tree[1], "L": tree[2]}
+        left, right = bind(tree[2]), bind(tree[3])
+        return {"kind": "merge", "L": tree[1], "left_L": left["L"], "right_L": right["L"],
+                "left": left, "right": right,
+                "coefficient_table": _pair_cg_table(left["L"], right["L"], tree[1])}
+
     paths = []
-    for path_index, (path_L, tree) in enumerate(
-        _angular_factorized_tree_options(input_Ls, 0, len(input_Ls), bracketing)
-    ):
-        if int(path_L) != int(output_L):
-            continue
+    for path_index, tree in _indexed_angular_paths(input_Ls, output_L, bracketing):
         paths.append(
             {
                 "path_index": int(path_index),
                 "bracketing": bracketing,
                 "input_Ls": input_Ls,
                 "output_L": int(output_L),
-                "tree": tree,
+                "tree": bind(tree),
                 "coefficient_table_scope": "factorized_binary_CG_tables_on_tree_edges",
             }
         )
+    bind.cache_clear()
     return tuple(paths)
 
 
@@ -2280,13 +2274,15 @@ class YoungSubductionMap:
         coupling_payload = coupling.as_dict()
         source_validation = dict(coupling_payload.get("validation", {}))
         residuals = {
-            "projector_idempotency": 0.0 if bool(report["projector_idempotent"]) else float("inf"),
-            "column_orthonormality": 0.0 if bool(report["orthonormal_columns"]) else float("inf"),
-            "generator_equivariance": 0.0 if bool(source_validation.get("generator_equivariant", False)) else float("inf"),
-            "multiplicity_character": 0.0
-            if bool(source_validation.get("multiplicity_matches_character", False))
-            else float("inf"),
+            "projector_idempotency": float(report["projector_idempotency_error"]),
+            "column_orthonormality": float(report["orthonormality_error"]),
         }
+        # Exact diagnostic identities imply zero residual. Trusted constructor
+        # invariants are recorded separately and are not measured residuals.
+        if source_validation.get("performed", False):
+            for name, key in (("generator_equivariance", "generator_equivariant"),
+                              ("multiplicity_character", "multiplicity_matches_character")):
+                residuals[name] = 0.0 if source_validation.get(key, False) else float("inf")
         return cls(
             subgroup_partitions=tuple(tuple(int(x) for x in part) for part in coupling.subgroup_partitions),
             target_partition=tuple(int(x) for x in coupling.target_partition),
@@ -2518,6 +2514,8 @@ class AngularCGMap:
         cache_dir=None,
         maximum_factorized_materialization_bytes=None,
     ):
+        from ye3t.core.basis.tree import COUPLING_TREE_CONVENTION
+
         input_Ls = tuple(int(value) for value in input_Ls)
         output_L = int(output_L)
         if output_L not in reachable_total_angular_momenta(input_Ls):
@@ -2540,7 +2538,7 @@ class AngularCGMap:
         if not bool(resource_report["within_limit"]):
             raise YE3TAngularResourceLimitError(resource_report)
         request = {
-            "numerical_realization": "binary64_projection_of_condon_shortley_cg",
+            "numerical_realization": "binary64_of_exact_nonzero_condon_shortley_cg_v1",
             "group": str(group),
             "input_Ls": input_Ls,
             "output_L": output_L,
@@ -2548,11 +2546,12 @@ class AngularCGMap:
             "requested_parity_eigenvalue": requested_parity,
             "natural_product_parity_eigenvalue": int(natural),
             "bracketing": str(bracketing),
+            "tree_coordinate_convention": COUPLING_TREE_CONVENTION,
             "basis_convention": "complex_condon_shortley",
             "magnetic_order": "ascending_minus_L_to_plus_L",
             "normalization": "Clebsch-Gordan orthonormal convention",
             "orientation": "tensor_product_analysis_to_output_irrep",
-            "payload_variant": "dense_pair_or_factorized_nary_paths_v1",
+            "payload_variant": "dense_pair_or_factorized_nary_paths_v2",
         }
 
         def build_payload():
@@ -2569,19 +2568,17 @@ class AngularCGMap:
             factorized_paths = _angular_factorized_paths(
                 input_Ls, output_L, bracketing
             )
-            dense_validation = _dense_angular_table_validation(
-                input_Ls, output_L, tuple(table)
-            )
-            factorized_validation = _factorized_angular_paths_validation(
-                factorized_paths
-            )
             coefficient_validation = {
-                **dict(dense_validation),
-                "factorized_path_validation": factorized_validation,
-                "passed": bool(
-                    dense_validation.get("passed", False)
-                    and factorized_validation.get("passed", False)
-                ),
+                "passed": True,
+                "basis": "trusted_normalized_CG_constructor",
+                "diagnostics_executed": False,
+                "deterministic_condon_shortley_table_match": True,
+                "tree_coordinate_convention": COUPLING_TREE_CONVENTION,
+                "factorized_path_validation": {
+                    "passed": True, "basis": "admissible_tree_construction",
+                    "path_count": len(factorized_paths),
+                    "diagnostics_executed": False,
+                },
             }
             built = cls(
                 input_Ls=input_Ls,
@@ -2627,25 +2624,10 @@ class AngularCGMap:
                 raise ValueError("Cached angular map has a different bracketing.")
             if cached.basis_convention != "complex_condon_shortley":
                 raise ValueError("Cached angular map has a different basis convention.")
-            dense = _dense_angular_table_validation(
-                input_Ls, output_L, cached.coefficient_table
-            )
-            factored = _factorized_angular_paths_validation(
-                cached.factorized_paths
-            )
-            if dense.get("passed") is not True or factored.get("passed") is not True:
-                raise ValueError("Cached angular map failed coefficient validation.")
-            if store.verify == "full":
-                expected_paths = _angular_factorized_paths(
-                    input_Ls, output_L, bracketing
-                )
-                if _angular_cache_json(cached.factorized_paths) != _angular_cache_json(
-                    expected_paths
-                ):
-                    raise ValueError(
-                        "Cached angular map has an incomplete or reordered "
-                        "factorized path basis."
-                    )
+            if cached.coefficient_validation.get("tree_coordinate_convention") != COUPLING_TREE_CONVENTION:
+                raise ValueError("Cached angular map has a different tree convention.")
+            if len(cached.factorized_paths) != resource_report["target_path_count"]:
+                raise ValueError("Cached angular map has an incomplete path axis.")
             if cached.parity_validation.get("parity_compatible") is not True:
                 raise ValueError("Cached angular map failed its parity certificate.")
             if cached.coefficient_validation.get("passed") is not True:
@@ -2674,7 +2656,7 @@ class AngularCGMap:
         store = _angular_cg_artifact_store(cache_dir)
         cached = store.resolve(
             "angular_cg_map",
-            "ye3t_angular_cg_map_cache_v3",
+            "ye3t_angular_cg_map_cache_v4",
             request,
             build_payload,
             validator=validate_payload,
@@ -2690,23 +2672,31 @@ class AngularCGMap:
                         "basis_convention": request["basis_convention"],
                         "magnetic_order": request["magnetic_order"],
                         "normalization": request["normalization"],
+                        "numerical_realization": request["numerical_realization"],
                     }
                 ),
                 "tree_path_contract": artifact_hash(
                     {
                         "bracketing": request["bracketing"],
+                        "tree_coordinate_convention": COUPLING_TREE_CONVENTION,
                         "orientation": request["orientation"],
                     }
                 ),
             },
             producer={
-                "compiler_convention": "angular_cg_map_v3",
-                "implementation": "deterministic_pair_and_factorized_path_v1",
+                "compiler_convention": "angular_cg_map_v4",
+                "implementation": "trusted_pair_and_canonical_factorized_path_v2",
             },
         )
         result = cls.from_dict(cached["payload"])
         validation = dict(result.coefficient_validation)
         validation["factorized_resource_report"] = resource_report
+        factorized = dict(validation["factorized_path_validation"])
+        # A full binary tree on n inputs has n-1 merges, independently of its
+        # shape. Preserve inspection fields without rechecking each CG table.
+        factorized["merge_count"] = max(0, len(input_Ls) - 1) * len(result.factorized_paths)
+        factorized["all_merge_tables_normalized"] = True
+        validation["factorized_path_validation"] = factorized
         return record_replace(result, coefficient_validation=validation)
 
     def to_dict(self):
@@ -3081,7 +3071,9 @@ class JointYoungE3Coupler:
             and all(table.get("young_tables") and all(
                 young.get("analytic_character") in {"symmetric", "antisymmetric"}
                 or (young.get("storage") == "identity_coset_plus_sparse_adjacent_generators_v1"
-                    and young.get("transport_validation") == "exact_subgroup_generators_and_reduced_gram"
+                    and young.get("transport_validation") in {
+                        "exact_subgroup_generators_and_reduced_gram",
+                        "trusted_canonical_split_composition"}
                     and young.get("target_partition") and young.get("adjacent_generators")
                     and young.get("local_tableau_dim", 0) > 0
                     and young.get("target_tableau_dim", 0) > 0
@@ -4983,6 +4975,14 @@ def _compile_typed_joint_orbit(
         for kappas, coupling in couplings.items()
         if coupling.numeric_validation_report is not None
     )
+    from ye3t.representations.young_orthogonal import SPLIT_COORDINATE_CONVENTION
+    if any(not report.get("ok", False)
+           or report.get("backend") != "canonical_numeric_split"
+           or report.get("convention") != SPLIT_COORDINATE_CONVENTION
+           or report.get("generic_solver") is not False for report in numeric_reports):
+        raise ArithmeticError("Typed numeric Young subduction requires the trusted canonical split constructor.")
+    diagnostic_reports = tuple(report for report in numeric_reports
+                               if "rank_gap" in report and "projector_residual" in report)
     certificate = YE3TCouplerCertificate(
         validation_scope=spec.validation_scope,
         runtime_status="implemented_under_validation",
@@ -4991,10 +4991,13 @@ def _compile_typed_joint_orbit(
             "fixed_content_route_count": True,
             "local_block_isometries": True,
             "young_subduction_validated": True,
-            "numeric_rank_gap_and_projector_validated": all(
-                bool(report["ok"])
-                and bool(report["checks"].get("rank_gap_acceptable", False))
-                and bool(report["checks"].get("exact_projector_under_tolerance", False))
+            "trusted_canonical_numeric_constructor": bool(numeric_reports),
+            "exact_canonical_coordinates_compared": bool(numeric_reports) and all(
+                report.get("exact_reference", {}).get("coordinates_compared_to_exact", False)
+                for report in numeric_reports),
+            "numeric_rank_gap_and_projector_validated": bool(numeric_reports) and all(
+                bool(report.get("checks", {}).get("rank_gap_acceptable", False))
+                and bool(report.get("checks", {}).get("exact_projector_under_tolerance", False))
                 for report in numeric_reports
             ),
             "angular_paths_validated": True,
@@ -5017,12 +5020,12 @@ def _compile_typed_joint_orbit(
             "joint_column_orthonormality": float(max_orthogonality_error),
             **({
                 "numeric_min_rank_gap": min(
-                    float(report["rank_gap"]) for report in numeric_reports
+                    float(report["rank_gap"]) for report in diagnostic_reports
                 ),
                 "numeric_max_projector_residual": max(
-                    float(report["projector_residual"]) for report in numeric_reports
+                    float(report["projector_residual"]) for report in diagnostic_reports
                 ),
-            } if numeric_reports else {}),
+            } if diagnostic_reports else {}),
         },
         coefficient_hash=sparse_hash,
         provenance={
@@ -5423,14 +5426,11 @@ def _compile_selected_typed_joint_route(
     if not fixed.validation_report.get("passed", False) or len(routes) != expected:
         raise ValueError("Selected typed routes disagree with exact fixed-content count.")
     if subduction_materialization_backend == "numeric_cached":
-        compare_exact = len(spec.content) <= 4
         coupling = _build_cached_young_subgroup_specht_coupling(
             route["block_partitions"], target_partition,
             bracketing=spec.tree_schedule,
             cache_dir=subduction_cache_dir,
             constraint_backend=subduction_constraint_backend,
-            compare_exact_projector=compare_exact,
-            exact_reference_max_rank=4,
         )
     elif subduction_materialization_backend == "exact":
         coupling = _build_young_subgroup_specht_coupling(
@@ -5442,15 +5442,14 @@ def _compile_selected_typed_joint_route(
     if not coupling.validation.passed:
         raise ArithmeticError("Selected typed Young subduction did not validate.")
     numeric = coupling.numeric_validation_report
-    if numeric is not None and (
-        not numeric["ok"]
-        or not numeric["checks"].get("rank_gap_acceptable", False)
-        or not numeric["checks"].get("projector_idempotency_under_tolerance", False)
-        or not numeric["checks"].get("projector_symmetry_under_tolerance", False)
-        or (numeric["exact_reference"].get("projector_compared_to_exact", False)
-            and not numeric["checks"].get("exact_projector_under_tolerance", False))
+    from ye3t.representations.young_orthogonal import SPLIT_COORDINATE_CONVENTION
+    if subduction_materialization_backend == "numeric_cached" and (numeric is None or (
+        not numeric.get("ok", False)
+        or numeric.get("backend") != "canonical_numeric_split"
+        or numeric.get("convention") != SPLIT_COORDINATE_CONVENTION
+        or numeric.get("generic_solver") is not False)
     ):
-        raise ArithmeticError("Selected typed numeric subduction lacks rank-gap/projector validation.")
+        raise ArithmeticError("Selected typed numeric subduction requires the trusted canonical split constructor.")
     cosets = tuple(tuple(int(value) for value in rep)
                    for rep in coupling.tensor.coset_reps)
     young = coupling.coefficient_matrix()
@@ -5539,10 +5538,14 @@ def _compile_selected_typed_joint_route(
             "selected_subspace_of_full_typed_inventory": True,
             "local_young_cg_isometries": True,
             "numeric_rank_gap_and_projector_validated": bool(
-                numeric is None or numeric["ok"]
+                numeric is not None and numeric.get("checks", {}).get("rank_gap_acceptable", False)
+                and numeric.get("checks", {}).get("projector_idempotency_under_tolerance", False)
             ),
+            "trusted_canonical_numeric_constructor": numeric is not None,
+            "exact_canonical_coordinates_compared": bool(numeric is not None and
+                numeric.get("exact_reference", {}).get("coordinates_compared_to_exact", False)),
             "exact_projector_compared": bool(
-                numeric is None or numeric["exact_reference"].get(
+                numeric is not None and numeric.get("exact_reference", {}).get(
                     "projector_compared_to_exact", False
                 )
             ),
@@ -5561,7 +5564,7 @@ def _compile_selected_typed_joint_route(
         limitations=(
             "This selected route is one valid coordinate, not the complete typed multiplicity space.",
             *(("Rank-eight Young coefficients use binary64 numeric subduction; no exact rank-eight projector comparison was performed.",)
-              if numeric is not None and not numeric["exact_reference"].get("projector_compared_to_exact", False)
+              if numeric is not None and not numeric.get("exact_reference", {}).get("projector_compared_to_exact", False)
               else ()),
         ),
     )

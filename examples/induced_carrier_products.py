@@ -13,7 +13,7 @@ config = {
     "representation": {
         "group": "O3", "ranks": [3], "parent": {"young_lambda": [2, 1], "L": 2, "parity": "even"},
         "factorization": "standard_split", "subspace": "full",
-        "uncoupled_factor_inputs": {"eta_count_per_rank": {3: 3}, "l_max_per_rank": {3: 1}},
+        "uncoupled_factor_inputs": {"eta_max_per_rank": {3: 3}, "l_max_per_rank": {3: 1}},
         "intermediates": {"young_kappa": "all_valid", "block_rotation": {"policy": "all_valid"}}},
     "runtime": {"backend": "torch", "device": "cpu", "dtype": "complex128"},
     "model": {"operation": "disjoint_induction", "argument_ids": ["left", "right"]},

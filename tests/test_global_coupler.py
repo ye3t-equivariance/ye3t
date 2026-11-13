@@ -1977,7 +1977,10 @@ def test_balanced_tree_compilation_records_exact_recoupling_overlap_for_nontrivi
                 validation_scope="projectors",
                 runtime_status="planned_not_public",
                 metadata={"input_Ls": (0, 0, 0), "subgroup_partitions": ((1,), (1,), (1,))},
-            )
+            ),
+            # The overlap report was built from exact canonical split maps.
+            # Legacy numeric tables use a separately identified copy gauge.
+            subduction_materialization_backend="exact",
         ).subduction_maps[0].coefficient_matrix()
         reconstruction_residual = sp.simplify(comparison * overlap - balanced_matrix)
         assert max(
@@ -2172,7 +2175,11 @@ def test_balanced_tree_refuses_incomplete_multiroute_typed_image():
         spec, subduction_materialization_backend="exact"
     )
     assert coupler.certificate.passed
-    assert coupler.subduction_maps
+    # The complete compact coupler stores restricted split tables rather than
+    # expanding induced-basis maps merely for metadata inspection.
+    assert not coupler.subduction_maps
+    assert coupler.factorized_coefficient_tables[0]["young_tables"]
+    assert coupler.component_inventory()["all_component_families_present"]
     assert len(coupler.factorized_coefficient_tables[0]["routes"]) > 1
     with pytest.raises(NotImplementedError, match="repeated-factor image maps"):
         CompileBalancedTree(spec, subduction_materialization_backend="exact")

@@ -52,41 +52,9 @@ def _real_cg_entries_cpu(
     *,
     tol = 1.0e-14,
 ):
-    """Sparse real-basis CG entries matching ``_couple_packed`` semantics."""
-
-    L1 = int(L1)
-    L2 = int(L2)
-    L_out = int(L_out)
-    left_dim = 2 * L1 + 1
-    right_dim = 2 * L2 + 1
-    out_dim = 2 * L_out + 1
-    cg = _cg_tensor_cpu(L1, L2, L_out)
-    entries = []
-    for idx_left in range(left_dim):
-        left = torch.zeros((1, left_dim), dtype=torch.float64)
-        left[0, idx_left] = 1.0
-        left_complex = real_tesseral_to_complex_multiplet(left, L1)
-        for idx_right in range(right_dim):
-            right = torch.zeros((1, right_dim), dtype=torch.float64)
-            right[0, idx_right] = 1.0
-            right_complex = real_tesseral_to_complex_multiplet(right, L2)
-            coupled = torch.einsum("nm,np,mpr->nr", left_complex, right_complex, cg)
-            if (L1 + L2 - L_out) % 2:
-                coupled = -1j * coupled
-            real = complex_multiplet_to_real_tesseral(
-                coupled,
-                L=L_out,
-                M_values=tuple(range(-L_out, L_out + 1)),
-            ).reshape(out_dim)
-            for idx_out, value in enumerate(real):
-                scalar = complex(value.item())
-                if abs(scalar.imag) > 1.0e-10:
-                    raise ValueError(
-                        "Real-basis CG construction produced a non-negligible imaginary coefficient."
-                    )
-                if abs(scalar.real) > float(tol):
-                    entries.append((idx_left, idx_right, idx_out, float(scalar.real)))
-    return tuple(entries)
+    """Compatibility entry point for the shared canonical real CG table."""
+    from ye3t.paired_cg import _real_cg_entries_cpu as shared_entries
+    return shared_entries(L1, L2, L_out, tol=tol)
 
 
 @lru_cache(maxsize=None)
