@@ -48,6 +48,19 @@ def test_chemical_collision_is_zero_before_other_product_work():
     assert _physical_source_product((("H", 0, 1, FAMILY, 0), ("O", 0, 1, FAMILY, 2))) == {}
 
 
+def test_incompatible_tag_species_are_excluded_before_physical_compilation():
+    from ye3t.couplings.tagged_cauchy_general import _supported_label, _tag_species
+    record = {"tag_count": 1, "label": {
+        "block_sizes": [1, 1], "block_kappas": [(1,), (1,)],
+        "role_copy_indices": [0, 0],  # Both factors act on the same tag.
+        "block_complete_channel_keys": [{"neighbor_species": "H"}, {"neighbor_species": "O"}],
+    }}
+    assert not _supported_label(record)  # No physical occurrence can be both H and O.
+    record["label"]["block_complete_channel_keys"][1]["neighbor_species"] = "H"
+    assert _supported_label(record)
+    assert _tag_species(record) == ("H",)  # Two factors still require one tag.
+
+
 @pytest.mark.parametrize("factors", [((0, 1, -1), (1, 2, 1)),
                                     ((1, 1, 1), (0, 2, -2), (0, 1, 0))])
 def test_nonzero_magnetic_phases_and_factor_reordering(factors):
@@ -324,6 +337,10 @@ def test_general_three_tag_compiler_and_partition_budget():
     compiled = compile(plan(report))
     assert compiled.payload["selected_raw_tag_counts"] == (3,)
     assert len(compiled.payload["image_rows"]) == 1
+    assert compiled.occurrence_support() == {
+        "schema": "ye3t_distinct_occurrence_support_v1", "species_order": ["H"],
+        "alternatives_per_feature": [[[3]]],
+    }
     assert CompiledTaggedCauchyImage.from_dict(compiled.to_dict()).self_hash == compiled.self_hash
     limited = tagged_cauchy_image_request(
         species=["H"], catalogue={**catalogue, "max_tag_set_partitions": 4})

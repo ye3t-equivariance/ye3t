@@ -260,6 +260,10 @@ def _rank_value(mapping, rank, default=None):
 
 
 def _general_request(catalogue, species):
+    # TODO(LINEAR-CHEB-C2): carry the existing Chebyshev C2 source family through
+    # this request, _general_payload and its validation/cache identity. Preserve
+    # Jacobi artifacts and shared coupling conventions; test independent radial
+    # products and family-specific cache reuse before enabling the new input.
     species = tuple(sorted(str(value) for value in species))
     if not species or len(set(species)) != len(species):
         raise ValueError("Species must be nonempty and distinct.")
@@ -478,7 +482,12 @@ def _role_copy_content(role_dimension, size, partition):
         _role_schur_pivot_metadata(role_dimension, size, partition))}
 
 
-def _supported_label(record):
+def _tag_species(record):
+    """Species of each occupied distinct role, before moment lowering.
+
+    Every tableau component of one role copy has the same content. Multiple
+    factors on a tag require one occurrence, regardless of their tensor rank.
+    """
     tag_count = record["tag_count"]
     label = record["label"]
     occupancy = [0]*(tag_count+1)
@@ -490,7 +499,13 @@ def _supported_label(record):
         for tag in range(tag_count):
             if content[tag]:
                 tag_species[tag].add(species)
-    return all(occupancy[index] and len(tag_species[index]) == 1 for index in range(tag_count))
+    if not all(occupancy[index] and len(tag_species[index]) == 1 for index in range(tag_count)):
+        return None
+    return tuple(next(iter(values)) for values in tag_species)
+
+
+def _supported_label(record):
+    return _tag_species(record) is not None
 
 
 def _compiled_general_coordinate(parent, tag_count):

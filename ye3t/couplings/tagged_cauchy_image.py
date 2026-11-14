@@ -3476,6 +3476,67 @@ class TaggedCauchyImageCompilerPlan:
 class CompiledTaggedCauchyImage:
     """Exact tagged physical-image artifact with compiler provenance."""
 
+    def occurrence_support(self):
+        """Necessary occurrence counts for the stored independent coordinates.
+
+        Alternatives describe the union of contributing raw-coordinate supports.
+        A missing alternative proves a zero, independently of radial values.
+        This compact derived inventory is cached separately from coefficients;
+        old coefficient artifacts need no reconstruction or coordinate change.
+        """
+        species = tuple(sorted(self.plan.report.request.get("species", {
+            str(channel["neighbor_species"])
+            for channel in self.payload["real_schedule_core"]["channels"]})))
+        width = len(self.payload["moment_schedules"])
+
+        def build():
+            alternatives = []
+            if self.payload.get("coordinate_policy") == "exact_physical_pivots_v1":
+                from ye3t.couplings.tagged_cauchy_general import _tag_species
+                for record in self.payload["image_coordinate_provenance"]:
+                    tags = _tag_species(record)
+                    if tags is None:
+                        raise ValueError("A selected tagged coordinate has incompatible role species.")
+                    present = {key["neighbor_species"] for key in
+                               record["label"]["block_complete_channel_keys"]}
+                    alternatives.append([[
+                        max(tags.count(name), int(name in present)) for name in species]])
+            else:
+                raw = self.payload["raw_coordinate_labels"]
+                for record in self.payload["image_coordinate_provenance"]:
+                    rows = set()
+                    for contributor in record["contributors"]:
+                        label = raw[int(contributor["raw_coordinate_index"])]
+                        name = label["source_key"]["neighbor_species"]
+                        rows.add(tuple(max(1, int(label["tag_count"])) if name == value else 0
+                                       for value in species))
+                    alternatives.append([list(row) for row in sorted(rows)])
+            return {"schema": "ye3t_distinct_occurrence_support_v1",
+                    "species_order": list(species), "alternatives_per_feature": alternatives}
+
+        def validate(value):
+            if (value.get("schema") != "ye3t_distinct_occurrence_support_v1"
+                    or tuple(value.get("species_order", ())) != species
+                    or len(value.get("alternatives_per_feature", ())) != width):
+                raise ValueError("Invalid tagged occurrence-support inventory.")
+            for alternatives in value["alternatives_per_feature"]:
+                if not alternatives or any(len(row) != len(species) or any(
+                        not isinstance(count, int) or count < 0 for count in row)
+                        for row in alternatives):
+                    raise ValueError("Invalid tagged occurrence-support counts.")
+            return True
+
+        store = YE3TArtifactStore()
+        try:
+            result = store.resolve("tagged_occurrence_support", "tagged_occurrence_support_v1",
+                {"compiler_artifact_hash": self.self_hash}, builder=build, validator=validate,
+                certificate={"passed": True, "checks": {"compiler_role_content": True}},
+                required_certificate_checks=("compiler_role_content",),
+                producer={"support_revision": 1})
+            return result["payload"]
+        except ArtifactCacheMiss:
+            return build()
+
     def validate(self, compiler_validation="full"):
         """Check current content and reuse completed compiler validation.
 
