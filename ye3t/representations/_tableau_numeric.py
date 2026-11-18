@@ -141,6 +141,43 @@ def _tableau_action(kind, left, right, parent, arithmetic):
 
 @lru_cache(maxsize=128)
 def _prepare_tableau_recipe(kind, left, right, parent):
+    """Reuse the small discrete coordinate recipe, independently of FP64 blocks.
+
+    Cache reads check schema, convention and planned index bounds. Exact
+    reconstruction is available only with the explicit full diagnostic policy.
+    """
+    from ye3t.cache.artifacts import YE3TArtifactStore
+
+    store = YE3TArtifactStore()
+    request = dict(kind=kind, left=left, right=right, parent=parent,
+                   convention=p.TABLEAU_PROJECTOR_COPY_CONVENTION,
+                   recipe="rational_seminormal_selected_coordinates_v1")
+    def build():
+        indices, candidates, support, bits = _construct_tableau_recipe(kind, left, right, parent)
+        return dict(indices=indices, candidates=candidates, support=support, fraction_bits=bits)
+    def validate(payload):
+        _, dimension, count, _ = _tableau_request(kind, left, right, parent)
+        indices = payload["indices"]
+        if (len(indices) != count or len(set(indices)) != count or
+                any(type(i) is not int or not 0 <= i < dimension for i in indices) or
+                any(type(payload[k]) is not int or payload[k] < 0
+                    for k in ("candidates", "support", "fraction_bits"))):
+            raise ValueError("Stored tableau recipe disagrees with its planned dimensions")
+        if store.verify == "full":
+            expected = _construct_tableau_recipe(kind, left, right, parent)
+            actual = (tuple(indices), payload["candidates"], payload["support"], payload["fraction_bits"])
+            if actual != expected:
+                raise ValueError("Stored tableau recipe differs from exact coordinate preparation")
+        return True
+    payload = store.resolve("tableau_coordinate_recipe", "ye3t_tableau_coordinate_recipe_v1",
+        request, builder=build, validator=validate,
+        certificate={"passed": True, "checks": {"canonical_coordinate_recipe": True}},
+        required_certificate_checks=("canonical_coordinate_recipe",),
+        producer={"compiler_revision": 1})["payload"]
+    return tuple(payload["indices"]), payload["candidates"], payload["support"], payload["fraction_bits"]
+
+
+def _construct_tableau_recipe(kind, left, right, parent):
     """Exact seed selection with rational LDL pivots; m is already known.
 
     Returns (indices, candidate_count, peak_selected_column_support,

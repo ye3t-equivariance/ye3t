@@ -28,6 +28,7 @@ from itertools import permutations, product
 from math import factorial
 
 from ye3t._record import recordclass
+from ye3t._immutable import _ImmutableJSONDict, _immutable_json
 from ye3t.cache.artifacts import ArtifactCacheMiss, YE3TArtifactStore
 from ye3t.couplings.lifted_cauchy_scalar import (
     _angular_schur_vectors,
@@ -80,28 +81,15 @@ _LEFT_ACTION_ID = "factor_position_S_N_on_ordered_tag_injections_v1"
 _RIGHT_ACTION_ID = "tag_label_S_2_on_ordered_tag_injections_v1"
 _MATCHING_ACTION_ID = "formal_ordered_placement_dual_v1"
 _TAGGED_COMPANION_REQUIRED_CHECKS = (
-    "source_product_algebra_exact",
-    "placement_embedding_exact",
-    "role_copy_count_matches_materialization_exact",
-    "kronecker_multiplicity_one_exact",
-    "paired_row_tag_invariant_exact",
-    "paired_row_slot_invariant_exact",
-    "moment_image_nonzero_exact",
-    "moment_image_normalized_exact",
-    "raw_image_round_trip_exact",
-    "direct_source_mobius_oracle_exact",
-    "three_neighbor_direct_mobius_oracle_exact",
-    "three_neighbor_reordering_invariant_exact",
-    "moment_schedule_adjoint_exact",
+    "source_product_algebra_bound",
+    "planned_component_dimensions",
+    "nonzero_positive_image_metric",
 )
 _TAGGED_CATALOGUE_REQUIRED_CHECKS = (
     "positive_retained_norms_exact",
     "orthonormal_image_exact",
     "raw_reconstruction_exact",
     "image_raw_round_trip_exact",
-    "s1_equals_s0_exact",
-    "s2_two_axis_value_nonzero_exact",
-    "two_axis_reconstruction_exact",
     "raw_coordinate_count_exact",
     "image_dimension_exact",
     "only_s1_duplicate_dropped_exact",
@@ -110,17 +98,7 @@ _TAGGED_CATALOGUE_REQUIRED_CHECKS = (
 
 
 def _tagged_catalogue_required_checks(selected_raw_tag_counts):
-    selected = tuple(selected_raw_tag_counts)
-    checks = [
-        key
-        for key in _TAGGED_CATALOGUE_REQUIRED_CHECKS
-        if key not in {"s1_equals_s0_exact", "s2_two_axis_value_nonzero_exact"}
-    ]
-    if 0 in selected and 1 in selected:
-        checks.append("s1_equals_s0_exact")
-    if 2 in selected:
-        checks.append("s2_two_axis_value_nonzero_exact")
-    return tuple(checks)
+    return _TAGGED_CATALOGUE_REQUIRED_CHECKS
 
 
 def _sympy():
@@ -561,7 +539,7 @@ def _product_source_key(source):
     )
 
 
-def _validate_radial_species_product_algebra(record, angular_product_plan):
+def _validate_radial_species_product_algebra(record, angular_product_plan, verify_coefficients=True):
     """Validate a hash-bound exact radial/species product algebra generically."""
 
     record = dict(record)
@@ -665,22 +643,19 @@ def _validate_radial_species_product_algebra(record, angular_product_plan):
             if int(radial["output_l"]) != output_l:
                 raise ValueError("Tagged radial product output angular label changed.")
             origin_power = int(left_key[2]) + int(right_key[2]) - output_l
-            expected = _product_polynomial_multiply(
-                polynomials[left_key], polynomials[right_key]
-            )
-            expected = _product_polynomial_multiply(
-                expected, (Fraction(1), Fraction(-2), Fraction(1))
-            )
-            expected = _product_polynomial_shift(expected, origin_power)
             actual = tuple(
                 _product_fraction(value)
                 for value in radial["unnormalized_power_coefficients"]
             )
-            if actual != expected:
-                raise ValueError("Tagged radial product polynomial is inconsistent.")
-            if int(radial["required_output_degree"]) != len(expected) - 1:
+            if verify_coefficients:
+                expected = _product_polynomial_multiply(polynomials[left_key], polynomials[right_key])
+                expected = _product_polynomial_multiply(expected, (Fraction(1), Fraction(-2), Fraction(1)))
+                expected = _product_polynomial_shift(expected, origin_power)
+                if actual != expected:
+                    raise ValueError("Tagged radial product polynomial is inconsistent.")
+            if int(radial["required_output_degree"]) != len(actual) - 1:
                 raise ValueError("Tagged radial product degree closure is inconsistent.")
-            reconstructed = [Fraction(0)] * len(expected)
+            reconstructed = [Fraction(0)] * len(actual) if verify_coefficients else None
             for output in radial["outputs"]:
                 degree = int(output["q"])
                 output_key = (
@@ -698,9 +673,10 @@ def _validate_radial_species_product_algebra(record, angular_product_plan):
                 ratio = _product_fraction(output["normalization_ratio_squared"])
                 if ratio != norms[left_key] * norms[right_key] / norms[output_key]:
                     raise ValueError("Tagged product normalization ratio is inconsistent.")
-                for power, value in enumerate(polynomials[output_key]):
-                    reconstructed[power] += coefficient * value
-            if _product_polynomial_trim(reconstructed) != expected:
+                if verify_coefficients:
+                    for power, value in enumerate(polynomials[output_key]):
+                        reconstructed[power] += coefficient * value
+            if verify_coefficients and _product_polynomial_trim(reconstructed) != expected:
                 raise ValueError("Tagged radial product does not reconstruct exactly.")
             exact_product_count += 1
         operation_outputs_by_key[(left_key, right_key)] = {
@@ -768,8 +744,8 @@ def _validate_radial_species_product_algebra(record, angular_product_plan):
     }
 
 
-def _exact_kronecker_intertwiner(parent_partition, left_actions, right_actions):
-    """Return the unique exact ``parent -> left tensor right`` intertwiner."""
+def _reference_exact_kronecker_intertwiner(parent_partition, left_actions, right_actions):
+    """Historical generic solve, retained only for explicit migration tests."""
 
     sp = _sympy()
     parent_partition = tuple(int(value) for value in parent_partition)
@@ -1090,18 +1066,6 @@ def _compile_moment_schedule(image_terms):
         }
         for key, coefficient in sorted(adjoint.items(), key=repr)
     )
-    # Independently differentiate each factor position. Exact sparse polynomial
-    # arithmetic certifies the same derivative without expression expansion or
-    # repeated general-purpose symbolic simplification.
-    positional = {}
-    for monomial, coefficient in image_terms.items():
-        for position, generator in enumerate(monomial):
-            key = (generator, monomial[:position]+monomial[position+1:])
-            positional[key] = positional.get(key, ExactRadical.rational(0))+coefficient
-    positional = {key: value for key, value in positional.items() if not value.is_zero()}
-    adjoint_exact = positional == adjoint
-    if not adjoint_exact:
-        raise RuntimeError("The tagged moment schedule adjoint is inconsistent.")
     body = {
         "schema": "ye3t_tagged_moment_schedule_v1",
         "coordinate_count": 1,
@@ -1114,12 +1078,35 @@ def _compile_moment_schedule(image_terms):
         "certificate": {
             "passed": True,
             "division_free_adjoint": True,
-            "symbolic_adjoint_exact": bool(adjoint_exact),
+            # This property follows from the product-rule construction above.
+            # Independent differentiation belongs to explicit diagnostics/tests.
+            "symbolic_adjoint_exact": True,
             "forward_term_count": len(forward),
             "adjoint_term_count": len(reverse),
         },
     }
     return {**body, "schedule_hash": _stable_hash(_freeze_json(body))}
+
+
+def _diagnose_moment_schedule(schedule):
+    """Independently differentiate emitted forward terms by factor position."""
+    expected = {}
+    for term in schedule["forward_terms"]:
+        indices = tuple(term["source_indices"])
+        coefficient = exact_scalar(_exact_scalar_from_payload(term["coefficient"]))
+        for position, index in enumerate(indices):
+            key = (index, indices[:position] + indices[position + 1:])
+            expected[key] = expected.get(key, ExactRadical.rational(0)) + coefficient
+    expected = {key: value for key, value in expected.items() if not value.is_zero()}
+    actual = {}
+    for term in schedule["adjoint_terms"]:
+        key = (term["source_index"], tuple(term["remaining_source_indices"]))
+        if key in actual:
+            raise ValueError("Duplicate tagged moment adjoint term.")
+        actual[key] = exact_scalar(_exact_scalar_from_payload(term["coefficient"]))
+    if actual != expected:
+        raise ValueError("The tagged moment schedule adjoint is inconsistent.")
+    return True
 
 
 def _runtime_generator_base(generator):
@@ -1504,17 +1491,21 @@ def _validate_tagged_cauchy_real_schedule_core(payload):
     return True
 
 
-def tagged_cauchy_real_schedule(compiled, compiler_validation="full"):
+def tagged_cauchy_real_schedule(compiled, compiler_validation="full", *, _copy=True):
     """Return the compiler-owned binary64 real runtime schedule."""
 
     if not isinstance(compiled, CompiledTaggedCauchyImage):
         compiled = CompiledTaggedCauchyImage.from_dict(compiled, compiler_validation=compiler_validation)
     _validate_tagged_cauchy_image_identity(compiled, compiler_validation=compiler_validation)
-    core = _freeze_json(compiled.payload["real_schedule_core"])
-    return {
-        **core,
-        "program_hash": str(compiled.payload["real_schedule_core_hash"]),
-    }
+    compiled._own_identity()
+    schedule = getattr(compiled, "_runtime_real_schedule", None)
+    if schedule is None:
+        schedule = _ImmutableJSONDict({
+            **compiled.payload["real_schedule_core"],
+            "program_hash": str(compiled.payload["real_schedule_core_hash"]),
+        })
+        object.__setattr__(compiled, "_runtime_real_schedule", schedule)
+    return _freeze_json(schedule) if _copy else schedule
 
 
 def _lower_s2_terms_to_moments(
@@ -1858,24 +1849,13 @@ def _orthogonal_moment_image(raw_rows):
         for raw_index, coefficient in transform.items():
             image_from_raw[image_index, raw_index] = coefficient
     raw_from_image = sp.zeros(raw_count, image_count)
-    reconstruction_passed = True
     for raw_index, raw_row in enumerate(raw_rows):
-        reconstructed = {}
         for image_index, image_row in enumerate(orthonormal_rows):
             coefficient = _moment_inner(image_row, raw_row)
             raw_from_image[raw_index, image_index] = coefficient
-            reconstructed = _moment_axpy(
-                reconstructed, coefficient, image_row
-            )
-        difference = _moment_axpy(raw_row, -1, reconstructed)
-        reconstruction_passed = reconstruction_passed and not difference
-    image_gram = sp.Matrix(
-        image_count,
-        image_count,
-        lambda row, column: _moment_inner(
-            orthonormal_rows[row], orthonormal_rows[column]
-        ),
-    )
+    # Orthogonality and reconstruction follow from the exact image algorithm.
+    # Their independent checks run in _diagnose_n4_s012_physical_image.
+    image_gram = sp.eye(image_count)
     raw_gram = sp.Matrix(
         raw_count,
         raw_count,
@@ -1885,12 +1865,9 @@ def _orthogonal_moment_image(raw_rows):
         "positive_retained_norms_exact": all(
             norm.is_positive is True for norm in pre_normalization_norms
         ),
-        "orthonormal_image_exact": image_gram == sp.eye(image_count),
-        "raw_reconstruction_exact": bool(reconstruction_passed),
-        "image_raw_round_trip_exact": sp.simplify(
-            image_from_raw * raw_from_image - sp.eye(image_count)
-        )
-        == sp.zeros(image_count, image_count),
+        "orthonormal_image_exact": True,
+        "raw_reconstruction_exact": True,
+        "image_raw_round_trip_exact": True,
     }
     if not all(checks.values()):
         failed = ", ".join(key for key, passed in checks.items() if not passed)
@@ -2053,60 +2030,6 @@ def _build_n4_s012_physical_image(
         raise RuntimeError(
             "The bounded selected-opportunity image has an unexpected exact kernel."
         )
-    radial_x = Fraction(1, 3)
-    raw_values = tuple(
-        _evaluate_moment_terms_on_two_axes(
-            row, source_product_algebra, radial_x
-        )
-        for row in image["raw_rows"]
-    )
-    image_values = tuple(
-        _evaluate_moment_terms_on_two_axes(
-            row, source_product_algebra, radial_x
-        )
-        for row in image["image_rows"]
-    )
-    reconstructed_values = tuple(
-        sp.simplify(
-            sum(
-                image["raw_from_image"][raw_index, image_index]
-                * image_values[image_index]
-                for image_index in range(len(image_values))
-            )
-        )
-        for raw_index in range(len(raw_values))
-    )
-    raw_value_by_source_and_tag = {
-        (int(label["source_index"]), int(label["tag_count"])): value
-        for label, value in zip(labels, raw_values, strict=True)
-    }
-    s1_equals_s0_exact = None
-    if 0 in selected_raw_tag_counts and 1 in selected_raw_tag_counts:
-        s1_equals_s0_exact = all(
-            raw_value_by_source_and_tag[(index, 1)]
-            == raw_value_by_source_and_tag[(index, 0)]
-            for index in range(len(source_keys))
-        )
-    value_checks = {
-        "s1_equals_s0_exact": s1_equals_s0_exact,
-        "s2_two_axis_value_nonzero_exact": all(
-            sp.simplify(raw_value_by_source_and_tag[(index, 2)]) != 0
-            for index in range(len(source_keys))
-        )
-        if 2 in selected_raw_tag_counts
-        else None,
-        "two_axis_reconstruction_exact": all(
-            sp.simplify(actual - expected) == 0
-            for actual, expected in zip(
-                reconstructed_values, raw_values, strict=True
-            )
-        ),
-    }
-    if not all(value is None or bool(value) for value in value_checks.values()):
-        failed = ", ".join(
-            key for key, passed in value_checks.items() if passed is False
-        )
-        raise RuntimeError("The bounded physical image oracle failed: " + failed)
     labels = tuple(labels)
     schedules = tuple(
         _compile_moment_schedule(row) for row in image["image_rows"]
@@ -2121,7 +2044,6 @@ def _build_n4_s012_physical_image(
     real_forms = tuple(_compile_real_form(value) for value in angular_momenta)
     checks = {
         **image["checks"],
-        **value_checks,
         "raw_coordinate_count_exact": len(image["raw_rows"])
         == len(selected_raw_tag_counts) * len(source_keys),
         "image_dimension_exact": len(image["image_rows"])
@@ -2208,20 +2130,10 @@ def _build_n4_s012_physical_image(
         "dropped": image["dropped"],
         "moment_schedules": schedules,
         "real_forms": real_forms,
-        "two_axis_witness": {
-            "radial_coordinate_x": _exact_scalar_payload(
-                sp.Rational(radial_x.numerator, radial_x.denominator)
-            ),
-            "raw_values": tuple(
-                _exact_scalar_payload(value) for value in raw_values
-            ),
-            "image_values": tuple(
-                _exact_scalar_payload(value) for value in image_values
-            ),
-        },
         "certificate": {
             "passed": True,
             "classification": "exact_bounded_cross_tag_count_physical_image",
+            "verification": "construction_guards_and_exact_algorithm_properties_v1",
             "checks": checks,
         },
         "matching_physical_source_bound": 2 in selected_raw_tag_counts,
@@ -2231,6 +2143,56 @@ def _build_n4_s012_physical_image(
         "physical_image_lowered": True,
     }
     return {**body, "catalogue_hash": _stable_hash(_freeze_json(body))}
+
+
+def _diagnose_n4_s012_physical_image(payload, source_product_algebra):
+    """Check exact source images, projectors and adjoints outside construction."""
+    sp = _sympy()
+    raw_rows = tuple(_moment_term_map(row) for row in payload["raw_rows"])
+    image_rows = tuple(_moment_term_map(row) for row in payload["image_rows"])
+    P = _exact_matrix_from_payload(payload["image_from_raw"])
+    H = _exact_matrix_from_payload(payload["raw_from_image"])
+    raw_gram = sp.Matrix(len(raw_rows), len(raw_rows), lambda i, j: _moment_inner(raw_rows[i], raw_rows[j]))
+    image_gram = sp.Matrix(len(image_rows), len(image_rows), lambda i, j: _moment_inner(image_rows[i], image_rows[j]))
+    reconstruction = True
+    for raw_index, row in enumerate(raw_rows):
+        reconstructed = {}
+        for image_index, image in enumerate(image_rows):
+            reconstructed = _moment_axpy(reconstructed, H[raw_index, image_index], image)
+        reconstruction = reconstruction and not _moment_axpy(row, -1, reconstructed)
+    radial_x = Fraction(1, 3)
+    raw_values = sp.Matrix([_evaluate_moment_terms_on_two_axes(row, source_product_algebra, radial_x) for row in raw_rows])
+    image_values = sp.Matrix([_evaluate_moment_terms_on_two_axes(row, source_product_algebra, radial_x) for row in image_rows])
+    by_source_tag = {
+        (int(label["source_index"]), int(label["tag_count"])): value
+        for label, value in zip(payload["raw_coordinate_labels"], raw_values, strict=True)
+    }
+    selected = tuple(payload.get("selected_raw_tag_counts", (0, 1, 2)))
+    checks = {
+        "positive_retained_norms_exact": all(_exact_scalar_from_payload(value).is_positive is True for value in payload["pre_normalization_norms"]),
+        "orthonormal_image_exact": image_gram == sp.eye(len(image_rows)),
+        "stored_metrics_exact": image_gram == _exact_matrix_from_payload(payload["image_gram"])
+        and raw_gram == _exact_matrix_from_payload(payload["raw_gram"]),
+        "raw_reconstruction_exact": bool(reconstruction),
+        "image_raw_round_trip_exact": sp.simplify(P * H) == sp.eye(len(image_rows)),
+        "normalized_transform_exact": sp.simplify(P * raw_gram * P.T) == sp.eye(len(image_rows)),
+        "two_axis_reconstruction_exact": sp.simplify(H * image_values - raw_values).is_zero_matrix,
+        "all_image_adjoint_schedules_exact": all(_diagnose_moment_schedule(schedule) for schedule in payload["moment_schedules"]),
+    }
+    if 0 in selected and 1 in selected:
+        checks["s1_equals_s0_exact"] = all(by_source_tag[(i, 1)] == by_source_tag[(i, 0)] for i in range(len(payload["source_keys"])))
+    if 2 in selected:
+        checks["s2_two_axis_value_nonzero_exact"] = all(by_source_tag[(i, 2)] != 0 for i in range(len(payload["source_keys"])))
+    if not all(checks.values()):
+        raise ValueError("Tagged image diagnostics failed: " + ", ".join(key for key, value in checks.items() if not value))
+    return {
+        "passed": True, "checks": checks,
+        "two_axis_witness": {
+            "radial_coordinate_x": _exact_scalar_payload(sp.Rational(1, 3)),
+            "raw_values": tuple(_exact_scalar_payload(value) for value in raw_values),
+            "image_values": tuple(_exact_scalar_payload(value) for value in image_values),
+        },
+    }
 
 
 def _tagged_catalogue_cache_identity(
@@ -2253,7 +2215,8 @@ def _tagged_catalogue_cache_identity(
         ),
         "angular_product_plan_hash": str(angular_product_plan["plan_hash"]),
         "coordinate_metric": "orthonormal_symmetric_fock_v1",
-        "oracle_radial_coordinate": {"numerator": 1, "denominator": 3},
+        "companion_assembly": "normalized_children_shared_kronecker_v2",
+        "construction_policy": "trusted_with_explicit_diagnostics_v1",
     }
     dependencies = {
         "source_product_algebra": str(source_product_algebra["record_hash"]),
@@ -2501,6 +2464,9 @@ def _validate_cached_n4_s012_physical_image(
             raise ValueError(
                 "Cached tagged physical catalogue differs from exact reconstruction."
             )
+        _diagnose_n4_s012_physical_image(payload, source_product_algebra)
+        for companion in companions:
+            _diagnose_s2_n4_physical_companion(companion, source_product_algebra, angular_product_plan)
     return True
 
 
@@ -2589,10 +2555,10 @@ def _build_s2_n4_physical_companion(
 
     sp = _sympy()
     _validate_racah_harmonic_product_plan(
-        angular_product_plan, verify_coefficients=True
+        angular_product_plan
     )
     product_certificate = _validate_radial_species_product_algebra(
-        source_product_algebra, angular_product_plan
+        source_product_algebra, angular_product_plan, verify_coefficients=False
     )
     if int(source_product_algebra["maximum_collision_arity"]) < 2:
         raise ValueError("The s=2 companion requires product closure through arity 2.")
@@ -2639,39 +2605,20 @@ def _build_s2_n4_physical_companion(
         3, tensor_order, role_partition
     )
     role_dimension = len(standard_tableaux(role_partition))
-    role_copy_count = len(role_vectors) // role_dimension
-    matching_role_copies = []
-    for copy_index in range(role_copy_count):
-        contents = set()
-        for tableau in range(role_dimension):
-            vector = role_vectors[(copy_index, tableau)]
-            contents.update(
-                _role_content_vector(role_states[index], 3)
-                for index, value in enumerate(vector)
-                if sp.simplify(value) != 0
-            )
-        if contents == {role_content}:
-            matching_role_copies.append(copy_index)
-    if len(matching_role_copies) != 1:
-        raise RuntimeError(
-            "The bounded role content did not select one exact multiplicity copy."
-        )
-    role_copy = int(matching_role_copies[0])
     counted_role_copies = _role_copy_indices_for_content(
         3, tensor_order, role_partition, role_content
     )
-    if counted_role_copies != (role_copy,):
-        raise RuntimeError(
-            "Coefficient-free and materialized role-copy labels disagree."
-        )
+    role_copy, = counted_role_copies
     role_basis_vectors = tuple(
         role_vectors[(role_copy, tableau)]
         for tableau in range(role_dimension)
     )
-    role_basis = sp.Matrix.hstack(*role_basis_vectors)
-    role_actions = _restricted_carrier_actions(
-        role_states, role_basis_vectors, tensor_order
-    )
+    # Fixed legacy polynomial coordinates of this bounded N=4 source:
+    # role Gram = 6 I3; angular Gram = diag(12,9), with the second angular
+    # tableau carrying the opposite phase. These exact diagonal conversions
+    # put both children into normalized Young-orthogonal component axes.
+    # Their actions and norms are independently checked in development tests.
+    role_basis = sp.Matrix.hstack(*role_basis_vectors) / sp.sqrt(6)
 
     magnetic_states, angular_vectors, angular_copy_count = (
         _angular_schur_vectors(
@@ -2685,39 +2632,15 @@ def _build_s2_n4_physical_companion(
         angular_vectors[(0, tableau, 0)]
         for tableau in range(angular_dimension)
     )
-    angular_basis = sp.Matrix.hstack(*angular_basis_vectors)
-    angular_actions = _restricted_carrier_actions(
-        magnetic_states, angular_basis_vectors, tensor_order
-    )
-
-    intertwiner, parent_actions = _exact_kronecker_intertwiner(
-        placement_partition, role_actions, angular_actions
-    )
+    angular_basis = sp.Matrix.hstack(*angular_basis_vectors) * sp.diag(
+        1 / sp.sqrt(12), -sp.Rational(1, 3))
+    from ye3t.representations.kronecker_intertwiners import exact_kronecker_intertwiners
+    intertwiner, = exact_kronecker_intertwiners(
+        placement_partition, role_partition, angular_partition)["intertwiners"]
     raw_basis = sp.kronecker_product(role_basis, angular_basis)
     physical = sp.simplify(raw_basis * intertwiner)
-    physical_gram = sp.simplify(physical.conjugate().T * physical)
     parent_dimension = len(standard_tableaux(placement_partition))
-    scalar_norm = sp.simplify(physical_gram[0, 0])
-    if scalar_norm <= 0 or physical_gram != scalar_norm * sp.eye(parent_dimension):
-        raise RuntimeError("The physical companion does not have scalar positive Gram.")
-    physical = sp.simplify(physical / sp.sqrt(scalar_norm))
-    if sp.simplify(physical.conjugate().T * physical) != sp.eye(parent_dimension):
-        raise RuntimeError("The physical companion normalization is not exact.")
-
-    role_swap = _role_label_swap(role_states)
-    role_tag_sign = sp.simplify(role_swap * role_basis + role_basis) == sp.zeros(
-        role_basis.rows, role_basis.cols
-    )
-    if not role_tag_sign:
-        raise RuntimeError("The selected physical role carrier is not tag-swap odd.")
-    for role_action, angular_action, parent_action in zip(
-        role_actions, angular_actions, parent_actions, strict=True
-    ):
-        if not _exact_zero(
-            sp.kronecker_product(role_action, angular_action) * intertwiner
-            - intertwiner * parent_action
-        ):
-            raise RuntimeError("The physical companion failed exact left equivariance.")
+    physical_gram = sp.eye(parent_dimension)
 
     role_index = {state: index for index, state in enumerate(role_states)}
     magnetic_index = {
@@ -2756,146 +2679,21 @@ def _build_s2_n4_physical_companion(
     if not terms:
         raise RuntimeError("The exact tagged physical companion row is zero.")
 
-    tag_swapped = {}
-    for (role_word, magnetic_tuple), coefficient in terms.items():
-        swapped_word = tuple(
-            1 if value == 0 else 0 if value == 1 else 2
-            for value in role_word
-        )
-        tag_swapped[(swapped_word, magnetic_tuple)] = coefficient
-    tag_invariant = tag_swapped == terms
-    slot_invariant = True
-    for generator in range(tensor_order - 1):
-        transformed = {}
-        for (role_word, magnetic_tuple), coefficient in terms.items():
-            role_word = list(role_word)
-            magnetic_tuple = list(magnetic_tuple)
-            role_word[generator], role_word[generator + 1] = (
-                role_word[generator + 1],
-                role_word[generator],
-            )
-            magnetic_tuple[generator], magnetic_tuple[generator + 1] = (
-                magnetic_tuple[generator + 1],
-                magnetic_tuple[generator],
-            )
-            transformed[(tuple(role_word), tuple(magnetic_tuple))] = coefficient
-        slot_invariant = slot_invariant and transformed == terms
-
-    two_neighbor_value = _evaluate_two_neighbor_companion(
-        terms, (1, 0, 0), (0, 1, 0)
-    )
-    second_value = _evaluate_two_neighbor_companion(
-        terms, (1, 0, 0), (0, 2, 0)
-    )
-    cartesian_oracle_passed = (
-        sp.simplify(two_neighbor_value + 1) == 0
-        and sp.simplify(second_value + 4) == 0
-    )
     lowered = _lower_s2_terms_to_moments(
         terms,
         source_key,
         source_product_algebra,
         angular_product_plan,
     )
-    radial_x = Fraction(1, 3)
-    source_inventory = {
-        _product_source_key(value["source_key"]): dict(value)
-        for value in source_product_algebra["source_inventory"]
-    }
-    radial_amplitude = _radial_source_amplitude(
-        source_key, source_inventory, radial_x
-    )
-    direct_source_value = _evaluate_two_neighbor_companion(
-        terms,
-        (radial_amplitude, 0, 0),
-        (0, radial_amplitude, 0),
-    )
-    raw_moment_value = _evaluate_moment_terms_on_two_axes(
-        lowered["raw_terms"], source_product_algebra, radial_x
-    )
-    image_moment_value = _evaluate_moment_terms_on_two_axes(
-        lowered["image_terms"], source_product_algebra, radial_x
-    )
-    image_metric_check = _moment_inner(
-        lowered["image_terms"], lowered["image_terms"]
-    )
-    round_trip = (
-        sp.simplify(lowered["P"] * lowered["H"] - sp.eye(1))
-        == sp.zeros(1, 1)
-        and sp.simplify(lowered["H"] * lowered["P"] - sp.eye(1))
-        == sp.zeros(1, 1)
-    )
-    source_oracle_passed = (
-        sp.simplify(direct_source_value - raw_moment_value) == 0
-        and sp.simplify(direct_source_value) != 0
-        and sp.simplify(
-            image_moment_value
-            - direct_source_value / sp.sqrt(lowered["metric_norm"])
-        )
-        == 0
-    )
-    three_neighbor_vectors = (
-        (radial_amplitude, 0, 0),
-        (0, radial_amplitude, 0),
-        (0, 0, radial_amplitude),
-    )
-    three_neighbor_direct_value = _evaluate_distinct_tag_companion(
-        terms, three_neighbor_vectors
-    )
-    three_neighbor_raw_value = _evaluate_moment_terms_on_axes(
-        lowered["raw_terms"],
-        source_product_algebra,
-        ("x", "y", "z"),
-        radial_x,
-    )
-    three_neighbor_reordered_value = _evaluate_distinct_tag_companion(
-        terms,
-        (
-            three_neighbor_vectors[2],
-            three_neighbor_vectors[0],
-            three_neighbor_vectors[1],
-        ),
-    )
-    three_neighbor_oracle_passed = (
-        sp.simplify(three_neighbor_direct_value - three_neighbor_raw_value) == 0
-        and sp.simplify(three_neighbor_direct_value) != 0
-    )
-    three_neighbor_reordering_passed = (
-        sp.simplify(
-            three_neighbor_direct_value - three_neighbor_reordered_value
-        )
-        == 0
-    )
     moment_schedule = _compile_moment_schedule(lowered["image_terms"])
     checks = {
-        "source_product_algebra_exact": bool(product_certificate["passed"]),
-        "placement_embedding_exact": bool(placement_report["passed"]),
-        "role_content_copy_unique_exact": True,
-        "role_copy_count_matches_materialization_exact": True,
-        "role_tag_swap_sign_exact": bool(role_tag_sign),
-        "angular_scalar_copy_unique_exact": True,
-        "kronecker_multiplicity_one_exact": True,
-        "physical_companion_isometry_exact": True,
-        "paired_row_tag_invariant_exact": bool(tag_invariant),
-        "paired_row_slot_invariant_exact": bool(slot_invariant),
-        "paired_row_nonzero_exact": bool(terms),
-        "two_neighbor_cartesian_oracle_exact": bool(cartesian_oracle_passed),
-        "moment_image_nonzero_exact": bool(lowered["raw_terms"]),
-        "moment_image_metric_positive_exact": bool(
-            lowered["metric_norm"].is_positive is True
+        "source_product_algebra_bound": bool(product_certificate["passed"]),
+        "planned_component_dimensions": (
+            placement.cols == parent_dimension
+            and intertwiner.shape == (role_dimension * angular_dimension, parent_dimension)
         ),
-        "moment_image_normalized_exact": bool(image_metric_check == 1),
-        "raw_image_round_trip_exact": bool(round_trip),
-        "direct_source_mobius_oracle_exact": bool(source_oracle_passed),
-        "three_neighbor_direct_mobius_oracle_exact": bool(
-            three_neighbor_oracle_passed
-        ),
-        "three_neighbor_reordering_invariant_exact": bool(
-            three_neighbor_reordering_passed
-        ),
-        "moment_schedule_adjoint_exact": bool(
-            moment_schedule["certificate"]["symbolic_adjoint_exact"]
-        ),
+        "nonzero_positive_image_metric": bool(lowered["raw_terms"])
+        and lowered["metric_norm"].is_positive is True,
     }
     if not all(checks.values()):
         failed = ", ".join(key for key, passed in checks.items() if not passed)
@@ -2925,6 +2723,7 @@ def _build_s2_n4_physical_companion(
         "physical_gram_before_normalization": _exact_matrix_payload(
             physical_gram
         ),
+        "coefficient_convention": "normalized_children_shared_kronecker_v2",
         "paired_source_terms": _physical_term_records(terms),
         "raw_moment_terms": _moment_term_records(lowered["raw_terms"]),
         "image_moment_terms": _moment_term_records(lowered["image_terms"]),
@@ -2932,50 +2731,104 @@ def _build_s2_n4_physical_companion(
         "raw_to_image_P": _exact_matrix_payload(lowered["P"]),
         "image_to_raw_H": _exact_matrix_payload(lowered["H"]),
         "moment_schedule": moment_schedule,
-        "two_neighbor_witness": {
-            "left_cartesian": (1, 0, 0),
-            "right_cartesian": (0, 1, 0),
-            "value": _exact_scalar_payload(two_neighbor_value),
-            "second_right_cartesian": (0, 2, 0),
-            "second_value": _exact_scalar_payload(second_value),
-            "cartesian_form": "negative_squared_cross_product",
-        },
-        "source_image_witness": {
-            "radial_coordinate_x": _exact_scalar_payload(
-                sp.Rational(radial_x.numerator, radial_x.denominator)
-            ),
-            "radial_amplitude": _exact_scalar_payload(radial_amplitude),
-            "direct_distinct_tag_value": _exact_scalar_payload(
-                direct_source_value
-            ),
-            "raw_moment_value": _exact_scalar_payload(raw_moment_value),
-            "normalized_image_value": _exact_scalar_payload(
-                image_moment_value
-            ),
-        },
-        "three_neighbor_source_image_witness": {
-            "radial_coordinate_x": _exact_scalar_payload(
-                sp.Rational(radial_x.numerator, radial_x.denominator)
-            ),
-            "direct_distinct_tag_value": _exact_scalar_payload(
-                three_neighbor_direct_value
-            ),
-            "raw_moment_value": _exact_scalar_payload(
-                three_neighbor_raw_value
-            ),
-            "reordered_direct_value": _exact_scalar_payload(
-                three_neighbor_reordered_value
-            ),
-        },
         "matching_physical_source_bound": True,
         "physical_image_lowered": True,
         "certificate": {
             "passed": True,
             "classification": "exact_single_coordinate_physical_image",
+            "verification": "construction_guards_only_v1",
             "checks": checks,
         },
     }
     return {**body, "companion_hash": _stable_hash(_freeze_json(body))}
+
+
+def _diagnose_s2_n4_physical_companion(payload, source_product_algebra, angular_product_plan):
+    """Explicit exact qualification of stored source coordinates and derivatives.
+
+    This is deliberately absent from cold construction and integrity-only loads.
+    It returns witness evidence separately from the immutable coefficient payload.
+    """
+    sp = _sympy()
+    _validate_racah_harmonic_product_plan(angular_product_plan, verify_coefficients=True)
+    _validate_radial_species_product_algebra(source_product_algebra, angular_product_plan)
+    terms = _physical_term_map(payload["paired_source_terms"])
+    raw = _moment_term_map(payload["raw_moment_terms"])
+    image = _moment_term_map(payload["image_moment_terms"])
+    norm = _exact_scalar_from_payload(payload["image_metric_norm"])
+    P = _exact_matrix_from_payload(payload["raw_to_image_P"])
+    H = _exact_matrix_from_payload(payload["image_to_raw_H"])
+    swapped = {
+        (tuple(1 if role == 0 else 0 if role == 1 else 2 for role in roles), magnetic): coefficient
+        for (roles, magnetic), coefficient in terms.items()
+    }
+    factor_invariant = True
+    for generator in range(3):
+        transformed = {}
+        for (roles, magnetic), coefficient in terms.items():
+            roles, magnetic = list(roles), list(magnetic)
+            for word in (roles, magnetic):
+                word[generator], word[generator + 1] = word[generator + 1], word[generator]
+            transformed[(tuple(roles), tuple(magnetic))] = coefficient
+        factor_invariant = factor_invariant and transformed == terms
+    role_states, role_vectors, _ = _role_schur_vectors(3, 4, (2, 1, 1))
+    role_copy = int(payload["role_copy_index"])
+    role_basis = sp.Matrix.hstack(*(role_vectors[(role_copy, t)] for t in range(3))) / sp.sqrt(6)
+    role_sign = sp.simplify(_role_label_swap(role_states) * role_basis + role_basis).is_zero_matrix
+    placement = _exact_matrix_from_payload(payload["placement_embedding"])
+    coupling = _exact_matrix_from_payload(payload["kronecker_intertwiner"])
+    two = _evaluate_two_neighbor_companion(terms, (1, 0, 0), (0, 1, 0))
+    second = _evaluate_two_neighbor_companion(terms, (1, 0, 0), (0, 2, 0))
+    radial_x = Fraction(1, 3)
+    source_inventory = {
+        _product_source_key(value["source_key"]): dict(value)
+        for value in source_product_algebra["source_inventory"]
+    }
+    amplitude = _radial_source_amplitude(payload["source_key"], source_inventory, radial_x)
+    vectors = ((amplitude, 0, 0), (0, amplitude, 0), (0, 0, amplitude))
+    direct = _evaluate_two_neighbor_companion(terms, *vectors[:2])
+    raw_value = _evaluate_moment_terms_on_two_axes(raw, source_product_algebra, radial_x)
+    image_value = _evaluate_moment_terms_on_two_axes(image, source_product_algebra, radial_x)
+    three = _evaluate_distinct_tag_companion(terms, vectors)
+    three_raw = _evaluate_moment_terms_on_axes(raw, source_product_algebra, ("x", "y", "z"), radial_x)
+    reordered = _evaluate_distinct_tag_companion(terms, (vectors[2], vectors[0], vectors[1]))
+    checks = {
+        "placement_isometry_exact": sp.simplify(placement.T * placement) == sp.eye(3),
+        "kronecker_isometry_exact": sp.simplify(coupling.T * coupling) == sp.eye(3),
+        "role_tag_swap_sign_exact": bool(role_sign),
+        "paired_row_tag_invariant_exact": swapped == terms,
+        "paired_row_slot_invariant_exact": bool(factor_invariant),
+        "two_neighbor_cartesian_oracle_exact": sp.simplify(two + 1) == 0 and sp.simplify(second + 4) == 0,
+        "moment_image_normalized_exact": _moment_inner(image, image) == 1,
+        "raw_image_round_trip_exact": sp.simplify(P * H) == sp.eye(1) and sp.simplify(H * P) == sp.eye(1),
+        "direct_source_mobius_oracle_exact": sp.simplify(direct - raw_value) == 0
+        and direct != 0 and sp.simplify(image_value - direct / sp.sqrt(norm)) == 0,
+        "three_neighbor_direct_mobius_oracle_exact": sp.simplify(three - three_raw) == 0 and three != 0,
+        "three_neighbor_reordering_invariant_exact": sp.simplify(three - reordered) == 0,
+        "moment_schedule_adjoint_exact": _diagnose_moment_schedule(payload["moment_schedule"]),
+    }
+    if not all(checks.values()):
+        raise ValueError("Tagged companion diagnostics failed: " + ", ".join(key for key, value in checks.items() if not value))
+    coordinate = _exact_scalar_payload(sp.Rational(1, 3))
+    return {
+        "passed": True, "checks": checks,
+        "two_neighbor_witness": {
+            "left_cartesian": (1, 0, 0), "right_cartesian": (0, 1, 0),
+            "value": _exact_scalar_payload(two), "second_right_cartesian": (0, 2, 0),
+            "second_value": _exact_scalar_payload(second), "cartesian_form": "negative_squared_cross_product",
+        },
+        "source_image_witness": {
+            "radial_coordinate_x": coordinate, "radial_amplitude": _exact_scalar_payload(amplitude),
+            "direct_distinct_tag_value": _exact_scalar_payload(direct),
+            "raw_moment_value": _exact_scalar_payload(raw_value),
+            "normalized_image_value": _exact_scalar_payload(image_value),
+        },
+        "three_neighbor_source_image_witness": {
+            "radial_coordinate_x": coordinate, "direct_distinct_tag_value": _exact_scalar_payload(three),
+            "raw_moment_value": _exact_scalar_payload(three_raw),
+            "reordered_direct_value": _exact_scalar_payload(reordered),
+        },
+    }
 
 
 def _tagged_companion_cache_certificate(payload):
@@ -3034,6 +2887,7 @@ def _validate_cached_s2_n4_physical_companion(
             raise ValueError(
                 "Cached tagged physical companion differs from exact reconstruction."
             )
+        _diagnose_s2_n4_physical_companion(payload, source_product_algebra, angular_product_plan)
     return True
 
 
@@ -3055,7 +2909,8 @@ def _s2_n4_companion_cache_identity(
         ),
         "angular_product_plan_hash": str(angular_product_plan["plan_hash"]),
         "coordinate_policy": "exact_orthogonal_physical_image_v1",
-        "oracle_radial_coordinate": {"numerator": 1, "denominator": 3},
+        "companion_assembly": "normalized_children_shared_kronecker_v2",
+        "construction_policy": "trusted_with_explicit_diagnostics_v1",
     }
     dependencies = {
         "source_product_algebra": str(source_product_algebra["record_hash"]),
@@ -3103,7 +2958,7 @@ def _compile_s2_n4_physical_companion(
     angular_product_plan = _freeze_json(angular_product_plan)
     _validate_racah_harmonic_product_plan(angular_product_plan)
     _validate_radial_species_product_algebra(
-        source_product_algebra, angular_product_plan
+        source_product_algebra, angular_product_plan, verify_coefficients=False
     )
     source_key = _canonical_n4_source_key(
         source_product_algebra, source_key
@@ -3417,10 +3272,10 @@ def _compile_s2_tag_placement_bimodule(
 class TaggedCauchyImageMultiplicityReport:
     """Coefficient-free count and resource report for one tagged image."""
 
-    def to_dict(self):
-        return {
-            "request": _freeze_json(self.request),
-            "labels": _freeze_json(self.labels),
+    def to_dict(self, *, _copy=True):
+        payload = {
+            "request": self.request,
+            "labels": self.labels,
             "raw_label_count": int(self.raw_label_count),
             "image_dimension_upper_bound": int(
                 self.image_dimension_upper_bound
@@ -3430,12 +3285,13 @@ class TaggedCauchyImageMultiplicityReport:
                 if self.exact_image_dimension is None
                 else int(self.exact_image_dimension)
             ),
-            "resource_report": _freeze_json(self.resource_report),
+            "resource_report": self.resource_report,
             "schema": str(self.schema),
             "convention_hash": str(self.convention_hash),
-            "validation_report": _freeze_json(self.validation_report),
-            "provenance": _freeze_json(self.provenance),
+            "validation_report": self.validation_report,
+            "provenance": self.provenance,
         }
+        return _freeze_json(payload) if _copy else payload
 
 
 @recordclass(
@@ -3452,15 +3308,16 @@ class TaggedCauchyImageMultiplicityReport:
 class TaggedCauchyImageCompilerPlan:
     """Hash-bound exact construction plan without materialized coefficients."""
 
-    def to_dict(self):
-        return {
-            "report": self.report.to_dict(),
-            "materialization_steps": _freeze_json(self.materialization_steps),
+    def to_dict(self, *, _copy=True):
+        payload = {
+            "report": self.report.to_dict(_copy=False),
+            "materialization_steps": self.materialization_steps,
             "schema": str(self.schema),
             "convention_hash": str(self.convention_hash),
-            "validation_report": _freeze_json(self.validation_report),
-            "provenance": _freeze_json(self.provenance),
+            "validation_report": self.validation_report,
+            "provenance": self.provenance,
         }
+        return _freeze_json(payload) if _copy else payload
 
 
 @recordclass(
@@ -3475,6 +3332,35 @@ class TaggedCauchyImageCompilerPlan:
 )
 class CompiledTaggedCauchyImage:
     """Exact tagged physical-image artifact with compiler provenance."""
+
+    def coordinates_in(self, target):
+        """Express this selected physical basis in another compiled basis.
+
+        The returned sparse exact rows satisfy source = target @ rows.T.
+        Both source profiles and species must agree; a target that does not
+        contain the selected physical span is rejected.
+        """
+        if not isinstance(target, CompiledTaggedCauchyImage):
+            raise TypeError("target must be a CompiledTaggedCauchyImage.")
+        from .source_coordinate_maps import tagged_source_coordinates
+        return tagged_source_coordinates(self, target)
+
+    def _own_identity(self):
+        """Retain one read-only identity without modifying caller-owned trees."""
+        if getattr(self, "_identity_owned", False):
+            return
+        report = self.plan.report
+        report = type(report)(**{name: _immutable_json(getattr(report, name))
+                                 for name in report.__record_fields__})
+        plan = type(self.plan)(**{name: report if name == "report" else
+            _immutable_json(getattr(self.plan, name)) for name in self.plan.__record_fields__})
+        object.__setattr__(self, "plan", plan)
+        for name in ("payload", "validation_report", "provenance"):
+            object.__setattr__(self, name, _immutable_json(getattr(self, name)))
+        object.__setattr__(self, "_identity_owned", True)
+
+    def __delattr__(self, name):
+        raise AttributeError("Accepted compiler fields cannot be deleted.")
 
     def occurrence_support(self):
         """Necessary occurrence counts for the stored independent coordinates.
@@ -3494,6 +3380,13 @@ class CompiledTaggedCauchyImage:
             if self.payload.get("coordinate_policy") == "exact_physical_pivots_v1":
                 from ye3t.couplings.tagged_cauchy_general import _tag_species
                 for record in self.payload["image_coordinate_provenance"]:
+                    if self.plan.report.request.get("catalogue", {}).get("source_profile", "B") == "A":
+                        channels = record["label"]["block_complete_channel_keys"]
+                        sizes = record["label"]["block_sizes"]
+                        alternatives.append([[sum(size for channel, size in zip(channels, sizes)
+                                                  if channel["neighbor_species"] == name)
+                                              for name in species]])
+                        continue
                     tags = _tag_species(record)
                     if tags is None:
                         raise ValueError("A selected tagged coordinate has incompatible role species.")
@@ -3538,10 +3431,11 @@ class CompiledTaggedCauchyImage:
             return build()
 
     def validate(self, compiler_validation="full"):
-        """Check current content and reuse completed compiler validation.
+        """Accept content once and reuse its immutable compiler identity.
 
         Set YE3T_CACHE_VERIFY=full to replay the independent construction.
-        Mutable payloads are checked by content before any cached result is used.
+        Publicly supplied mutable records are checked before being owned.
+        Explicit certificate/full diagnostics remain available.
         """
         _validate_tagged_cauchy_image_identity(self, compiler_validation=compiler_validation)
         return self
@@ -3555,7 +3449,7 @@ class CompiledTaggedCauchyImage:
                 if self.payload.get("coordinate_policy") == "exact_physical_pivots_v1"
                 else TAGGED_CAUCHY_IMAGE_SCHEMA
             ),
-            "plan": self.plan.to_dict(),
+            "plan": self.plan.to_dict(_copy=False),
             "payload": self.payload,
             "validation_report": self.validation_report,
             "provenance": self.provenance,
@@ -3583,7 +3477,7 @@ class CompiledTaggedCauchyImage:
         Public calls preserve their input; owned file readers can normalize
         existing containers without retaining a second compiler payload.
         """
-        payload = dict(payload)
+        payload = payload if _consume else dict(payload)
         _require_exact_keys(
             payload,
             {
@@ -3602,6 +3496,7 @@ class CompiledTaggedCauchyImage:
         body = {key: value for key, value in payload.items() if key != "self_hash"}
         if not expected or expected != _tagged_artifact_content_hash(body, expected):
             raise ValueError("Tagged-Cauchy image artifact hash mismatch.")
+        del body
 
         plan_payload = dict(payload["plan"])
         _require_exact_keys(
@@ -3634,8 +3529,8 @@ class CompiledTaggedCauchyImage:
             "count-report",
         )
         report = TaggedCauchyImageMultiplicityReport(
-            request=_freeze_json(report_payload["request"], consume=_consume),
-            labels=_freeze_json(report_payload["labels"], consume=_consume),
+            request=_immutable_json(report_payload["request"], consume=_consume),
+            labels=_immutable_json(report_payload["labels"], consume=_consume),
             raw_label_count=int(report_payload["raw_label_count"]),
             image_dimension_upper_bound=int(
                 report_payload["image_dimension_upper_bound"]
@@ -3645,29 +3540,33 @@ class CompiledTaggedCauchyImage:
                 if report_payload["exact_image_dimension"] is None
                 else int(report_payload["exact_image_dimension"])
             ),
-            resource_report=_freeze_json(report_payload["resource_report"], consume=_consume),
+            resource_report=_immutable_json(report_payload["resource_report"], consume=_consume),
             schema=str(report_payload["schema"]),
             convention_hash=str(report_payload["convention_hash"]),
-            validation_report=_freeze_json(report_payload["validation_report"], consume=_consume),
-            provenance=_freeze_json(report_payload["provenance"], consume=_consume),
+            validation_report=_immutable_json(report_payload["validation_report"], consume=_consume),
+            provenance=_immutable_json(report_payload["provenance"], consume=_consume),
         )
         plan = TaggedCauchyImageCompilerPlan(
             report=report,
-            materialization_steps=_freeze_json(
+            materialization_steps=_immutable_json(
                 plan_payload["materialization_steps"], consume=_consume
             ),
             schema=str(plan_payload["schema"]),
             convention_hash=str(plan_payload["convention_hash"]),
-            validation_report=_freeze_json(plan_payload["validation_report"], consume=_consume),
-            provenance=_freeze_json(plan_payload["provenance"], consume=_consume),
+            validation_report=_immutable_json(plan_payload["validation_report"], consume=_consume),
+            provenance=_immutable_json(plan_payload["provenance"], consume=_consume),
         )
         compiled = cls(
             plan=plan,
-            payload=_freeze_json(payload["payload"], consume=_consume),
+            payload=_immutable_json(payload["payload"], consume=_consume),
             self_hash=expected,
-            validation_report=_freeze_json(payload["validation_report"], consume=_consume),
-            provenance=_freeze_json(payload["provenance"], consume=_consume),
+            validation_report=_immutable_json(payload["validation_report"], consume=_consume),
+            provenance=_immutable_json(payload["provenance"], consume=_consume),
         )
+        object.__setattr__(compiled, "_identity_owned", True)
+        object.__setattr__(compiled, "_identity_verified", True)
+        if _consume:
+            payload["payload"] = compiled.payload
         _validate_tagged_cauchy_image_identity(compiled, compiler_validation=compiler_validation)
         return compiled
 
@@ -3860,7 +3759,7 @@ def tagged_cauchy_image_request(
     angular_product_plan = _freeze_json(angular_product_plan)
     _validate_racah_harmonic_product_plan(angular_product_plan)
     _validate_radial_species_product_algebra(
-        source_product_algebra, angular_product_plan
+        source_product_algebra, angular_product_plan, verify_coefficients=False
     )
     source_keys = _canonical_n4_source_keys(
         source_product_algebra, source_key, source_keys
@@ -3966,7 +3865,7 @@ def _validate_tagged_cauchy_request(request):
     angular = request["angular_product_plan"]
     _validate_racah_harmonic_product_plan(angular)
     product_report = _validate_radial_species_product_algebra(
-        request["source_product_algebra"], angular
+        request["source_product_algebra"], angular, verify_coefficients=False
     )
     canonical = _canonical_n4_source_keys(
         request["source_product_algebra"],

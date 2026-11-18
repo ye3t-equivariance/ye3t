@@ -460,7 +460,12 @@ def test_n4_s2_nontrivial_tag_physical_companion_is_exact_and_nonzero(
     image_to_raw = _exact_matrix_from_payload(companion["image_to_raw_H"])
     assert sp.simplify(raw_to_image * image_to_raw) == sp.eye(1)
     assert sp.simplify(image_to_raw * raw_to_image) == sp.eye(1)
-    source_witness = companion["source_image_witness"]
+    diagnostic = tagged_image_module._diagnose_s2_n4_physical_companion(
+        companion, request["source_product_algebra"], request["angular_product_plan"])
+    assert diagnostic["passed"]
+    assert tagged_image_module._diagnose_n4_s012_physical_image(
+        compiled, request["source_product_algebra"])["passed"]
+    source_witness = diagnostic["source_image_witness"]
     direct_value = _exact_scalar_from_payload(
         source_witness["direct_distinct_tag_value"]
     )
@@ -472,7 +477,7 @@ def test_n4_s2_nontrivial_tag_physical_companion_is_exact_and_nonzero(
     assert sp.simplify(direct_value - raw_value) == 0
     assert sp.simplify(direct_value) != 0
     assert sp.simplify(image_value - direct_value / sp.sqrt(image_norm)) == 0
-    three_neighbor = companion["three_neighbor_source_image_witness"]
+    three_neighbor = diagnostic["three_neighbor_source_image_witness"]
     three_direct = _exact_scalar_from_payload(
         three_neighbor["direct_distinct_tag_value"]
     )
@@ -485,12 +490,12 @@ def test_n4_s2_nontrivial_tag_physical_companion_is_exact_and_nonzero(
     assert sp.simplify(three_direct) != 0
     assert all(companion["certificate"]["checks"].values())
     assert sp.simplify(
-        _exact_scalar_from_payload(companion["two_neighbor_witness"]["value"])
+        _exact_scalar_from_payload(diagnostic["two_neighbor_witness"]["value"])
         + 1
     ) == 0
     assert sp.simplify(
         _exact_scalar_from_payload(
-            companion["two_neighbor_witness"]["second_value"]
+            diagnostic["two_neighbor_witness"]["second_value"]
         )
         + 4
     ) == 0

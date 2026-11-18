@@ -4,8 +4,18 @@ The experimental `tagged_cauchy_image_request(catalogue=..., species=...)`
 uses count/plan/compile. Chemical channels are indicators, not learned embeddings.
 The repeated-channel key is neighbor species, radial degree, angular degree and
 source family; the application binds central species and directed-pair cutoff.
-The validated tag-count scope is `s=0,1,2`. The algebra has no fixed tensor-order
-or angular-degree restriction; compiler resource checks still apply.
+The scalar planner accepts tag counts from zero to tensor rank, subject to
+explicit resource bounds. Tests cover multiple tag counts and selected unions;
+the retained nonscalar adapter has its own narrower capability limits. The
+algebra has no fixed tensor-order or angular-degree restriction.
+
+`catalogue.source_profile="inclusive_moments"` is the default (compatibility
+name `B`). Several factors may share a tag; background moments are inclusive.
+`"distinct_occurrences"` (compatibility name `A`) assigns one factor to each
+tag and requires every other factor to use a different occurrence. Full scalar
+pooling of A has the same independent target for each admissible tag split.
+It uses the shared symmetric coupling and all-distinct occurrence transform.
+The public Methods/ACE input places this choice under `basis.tensor_product`.
 
 For a fixed center, collided factors of one species share `x=r/r_cut(pair)`.
 Products of different species indicators vanish. Racah harmonic products use
@@ -18,13 +28,31 @@ including `sqrt(prod norm_squared / output_norm_squared)`. Closure is untruncate
 Distinct tags use Möbius inclusion-exclusion: for two tags, `M[f]M[g]-M[fg]`.
 Density contexts remain inclusive.
 
-Sparse moment polynomials are reduced by exact pivots. Survivors remain original
-compiler coordinates. Every discarded attempted row has an exact reconstruction.
-The compiler processes each candidate once, retaining its sparse echelon rows
-and reconstruction coefficients for the next candidate. All arithmetic and
-zero decisions are exact. Named coordinates must survive that selection.
+Counting first applies a proved analytical selection rule when available.
+Other finite selections use exact Hermitian LDL selection on source images
+in independent moment-polynomial coordinates. For the source map `K` and a
+positive coefficient metric `W`, `G=K†WK` has exactly the same kernel as `K`.
+With already accepted columns `F`, compute `H=F†WF`, `h=F†Wk`, and
+`delta=k†Wk-h†H⁻¹h`. Exact zero means `k=F H⁻¹h`; positive delta selects the
+original column `k`. Triangular LDL solves use exact arithmetic and no numerical
+threshold. The scalar output is already a multiplicity coordinate, so overlaps
+between ranks are included in the same calculation. This metric selects an
+image basis and does not renormalize the shared rotation/permutation couplings.
+
+The count report contains independent coordinate IDs, counts by rank, and
+exact reconstruction of each examined dependent candidate. It records whether
+source coefficients were used. A versioned source-image planning artifact
+stores the small LDL data and relations; individual source-coordinate artifacts
+retain their existing cache. Warm planning loads these records. Compilation
+consumes the selected IDs; evaluation performs no image factorization.
+The earlier exact-pivot algorithm remains an independent bounded reference and
+supports historical report replay. Named coordinates must survive selection.
 Feature caps bound the selected subspace
 and do not assert the complete uncapped mathematical image dimension.
+`max_features_per_rank="all"` resolves to the formal candidate count in each
+rank before image planning. The count report contains that resolved integer
+request. Standardized Methods/ACE catalogues use this option so their previews
+cover the same finite catalogue that is subsequently materialized.
 
 ## Multiplicity coordinates and physical source functions
 
@@ -67,7 +95,7 @@ concerns **all finite coordination numbers**, not a fixed maximum coordination
 or a finite dataset. Each directed species pair has one fixed radial support.
 
 Version-4 compiler artifacts contain hash-bound lifted-Cauchy parent couplings,
-physical-image pivots, source inventory, and real schedules. The full loader
+physical-image selection, source inventory, and real schedules. The full loader
 replays exact physical lowering. It reads the parent coupling coefficients from
 the validated artifact and rehashes all artifact bytes before using a
 process-local validation cache. Version-3 N=4 orthonormal artifacts keep their
@@ -91,11 +119,12 @@ Integrity hashes provide consistency checks. Use full mode to verify the
 artifact's algebraic claims by replay; a certificate-mode load leaves the
 full-replay cache empty. Direct `CompiledTaggedCauchyImage.from_dict` keeps its
 diagnostic `"full"` default; public linear loading selects `"integrity"`.
-Cold construction and explicit development diagnostics retain their existing
-mathematical qualification. `YE3T_CACHE_VERIFY=full` requests cache replay.
+Trusted constructors supply the coefficients and source relations. Explicit
+development diagnostics retain independent mathematical replay.
+`YE3T_CACHE_VERIFY=full` requests cache replay.
 
-Image reduction uses exact pivots and nullspaces for role and scalar-angular
-templates. The general workflow selects
+The existing angular template backend retains its exact weight-space
+construction. The general workflow selects
 `angular_basis_backend="exact_weight_space_v1"` for positive angular momenta:
 content-class coset matrix units construct the Young first-row image in weight
 `M=L`; the kernel of `J+` selects highest weights; normalized `J-` steps generate
@@ -124,7 +153,7 @@ an independent projector calculation.
 
 The current selection boundary is too late for some costs. In
 `tagged_cauchy_general.py`, `_general_count` enumerates complete-content parent
-labels before `_general_compile` applies named-coordinate and feature limits.
+labels before exact source-image planning applies named-coordinate and feature limits.
 The selected candidate is parent-compiled with one manual label, but
 `lifted_cauchy_scalar._build_block_template` still constructs all role/angular
 multiplicity copies, tableaux and magnetic components for its block key.
@@ -159,6 +188,10 @@ References (independent implementations; no external code copied):
   nonorthogonal expansion bases.
 - [DLMF 34.3(vii)](https://dlmf.nist.gov/34.3#vii): harmonic products and angular
   momentum coefficients, using existing compiler CG implementation.
+- G. H. Golub and C. F. Van Loan, *Matrix Computations*, fourth edition,
+  section 4.2, [publisher](https://www.press.jhu.edu/books/title/10678/matrix-computations):
+  positive-definite factorization and solves. The exact image criterion above
+  follows from the positive coefficient metric and Schur complement.
 - [LAMMPS ZBL](https://docs.lammps.org/pair_zbl.html) and
   [GROMACS switch](https://docs.lammps.org/pair_gromacs.html): mathematical and
   behavioral references for portable ZBL; no GPL implementation was translated.

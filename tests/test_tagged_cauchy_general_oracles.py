@@ -126,6 +126,50 @@ def test_physical_rows_match_direct_distinct_neighbor_sums(oracle_data):
             assert {generator[0] for generator in monomial} == {"H", "O"}
 
 
+def test_profile_a_mixed_angular_source_matches_subset_polarization(monkeypatch):
+    from ye3t.couplings.lifted_cauchy_scalar import CompiledLiftedCauchyScalar
+    from ye3t.couplings.tagged_cauchy_general import _ExactImagePivots
+    monkeypatch.setenv("YE3T_CACHE_MODE", "off")
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Profile A construction attempted physical-image elimination")
+    monkeypatch.setattr(_ExactImagePivots, "append", forbidden)
+    request = tagged_cauchy_image_request(species=("H",), catalogue={
+        "nmax_per_rank": {4: 2}, "lmax_per_rank": {4: 1},
+        "source_block_partitions_by_rank": {4: [[2, 2]]},
+        "angular_patterns_by_rank": {4: [[1]*4]},
+        "tag_counts_by_rank": {4: [2]}, "source_profile": "A"})
+    image = compile(plan(request))
+    assert image.plan.report.exact_image_dimension == 2
+    atoms = (("H", 0.19, 0.63, 0.41), ("H", 0.37, 1.17, 2.09),
+             ("H", 0.58, 2.03, 1.36), ("H", 0.71, 0.97, 4.13))
+    # At exactly N neighbors, subset inclusion-exclusion isolates terms using
+    # every occurrence. A degree-N tensor then uses every occurrence once.
+    # This reference needs neither Gaunt lowering nor set-partition products.
+    for record, encoded in zip(image.payload["image_coordinate_provenance"], image.payload["image_rows"]):
+        parent = CompiledLiftedCauchyScalar.from_dict(
+            image.payload["parent_artifacts"][record["parent_artifact_hash"]])
+        edges = {}
+        for channel in parent.payload["channels"]:
+            l = channel["l"]
+            base = (channel["neighbor_species"], FAMILY, "pair_normalized_cutoff_v1",
+                    channel["radial_channel"], l)
+            edges[channel["channel_index"]] = np.array([
+                [_source((*base, m), atom) for m in range(-l, l+1)] for atom in atoms])
+        direct = 0j
+        for mask in range(1, 1 << len(atoms)):
+            selected = [j for j in range(len(atoms)) if mask & (1 << j)]
+            subset = {key: values[selected] for key, values in edges.items()}
+            direct += (-1)**(len(atoms)-len(selected))*tagged_tuple_reference(
+                parent, (("density", 0),), subset)[0]
+        row = _moment_term_map(encoded)
+        generators = {g for term in row for g in term}
+        moments = {g: sum(_source(g, atom) for atom in atoms) for g in generators}
+        lowered = sum(complex(sp.N(c, 17))*math.prod(moments[g] for g in term)
+                      for term, c in row.items())
+        assert abs(direct) > 1e-8
+        np.testing.assert_allclose(lowered, direct, rtol=2e-10, atol=2e-8)
+
+
 @pytest.mark.parametrize("second_l,tag_count", [
     (1, 1), (2, 1),
     pytest.param(1, 2, marks=pytest.mark.xfail(strict=True, raises=MemoryError,

@@ -2079,8 +2079,8 @@ def generate_factorized_coefficient_schedules_by_L(
     structured trees are generated once for the full ``(n,l,tree_type)``
     signature, then every target schedule is assembled from that shared cache.
     """
-    n_sig = tuple(int(x) for x in n_in)
-    l_sig = tuple(int(x) for x in l_in)
+    n_sig = tuple(map(int, n_in))
+    l_sig = tuple(map(int, l_in))
     selected_constructor_backend = _selected_factorized_constructor_backend(constructor_backend)
     cache_key = (
         "factorized_schedules_by_L",

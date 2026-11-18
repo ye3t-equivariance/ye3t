@@ -90,6 +90,8 @@ def test_compact_warm_reuse_does_not_reconstruct_coefficients(monkeypatch):
     monkeypatch.setattr(young, "_canonical_split_matrices",
                         lambda *args: pytest.fail("warm use rebuilt the split coefficients"))
     assert compact.direct_restricted_young_values(((2,), (1,)), (2, 1)) is first
+    # Serialized inputs share the same immutable cache entry and conversion.
+    assert compact.direct_restricted_young_values([[2], [1]], [2, 1]) is first
 
 
 def test_warm_partition_records_are_shared_and_invalid_inputs_still_fail():
@@ -99,6 +101,21 @@ def test_warm_partition_records_are_shared_and_invalid_inputs_still_fail():
     for invalid in ((1, 2), (2, 0), (2, -1)):
         with pytest.raises(ValueError):
             _coerce_partition(invalid)
+
+
+def test_public_binary_and_general_split_share_coordinates_without_a_solve(monkeypatch):
+    from ye3t.representations import young_orthogonal as young
+    young._young_orthogonal_induced_coupling_cached.cache_clear()
+    def forbidden(*args, **kwargs):
+        pytest.fail("Public binary coupling used the superseded equation solver")
+    assert not hasattr(young, "_exact_restricted_intertwiner_basis")
+    monkeypatch.setattr(young, "_exact_nary_restricted_intertwiner_basis", forbidden)
+    monkeypatch.setattr(young, "_reference_subgroup_intertwiner_basis", forbidden)
+    binary = young.young_orthogonal_induced_coupling((2,1),(2,1),(3,2,1))
+    general = young.young_orthogonal_nary_subduction(((2,1),(2,1)),(3,2,1))
+    assert binary.multiplicity == general.multiplicity == 2
+    assert binary.coset_reps == general.coset_reps
+    assert binary.coefficient_matrix() == general.coefficient_matrix()
 
 
 @pytest.mark.parametrize("children,target", [

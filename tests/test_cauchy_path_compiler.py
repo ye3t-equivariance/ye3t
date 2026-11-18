@@ -26,7 +26,7 @@ def test_shared_compiler_count_complete_derivatives_and_reload(sizes, ells, L, o
     assert compiled["multiplet_count"] == count["multiplet_count"] > 0
     assert validate_covariant_cauchy(compiled)
     assert "block_templates" not in compiled
-    assert all(row["label"]["convention_id"] == "normalized_role_subduction_paired_angular_paths_v1"
+    assert all(row["label"]["convention_id"] == "canonical_split_role_paired_angular_paths_v2"
                for row in compiled["descriptors"])
     restored = json.loads(json.dumps(compiled))
     assert validate_covariant_cauchy(restored)

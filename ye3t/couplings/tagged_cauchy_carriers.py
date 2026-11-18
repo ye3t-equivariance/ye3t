@@ -1794,7 +1794,7 @@ def _catalogue_request(catalogue, species):
         "density_context", "intermediate_selection", "source_family_plan",
         "basis_coordinates", "angular_basis_backend", "shell_role_action",
         "shell_occupation_coordinates", "shell_occupancies_by_rank",
-        "source_contents_by_rank",
+        "source_contents_by_rank", "additional_source_contents_by_rank", "generated_ranks",
         "eta_max_per_rank", "retained_max_per_rank",
     }
     unknown = set(cfg) - supported
@@ -2081,7 +2081,52 @@ def _catalogue_request(catalogue, species):
             contents[str(rank)] = tuple(sorted(selected, key=lambda row:
                 (_catalogue_content_key(row["channels"], row["block_sizes"], 0), row["tag_counts"])))
         normalized["source_contents_by_rank"] = contents
+    if "generated_ranks" in cfg or "additional_source_contents_by_rank" in cfg:
+        if normalized.get("basis_coordinates") != "formal_cauchy":
+            raise NotImplementedError("Generated/explicit carrier unions currently require formal shell coordinates.")
+        generated = tuple(cfg.get("generated_ranks", ranks))
+        if (any(type(rank) is not int for rank in generated) or
+                len(set(generated)) != len(generated) or not set(generated) <= set(ranks)):
+            raise ValueError("generated_ranks must contain distinct configured ranks")
+        normalized["generated_ranks"] = tuple(sorted(generated))
+        from .catalogue_inputs import normalize_explicit_labels
+        additions = {}
+        for key, rows in cfg.get("additional_source_contents_by_rank", {}).items():
+            rank = int(key)
+            if rank not in ranks or not isinstance(rows, (tuple, list)):
+                raise ValueError("Additional source contents need configured ranks and lists")
+            selected = []
+            for row in rows:
+                if set(row) - {"channels", "block_sizes", "tag_counts", "intermediates"}:
+                    raise ValueError("Unknown explicit shell content field")
+                sizes, channels = row["block_sizes"], row["channels"]
+                if (len(sizes) != len(channels) or sum(sizes) != rank or
+                        any(type(size) is not int or size <= 0 for size in sizes)):
+                    raise ValueError("Explicit shell blocks must partition the configured rank")
+                factors = [channel for channel, size in zip(channels, sizes, strict=True) for _ in range(size)]
+                aligned = {"center": species[0],
+                    "chemical": [channel["neighbor_species"] for channel in factors],
+                    "radial": [channel["radial_channel"] for channel in factors],
+                    "angular": [channel["l"] for channel in factors],
+                    "tag_counts": row.get("tag_counts", [0]),
+                    **({"intermediates": row["intermediates"]} if "intermediates" in row else {})}
+                record, = normalize_explicit_labels([aligned], species=species,
+                    source_family_id=normalized["source_family_id"])
+                if (record["tag_counts"] != (0,) or
+                        any(channel["radial_channel"] >= plan["radial_count"] or
+                            channel["l"] > normalized["lmax_per_rank"][str(rank)]
+                            for channel in record["channels"])):
+                    raise ValueError("Explicit shell channels exceed the frozen source capacity or request atom tags")
+                if ("eta_max_per_rank" in normalized and _catalogue_eta_count(record["channels"], normalized)
+                        > normalized["eta_max_per_rank"][str(rank)]):
+                    raise ValueError("Explicit shell content exceeds eta_max_per_rank")
+                selected.append({name: item for name, item in record.items() if name not in {"rank", "center"}})
+            additions[str(rank)] = selected
+        normalized["additional_source_contents_by_rank"] = additions
     request = {"family": TAGGED_CAUCHY_CARRIERS_FAMILY, "species": species, "catalogue": normalized}
+    if normalized.get("angular_basis_backend") == "normalized_cg_paths_v1":
+        from .cauchy_paths import CONVENTION
+        request["coefficient_convention"] = CONVENTION
     request["request_hash"] = _scalar._stable_hash(_scalar._freeze_json(request))
     return request
 
@@ -2244,6 +2289,9 @@ def _catalogue_count(request, *, legacy_validation=False):
                              "multiplet_cap": cfg["max_features_per_rank"][str(rank)],
                              "rank_one_exhaustive": rank == 1})
     inventory, selected_records = [], []
+    explicit_union = "additional_source_contents_by_rank" in cfg
+    seen_coordinates = set()
+    explicit_coordinate_sets = []
     for rank_record in rank_reports:
         rank = rank_record["rank"]
         ranked, raw_count = [], 0
@@ -2253,7 +2301,17 @@ def _catalogue_count(request, *, legacy_validation=False):
             fixed = (_tagged_cauchy_projection_candidates(record["request"]) if legacy_validation
                      else tagged_cauchy_carriers_count(record["request"]))
             raw_count += fixed["raw_opportunity_count"]
-            for label in fixed["labels"]:
+            fixed_labels = fixed["labels"]
+            if "intermediates" in record:
+                fixed_labels = _catalogue_intermediate_representation({**cfg,
+                    "intermediate_selection": record["intermediates"]}).select_intermediate_inventory(fixed_labels)
+            if record.get("explicit_input"):
+                explicit_coordinate_sets.append({label["coordinate_id"] for label in fixed_labels})
+            for label in fixed_labels:
+                if explicit_union and label["coordinate_id"] in seen_coordinates:
+                    continue
+                if explicit_union:
+                    seen_coordinates.add(label["coordinate_id"])
                 degree = label.get("shell_role_degree", label["tag_count"])
                 trivial = (tuple(label.get("shell_partition", label["tag_partition"])) == ((degree,)
                            if degree else ()) and all(tuple(kappa) == (size,)
@@ -2283,6 +2341,8 @@ def _catalogue_count(request, *, legacy_validation=False):
         allowed_ids = {item["coordinate_id"] for item in sector_selection["selected"]}
     else:
         allowed_ids = {item["label"]["coordinate_id"] for item in inventory}
+    if any(not ids.intersection(allowed_ids) for ids in explicit_coordinate_sets):
+        raise ValueError("Explicit shell content has no admissible coupling path under the selected intermediate/output sectors; inspect it with unrestricted intermediates.")
     for rank_record in rank_reports:
         rank = rank_record["rank"]
         ranked = [item for item in inventory if records[item["record_index"]]["rank"] == rank

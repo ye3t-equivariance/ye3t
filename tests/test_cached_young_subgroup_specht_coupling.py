@@ -61,7 +61,9 @@ def test_numeric_public_copies_match_actual_canonical_tree_without_generic_solve
     legacy.write_bytes(b"historical-copy-coordinates-must-stay-untouched")
     def forbidden(*args, **kwargs):
         pytest.fail("Production public numeric materialization must use qualified shared canonical maps")
-    monkeypatch.setattr(consumer, "numeric_subduction_nullspace", forbidden)
+    from ye3t.representations import numeric_subduction as reference_solver
+    assert not hasattr(consumer, "numeric_subduction_nullspace")
+    monkeypatch.setattr(reference_solver, "numeric_subduction_nullspace", forbidden)
     monkeypatch.setattr(consumer, "validate_young_orthogonal_nary_subduction", forbidden)
     monkeypatch.setattr(exact, "_sympy", forbidden)
     actual = build_cached_young_subgroup_specht_coupling(children, target, cache_dir=tmp_path)

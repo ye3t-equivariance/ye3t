@@ -79,7 +79,7 @@ def test_numeric_subduction_nullspace_matches_exact_restricted_projector_for_mul
     assert result.validation["projector_compared_to_exact"] is True
     assert result.validation["projector_comparison_kind"] == "restricted_subgroup_projector"
     assert result.validation["exact_projector_backend"] == "matrix_units"
-    assert result.validation["exact_projector_codepath"] == "projector_first_matrix_units_exact"
+    assert result.validation["exact_projector_codepath"] == "canonical_binary_split_composition_v3"
     assert result.validation["coefficient_gauge_compared"] is False
     assert result.validation["projector_vs_exact_error"] < 1.0e-8
     rank_report = result.validation["rank_report"]
@@ -222,7 +222,7 @@ def test_numeric_subduction_1123_style_block_layout_matches_exact_projector():
 
     assert result.validation_report.ok is True
     assert result.validation["projector_compared_to_exact"] is True
-    assert result.validation["exact_projector_codepath"] == "projector_first_matrix_units_exact"
+    assert result.validation["exact_projector_codepath"] == "canonical_binary_split_composition_v3"
     assert result.validation["projector_vs_exact_error"] < 1.0e-8
 
 

@@ -7,7 +7,7 @@ lowering binds each role to its frozen shell/radial channel.
 """
 
 from collections import Counter
-from itertools import combinations_with_replacement, permutations
+from itertools import chain, combinations_with_replacement, permutations
 from ye3t.cache.artifacts import YE3TArtifactStore
 
 from . import lifted_cauchy_scalar as scalar
@@ -59,12 +59,15 @@ def _request(value):
     return result
 
 
-def count_shell_cauchy(value):
+def count_shell_cauchy(value, *, _coordinate_convention=None):
     request = _request(value)
+    if _coordinate_convention is not None:
+        request["coupling_request"]["convention_id"] = _coordinate_convention
     if request.get("shell_role_action") == "permutation":
         from .shell_role_restriction import shell_role_inventory
         base = count_shell_cauchy({key: value for key, value in request.items()
-                                  if key not in {"shell_role_action", "selected_coordinates"}})
+                                  if key not in {"shell_role_action", "selected_coordinates"}},
+                                 _coordinate_convention=_coordinate_convention)
         labels, _ = shell_role_inventory(base)
         available = len(labels)
         selected = request["selected_coordinates"]
@@ -81,6 +84,8 @@ def count_shell_cauchy(value):
     labels = []
     roles = request["coupling_request"]["role_dimension"]
     for original in report["labels"]:
+        if _coordinate_convention is not None:
+            original = {**original, "convention_id": _coordinate_convention}
         label = {**original, "formal_parent": (original["rank"],), "tag_count": 0,
                  "tag_partition": (), "tag_tableau_count": 1, "tag_character": 1,
                  "basis_coordinates": "formal_cauchy"}
@@ -128,18 +133,28 @@ def shell_cauchy_candidates(request, rank):
     if explicit is not None:
         if any(tuple(row["tag_counts"]) != (0,) for row in explicit):
             raise ValueError("Formal shell contents use zero explicit tags")
-        contents = ((row["block_sizes"], row["channels"]) for row in explicit)
+        contents = ((row["block_sizes"], row["channels"], None, False) for row in explicit)
     else:
-        contents = ((pattern, tuple(channels[index] for index in indices))
-            for pattern in cfg["source_block_partitions_by_rank"][str(rank)]
+        contents = ((pattern, tuple(channels[index] for index in indices), None, False)
+            for pattern in (cfg["source_block_partitions_by_rank"][str(rank)]
+                            if rank in cfg.get("generated_ranks", cfg["ranks"]) else ())
             for indices in permutations(range(len(channels)), len(pattern))
             if not any(pattern[a] == pattern[b] and indices[a] > indices[b]
                        for a in range(len(pattern)) for b in range(a + 1, len(pattern))))
     records = []
-    for pattern, selected in contents:
+    contents = chain(contents, ((row["block_sizes"], row["channels"], row.get("intermediates"), True)
+        for row in cfg.get("additional_source_contents_by_rank", {}).get(str(rank), ())))
+    for pattern, selected, intermediates, explicit_input in contents:
+        if "additional_source_contents_by_rank" in cfg:
+            blocks = sorted(zip(pattern, selected, strict=True), key=lambda item: (
+                -item[0], item[1]["l"], item[1]["neighbor_species"], item[1]["radial_channel"]))
+            pattern, selected = zip(*blocks)
         if ("eta_max_per_rank" in cfg and _catalogue_eta_count(selected, cfg)
                 > cfg["eta_max_per_rank"][str(rank)]):
+            if explicit_input:
+                raise ValueError("Explicit shell content exceeds eta_max_per_rank.")
             continue
+        admitted = False
         for L in range(cfg["input_Lmax"] + 1):
             coupling = covariant_cauchy_request(selected, pattern, target_L=L,
                 role_dimension=roles, role_occupations=occupations, kappa_policy=cfg.get("kappa_policy", "all"),
@@ -148,8 +163,13 @@ def shell_cauchy_candidates(request, rank):
                 **({"permuted_role_count": plan["permuted_role_count"]} if plan.get("include_background") else {}),
                 **({"shell_role_action": cfg["shell_role_action"]} if "shell_role_action" in cfg else {})})
             if count_shell_cauchy(fixed)["multiplet_count"]:
+                admitted = True
                 records.append({"rank": rank, "pattern": pattern,
-                    "max_primitive_l": max(channel["l"] for channel in selected), "request": fixed})
+                    "max_primitive_l": max(channel["l"] for channel in selected), "request": fixed,
+                    **({"explicit_input": True} if explicit_input else {}),
+                    **({"intermediates": intermediates} if intermediates is not None else {})})
+        if explicit_input and not admitted:
+            raise ValueError("Explicit shell content has no admissible coupling path; adjust its angular inputs or output selection.")
     return records
 
 
@@ -254,7 +274,12 @@ def validate_shell_cauchy(payload, *, exact_reconstruction=False):
     body = {key: value for key, value in payload.items() if key != "self_hash"}
     if scalar._stable_record_hash(body) != payload.get("self_hash"):
         raise ValueError("Formal shell source hash mismatch")
-    report = count_shell_cauchy(payload)
+    convention = payload["request"]["coupling_request"]["convention_id"]
+    from .cauchy_paths import CONVENTION, LEGACY_CONVENTION
+    normalized = payload["request"]["coupling_request"].get("angular_basis_backend") == "normalized_cg_paths_v1"
+    if normalized and convention not in {CONVENTION, LEGACY_CONVENTION}:
+        raise ValueError("Unknown normalized shell coordinate convention")
+    report = count_shell_cauchy(payload, _coordinate_convention=convention if normalized else None)
     if scalar._freeze_json([row["label"] for row in payload["descriptors"]]) != scalar._freeze_json(report["labels"]):
         raise ValueError("Formal shell source labels differ from the independent plan")
     if not payload["validation_report"]["passed"]:
@@ -265,6 +290,8 @@ def validate_shell_cauchy(payload, *, exact_reconstruction=False):
                 != schedule.get("self_hash") or schedule["output_dimension"] != report["component_count"]):
             raise ValueError("Shell shared schedule has invalid identity or output axes")
         if exact_reconstruction:
+            if normalized and convention != CONVENTION:
+                raise ValueError("Historical shell coordinates require their historical reference for reconstruction")
             expected = _compile_shell_cauchy(report["request"])
             if expected["self_hash"] != payload["self_hash"]:
                 raise ValueError("Shell shared coefficient reconstruction differs")

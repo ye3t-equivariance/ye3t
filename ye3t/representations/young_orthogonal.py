@@ -31,6 +31,7 @@ backend, not by a closed LR-tableau entry formula.
 """
 
 from functools import lru_cache
+from ye3t.cache._bounded import _bounded_coefficient_cache
 from itertools import combinations, product
 from math import factorial
 
@@ -114,9 +115,6 @@ class YoungOrthogonalCouplingTensor:
     def coefficient_matrix_native(self):
         """Return columns of coupled vectors as a native exact matrix."""
 
-        if str(self.coefficient_backend).startswith("numeric"):
-            return tuple(tuple(float(vector.coefficients[row]) for vector in self.vectors)
-                         for row in range(self.induced_dim))
         return tuple(
             tuple(exact_scalar(vector.coefficients[row]) for vector in self.vectors)
             for row in range(self.induced_dim)
@@ -214,7 +212,7 @@ def _adjacent_word_to_permutation(perm):
     return tuple(word)
 
 
-@lru_cache(maxsize=None)
+@lru_cache(maxsize=512)
 def _young_irrep_matrix(partition_parts, perm):
     partition_parts = tuple(int(part) for part in partition_parts)
     perm = tuple(int(x) for x in perm)
@@ -284,7 +282,7 @@ def _left_coset_representatives(n, subgroup):
     return tuple(reps)
 
 
-@lru_cache(maxsize=None)
+@lru_cache(maxsize=128)
 def _young_subgroup_shuffle_representatives(block_sizes):
     """Construct canonical left-coset representatives as block shuffles."""
 
@@ -716,7 +714,7 @@ def _is_lattice_word(word, max_entry):
     return True
 
 
-@lru_cache(maxsize=None)
+@lru_cache(maxsize=4096)
 def _littlewood_richardson_tableaux_cached(left_parts, right_parts, target_parts):
     left_partition = Partition(tuple(int(x) for x in left_parts))
     right_partition = Partition(tuple(int(x) for x in right_parts))
@@ -817,7 +815,7 @@ def littlewood_richardson_coefficient(left_partition, right_partition, target_pa
     return len(littlewood_richardson_tableaux(left_partition, right_partition, target_partition))
 
 
-@lru_cache(maxsize=None)
+@lru_cache(maxsize=1024)
 def _littlewood_richardson_chain_labels_cached(subgroup_parts, target_parts):
     subgroup_partitions = tuple(Partition(tuple(int(x) for x in parts)) for parts in subgroup_parts)
     target_partition = Partition(tuple(int(x) for x in target_parts))
@@ -875,7 +873,7 @@ def _littlewood_richardson_chain_labels_cached(subgroup_parts, target_parts):
     return tuple(labels)
 
 
-@lru_cache(maxsize=None)
+@lru_cache(maxsize=1024)
 def _littlewood_richardson_tree_labels_cached(subgroup_parts, target_parts, bracketing):
     subgroup_partitions = tuple(Partition(tuple(int(x) for x in parts)) for parts in subgroup_parts)
     target_partition = Partition(tuple(int(x) for x in target_parts))
@@ -1102,17 +1100,6 @@ def _exact_intertwiner_basis(induced_actions, target_partition, induced_dim):
     return _orthonormalize_intertwiner_metric(tuple(basis))
 
 
-def _subgroup_generator_permutations(a, b):
-    a = int(a)
-    b = int(b)
-    out = []
-    for idx in range(max(a - 1, 0)):
-        out.append(_direct_sum_permutation(adjacent_transposition(a, idx), tuple(range(b))))
-    for idx in range(max(b - 1, 0)):
-        out.append(_direct_sum_permutation(tuple(range(a)), adjacent_transposition(b, idx)))
-    return tuple(out)
-
-
 def _young_subgroup_generator_permutations(block_sizes):
     block_sizes = tuple(int(x) for x in block_sizes)
     out = []
@@ -1123,64 +1110,6 @@ def _young_subgroup_generator_permutations(block_sizes):
             blocks[block_index] = adjacent_transposition(int(size), idx)
             out.append(_direct_sum_permutation_blocks(blocks))
     return tuple(out)
-
-
-def _exact_restricted_intertwiner_basis(
-    left_partition,
-    right_partition,
-    target_partition,
-    coset_reps,
-):
-    a = int(left_partition.size)
-    b = int(right_partition.size)
-    child_dim = int(left_partition.dimension) * int(right_partition.dimension)
-    target_dim = int(target_partition.dimension)
-    left_matrices = canonical_irrep_matrices(tuple(left_partition.parts))
-    right_matrices = canonical_irrep_matrices(tuple(right_partition.parts))
-    constraints = []
-    for perm in _subgroup_generator_permutations(a, b):
-        left_perm, right_perm = _split_subgroup_permutation(perm, a, b)
-        child_action = _sympy().kronecker_product(
-            left_matrices[inverse_permutation(left_perm)],
-            right_matrices[inverse_permutation(right_perm)],
-        )
-        target_action = _young_irrep_matrix(tuple(target_partition.parts), inverse_permutation(perm))
-        constraints.append(
-            _sympy().kronecker_product(_sympy().eye(target_dim), child_action)
-            - _sympy().kronecker_product(target_action.T, _sympy().eye(child_dim))
-        )
-    if constraints:
-        system = constraints[0]
-        for block in constraints[1:]:
-            system = system.col_join(block)
-        raw_blocks = tuple(
-            _canonicalize_intertwiner(_matrix_from_column_major_vector(vector, child_dim, target_dim))
-            for vector in system.nullspace()
-        )
-    else:
-        raw_blocks = tuple(
-            _sympy().Matrix(
-                child_dim,
-                target_dim,
-                lambda row, col, basis_row=basis_row, basis_col=basis_col: (
-                    _sympy().Integer(1) if int(row) == int(basis_row) and int(col) == int(basis_col) else _sympy().Integer(0)
-                ),
-            )
-            for basis_row in range(child_dim)
-            for basis_col in range(target_dim)
-        )
-    expanded = []
-    for block in raw_blocks:
-        matrix = _sympy().zeros(len(coset_reps) * child_dim, target_dim)
-        for coset_index, coset_rep in enumerate(coset_reps):
-            target_action = _young_irrep_matrix(tuple(target_partition.parts), coset_rep)
-            piece = _sympy().simplify(block * target_action)
-            row0 = int(coset_index) * child_dim
-            for row in range(child_dim):
-                for col in range(target_dim):
-                    matrix[row0 + row, col] = piece[row, col]
-        expanded.append(_canonicalize_intertwiner(matrix))
-    return _orthonormalize_intertwiner_metric(tuple(expanded))
 
 
 def _exact_nary_restricted_intertwiner_basis(
@@ -1508,12 +1437,13 @@ def _subduction_graph_solution_vectors(equations, variable_count):
     return basis
 
 
-def _constructive_subduction_graph_restricted_intertwiner_basis(
+def _reference_subgroup_intertwiner_basis(
     subgroup_partitions,
     target_partition,
     *,
     expected_multiplicity,
 ):
+    """Independent equation reference; production uses selected projectors."""
     subgroup_partitions = tuple(_coerce_partition(partition) for partition in subgroup_partitions)
     target_partition = _coerce_partition(target_partition)
     block_sizes = tuple(int(partition.size) for partition in subgroup_partitions)
@@ -1837,7 +1767,7 @@ def _split_label_subgroups(label):
     return tuple(nodes)
 
 
-@lru_cache(maxsize=256)
+@_bounded_coefficient_cache(maxsize=256)
 def _projector_binary_split_matrices(left_parts, right_parts, target_parts):
     """Construct selected binary split maps with shared tableau projectors.
 
@@ -1882,7 +1812,7 @@ def _projector_binary_split_matrices(left_parts, right_parts, target_parts):
         action, (left_parts, right_parts), int(parent.dimension), count, priority)
 
 
-@lru_cache(maxsize=256)
+@_bounded_coefficient_cache(maxsize=256)
 def _reference_binary_split_matrices(left_parts, right_parts, target_parts):
     """Normalized binary S matrices in the existing elementary convention.
 
@@ -1897,7 +1827,7 @@ def _reference_binary_split_matrices(left_parts, right_parts, target_parts):
         return ()
     if parent.dimension == 1:
         return (_sympy().ImmutableMatrix([[1]]),)
-    blocks = _constructive_subduction_graph_restricted_intertwiner_basis(
+    blocks = _reference_subgroup_intertwiner_basis(
         children, parent, expected_multiplicity=count)
     child_dimension = int(children[0].dimension) * int(children[1].dimension)
     scale = _sympy().sqrt(_sympy().Rational(child_dimension, int(parent.dimension)))
@@ -1910,7 +1840,7 @@ def _reference_binary_split_matrices(left_parts, right_parts, target_parts):
 _binary_split_matrices = _projector_binary_split_matrices
 
 
-@lru_cache(maxsize=256)
+@_bounded_coefficient_cache(maxsize=256)
 def _canonical_split_matrices(subgroup_parts, target_parts, bracketing="balanced",
                               arithmetic="symbolic"):
     """Compose independent split coordinates through their actual tree.
@@ -1996,12 +1926,12 @@ def direct_restricted_young_values(child_partitions, target_partition, bracketin
     coupling transport import. Loading numerical tables does not import a
     tensor evaluator or reconstruct symbolic coefficients.
     """
-    children = tuple(tuple(int(value) for value in row) for row in child_partitions)
-    target = tuple(int(value) for value in target_partition)
+    children = tuple(tuple(map(int, row)) for row in child_partitions)
+    target = tuple(map(int, target_partition))
     return _direct_restricted_young_values_cached(children, target, str(bracketing))
 
 
-@lru_cache(maxsize=128)
+@_bounded_coefficient_cache(maxsize=128)
 def _direct_restricted_young_values_cached(children, target, bracketing):
     values, multiplicity, _ = _resolve_restricted_young_array(children, target, bracketing)
     return tuple(tuple(row) for row in values.tolist()), multiplicity
@@ -2051,7 +1981,7 @@ def _expand_normalized_split_matrices(split_matrices, target_partition, coset_re
     )).applyfunc(_sympy().expand) for split in split_matrices)
 
 
-@lru_cache(maxsize=None)
+@lru_cache(maxsize=128)
 def _young_orthogonal_nary_subduction_cached(subgroup_parts, target_parts, bracketing, coefficient_backend):
     shell = _young_orthogonal_nary_subduction_shell(subgroup_parts, target_parts, bracketing)
     subgroup_partitions = shell["subgroup_partitions"]
@@ -2097,7 +2027,9 @@ def _young_orthogonal_nary_subduction_cached(subgroup_parts, target_parts, brack
         codepath = "nary_specht_intertwiner_nullspace_no_gram_schmidt"
         coefficient_note = (
             "Nontrivial n-ary coefficients are selected by exact symbolic intertwiner equations; "
-            "this backend is retained as a reference oracle."
+            "this backend is retained as a reference oracle. LR-chain metadata is "
+            "only the counted candidate inventory here; arbitrary rho indices do "
+            "not identify its intermediate subspaces."
         )
     if len(intertwiners) != len(shell["lr_chain_labels"]):
         raise RuntimeError(
@@ -2113,8 +2045,10 @@ def _young_orthogonal_nary_subduction_cached(subgroup_parts, target_parts, brack
         codepath=codepath,
         notes=(
             "Child and target Specht carriers are indexed by standard tableaux.",
-            "Multiplicity copies are labeled by LR-tableau chains for the requested bracketing.",
-            "Coordinate convention: " + SPLIT_COORDINATE_CONVENTION,
+            ("Reference copies use arbitrary rho indices." if coefficient_backend == "intertwiner_oracle"
+             else "Multiplicity copies are labeled by their actual LR-tree subspaces."),
+            ("Coordinate convention: reference_intertwiner_equations_v1" if coefficient_backend == "intertwiner_oracle"
+             else "Coordinate convention: " + SPLIT_COORDINATE_CONVENTION),
             coefficient_note,
             "No Gram-Schmidt or SVD on evaluated feature vectors is used.",
         ),
@@ -2165,7 +2099,7 @@ def subduction_from_matrix_units(
     *,
     bracketing="balanced",
 ):
-    """Historical forwarding name; currently uses canonical graph split maps."""
+    """Historical forwarding name for canonical selected-projector split maps."""
 
     return young_orthogonal_nary_subduction(
         subgroup_partitions,
@@ -2175,7 +2109,7 @@ def subduction_from_matrix_units(
     )
 
 
-@lru_cache(maxsize=None)
+@lru_cache(maxsize=128)
 def _young_orthogonal_induced_coupling_cached(left_parts, right_parts, target_parts):
     left_partition = Partition(tuple(int(x) for x in left_parts))
     right_partition = Partition(tuple(int(x) for x in right_parts))
@@ -2196,33 +2130,19 @@ def _young_orthogonal_induced_coupling_cached(left_parts, right_parts, target_pa
         target_partition,
         coset_reps,
     )
+    lr_tableaux = littlewood_richardson_tableaux(left_partition, right_partition, target_partition)
     if constructive_intertwiners is None:
-        intertwiners = _exact_restricted_intertwiner_basis(
-            left_partition,
-            right_partition,
-            target_partition,
-            coset_reps,
-        )
-        codepath = "specht_intertwiner_nullspace_no_gram_schmidt"
-        coefficient_note = "Multiplicity copies are selected by exact symbolic intertwiner equations."
-        normalization_note = "Multiplicity copies are normalized by an exact algebraic metric factorization."
+        intertwiners = _expand_normalized_split_matrices(
+            _binary_split_matrices(tuple(left_parts), tuple(right_parts), tuple(target_parts)),
+            target_partition, coset_reps)
+        codepath = "canonical_binary_projector_subduction"
+        coefficient_note = "Coordinate convention: " + SPLIT_COORDINATE_CONVENTION
+        normalization_note = "Shared normalized binary maps use the known Frobenius placement scale."
     else:
         intertwiners = constructive_intertwiners
         codepath = "constructive_trivial_symmetric_orbit_sum"
         coefficient_note = "The trivial-target copy is the normalized symmetric orbit sum over left cosets."
         normalization_note = "The orbit-sum coefficient is normalized by the exact coset count."
-    lr_tableaux = littlewood_richardson_tableaux(left_partition, right_partition, target_partition)
-    expected_multiplicity = young_induced_multiplicity_by_character(
-        left_partition,
-        right_partition,
-        target_partition,
-    )
-    if len(lr_tableaux) != int(expected_multiplicity):
-        raise RuntimeError(
-            "Littlewood-Richardson multiplicity does not match character multiplicity "
-            f"for {left_partition.parts}, {right_partition.parts} -> {target_partition.parts}: "
-            f"{len(lr_tableaux)} != {expected_multiplicity}."
-        )
     if len(intertwiners) != len(lr_tableaux):
         raise RuntimeError(
             "Young-orthogonal intertwiner multiplicity does not match LR multiplicity "
@@ -2303,7 +2223,7 @@ def validate_young_orthogonal_coupling(coupling_tensor, *, full_projector=True):
         coupling_tensor.target_partition,
     )
     matrix = coupling_tensor.coefficient_matrix()
-    gram = _sympy().simplify(matrix.T * matrix)
+    gram = _exact_matrix_product(matrix.T, matrix)
     identity = _sympy().eye(matrix.cols)
     orthonormal = bool(gram == identity)
     multiplicity_matches = bool(int(coupling_tensor.multiplicity) == int(expected_multiplicity))
@@ -2326,7 +2246,9 @@ def validate_young_orthogonal_coupling(coupling_tensor, *, full_projector=True):
             if _sympy().simplify(action * projector - projector * action) != _sympy().zeros(projector.rows, projector.cols):
                 projector_equivariant = False
                 break
-        projector_span_matches = bool(_sympy().simplify(matrix * matrix.T - projector) == _sympy().zeros(coupling_tensor.induced_dim, coupling_tensor.induced_dim))
+        projector_span_matches = bool(
+            (_exact_matrix_product(matrix, matrix.T) - projector).applyfunc(_sympy().simplify)
+            == _sympy().zeros(coupling_tensor.induced_dim, coupling_tensor.induced_dim))
 
     passed = bool(
         int(coupling_tensor.induced_dim) == int(expected_induced_dim)

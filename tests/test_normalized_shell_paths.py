@@ -63,3 +63,23 @@ def test_shell_paths_complete_actions_derivatives_and_reload(sizes, ells, roles,
     monkeypatch.setattr(young_angular_paths, "young_angular_path_basis", forbidden)
     reloaded = _FactorizedPolynomialRuntime(json.loads(json.dumps(schedule)), backend=backend)
     torch.testing.assert_close(reloaded(values), output, atol=1e-12, rtol=1e-12)
+
+
+def test_historical_shell_convention_keeps_saved_predictions_without_reconstruction(monkeypatch):
+    from pathlib import Path
+    from ye3t.couplings.shell_cauchy import validate_shell_cauchy
+    from ye3t.couplings.tagged_cauchy_carriers import tagged_cauchy_carrier_schedule
+    from ye3t.representations import young_angular_paths
+    fixture = json.loads((Path(__file__).parent / "fixtures/shell_pre_canonical_v1.json").read_text())
+    def forbidden(*args, **kwargs):
+        pytest.fail("Historical shell load reconstructed new coordinates")
+    monkeypatch.setattr(young_angular_paths, "occupation_young_vectors", forbidden)
+    monkeypatch.setattr(young_angular_paths, "young_angular_path_basis", forbidden)
+    assert validate_shell_cauchy(fixture["artifact"])
+    schedule = tagged_cauchy_carrier_schedule((fixture["artifact"],))
+    assert json.loads(json.dumps(schedule)) == fixture["schedule"]
+    runtime = _FactorizedPolynomialRuntime(schedule, backend="reference")
+    values = torch.tensor(fixture["values"], dtype=torch.float64)
+    torch.testing.assert_close(runtime(values), torch.tensor(fixture["output"], dtype=torch.float64), atol=1e-13, rtol=1e-13)
+    with pytest.raises(ValueError, match="historical reference"):
+        validate_shell_cauchy(fixture["artifact"], exact_reconstruction=True)

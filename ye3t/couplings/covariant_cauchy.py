@@ -201,7 +201,7 @@ def covariant_cauchy_request(
             "L": target_L,
             "o3_parity": int(content_parity),
         },
-        "convention_id": ("normalized_role_subduction_paired_angular_paths_v1"
+        "convention_id": ("canonical_split_role_paired_angular_paths_v2"
                           if angular_basis_backend == "normalized_cg_paths_v1"
                           else COVARIANT_CAUCHY_CONVENTION),
         **occupation_selection,
@@ -793,11 +793,18 @@ def validate_covariant_cauchy(compiled):
 
         return validate_ordered_role_cauchy(compiled)
     if compiled.get("schema") == "ye3t_normalized_cauchy_paths_v1":
+        from .cauchy_paths import CONVENTION, LEGACY_CONVENTION
         body = {key: value for key, value in compiled.items() if key != "self_hash"}
         if _scalar._stable_record_hash(body) != compiled.get("self_hash"):
             raise ValueError("Normalized Cauchy path artifact failed its self hash")
         report = covariant_cauchy_count(compiled["request"])
-        if (_scalar._freeze_json(report["labels"]) != _scalar._freeze_json(
+        convention = compiled["request"]["convention_id"]
+        if convention not in {CONVENTION, LEGACY_CONVENTION}:
+            raise ValueError("Unknown normalized Cauchy coordinate convention")
+        # Old artifacts carry their own coefficients. Only combinatorial labels
+        # are checked here; their stored copy coordinates are never rebuilt.
+        labels = [{**label, "convention_id": convention} for label in report["labels"]]
+        if (_scalar._freeze_json(labels) != _scalar._freeze_json(
                 [row["label"] for row in compiled["descriptors"]]) or
                 len(compiled["path_schedule"]["routes"]) != report["multiplet_count"]):
             raise ValueError("Normalized Cauchy routes differ from the exact count")

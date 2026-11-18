@@ -191,7 +191,10 @@ def test_full_rank_one_through_eight_tagged_precompiler_preserves_unrestricted_e
     compact = tagged_cauchy_image_request(species=["Ni"], catalogue={**catalogue,
         "eta_max_per_rank": {rank: rank for rank in range(1, 9)}})
     assert list(_content_records(compact)) == list(_content_records(legacy))
-    original, current = count(legacy), count(compact)
+    # Inspect the formal candidate stage. Exact physical counting may now need
+    # the explicitly approved source-image factorization after this preflight.
+    original = general._general_count(legacy, _legacy=True)
+    current = general._general_count(compact, _legacy=True)
     assert current.labels == original.labels
     assert current.resource_report["components"] == original.resource_report["components"]
     assert {row["tensor_order"] for row in current.labels} == set(range(1, 9))
@@ -226,6 +229,7 @@ def test_incremental_image_matches_independent_exact_matrix_pivots_at_every_pref
         expected = prefix.T.rref(simplify=True)[1]
         assert tuple(image.selected) == expected
         assert tuple(image.reconstructions[:-1]) == previous
+        assert image.validate_reconstruction(rows[:index + 1])
         for raw_index, reconstruction in enumerate(image.reconstructions):
             rebuilt = sp.zeros(1, matrix.cols)
             for feature, coefficient in reconstruction.items():
@@ -234,14 +238,15 @@ def test_incremental_image_matches_independent_exact_matrix_pivots_at_every_pref
     assert _exact_pivot_image(rows) == (tuple(image.selected), tuple(image.reconstructions))
 
 
-def test_incremental_image_checks_its_reconstruction():
+def test_incremental_image_diagnostic_checks_its_reconstruction():
     from ye3t.exact_scalars import exact_scalar
 
     image = _ExactImagePivots()
     image.append({("a",): 1})
     image.echelon[("a",)][1][0] = exact_scalar(2)
+    image.append({("a",): 3})
     with pytest.raises(RuntimeError, match="reconstruction failed"):
-        image.append({("a",): 3})
+        image.validate_reconstruction([{("a",): 1}, {("a",): 3}])
 
 
 @pytest.mark.parametrize("denominator", [sp.sqrt(2) + sp.sqrt(3),
@@ -257,11 +262,14 @@ def test_exact_pivot_division_rationalizes_multiple_radicals(denominator):
     assert sp.simplify(quotient._sympy_() * denominator._sympy_() - numerator._sympy_()) == 0
 
 
-def test_general_compile_reduces_each_candidate_once(monkeypatch):
+def test_legacy_reference_compile_reduces_each_candidate_once(monkeypatch):
     import ye3t.couplings.tagged_cauchy_general as general
 
     # Exercise construction itself; disk reuse has separate cold/warm tests.
     monkeypatch.setenv("YE3T_CACHE_MODE", "off")
+    def forbidden(*args, **kwargs):
+        raise AssertionError("ordinary compilation replayed the physical-image proof")
+    monkeypatch.setattr(general._ExactImagePivots, "validate_reconstruction", forbidden)
     calls = []
     original = general._ExactImagePivots.append
     def append(image, row):
@@ -274,7 +282,7 @@ def test_general_compile_reduces_each_candidate_once(monkeypatch):
         "tag_counts_by_rank": {1: [0], 2: [1]},
         "max_features_per_rank": 4, "max_records_per_rank": 4,
     })
-    compiled = compile(plan(count(request)))
+    compiled = compile(plan(general._general_count(request, _legacy=True)))
     assert calls == list(range(len(compiled.payload["raw_rows"])))
 
 
@@ -286,7 +294,7 @@ def test_general_public_compiler_round_trip():
         "max_records_per_rank": 4,
     })
     report = count(request)
-    assert report.exact_image_dimension is None
+    assert report.exact_image_dimension == 4
     compiled = compile(plan(report))
     assert len(compiled.payload["image_rows"]) == 4
     assert compiled.payload["certificate"]["orthogonalization_performed"] is False

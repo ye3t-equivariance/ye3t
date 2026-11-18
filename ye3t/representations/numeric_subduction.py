@@ -1,4 +1,4 @@
-"""Experimental numeric Young-subgroup subduction fast path.
+"""Independent numerical equation reference for Young-subgroup subduction.
 
 This module is not the mathematical definition path for YE3T permutation
 couplings.  The definition paths remain
@@ -7,7 +7,10 @@ couplings.  The definition paths remain
 assemble the same subgroup-generator intertwiner equations in floating point,
 compute a numerical nullspace, and validate the resulting subspace by
 generator residuals, orthonormality, expected multiplicity, and optionally by
-projector comparison with the exact symbolic backend.
+projector comparison with the exact symbolic backend. Production numerical
+coupling uses the shared selected-tableau constructor in _tableau_numeric;
+the public reference routines here remain useful for independent diagnostics
+and explicit comparator benchmarks.
 """
 from ye3t._record import recordclass
 import hashlib
@@ -25,7 +28,7 @@ from .projectors import adjacent_transposition_representation_matrix_numeric, st
 from .young_orthogonal import (
     _adjacent_word_to_permutation,
     _coerce_partition,
-    _constructive_subduction_graph_restricted_intertwiner_basis,
+    _reference_subgroup_intertwiner_basis,
     _split_young_subgroup_permutation,
     _young_subgroup_generator_permutations,
     subduction_from_matrix_units,
@@ -661,7 +664,7 @@ def validate_numeric_subduction_result(
             )
         exact = subduction_from_matrix_units(subgroup, target)
         exact_report = validate_young_orthogonal_nary_subduction(exact)
-        exact_blocks = _constructive_subduction_graph_restricted_intertwiner_basis(
+        exact_blocks = _reference_subgroup_intertwiner_basis(
             subgroup,
             target,
             expected_multiplicity=int(expected_multiplicity),

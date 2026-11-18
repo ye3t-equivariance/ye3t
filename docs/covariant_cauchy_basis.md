@@ -28,7 +28,10 @@ They can be reused across physical source families. Saved execution schedules
 contain their numerical maps and reload without rebuilding coefficients.
 Normalized occupation-subgroup vectors also use this artifact store. Their
 identity contains the ordered abstract subgroup, parent Young type and existing
-copy convention. Empty role coordinates add no subgroup factors; physical role
+copy convention. The occupied row children are composed through the canonical
+adjacent-pair tree, carrying an unpaired child to the next level. Intermediate
+Young labels therefore identify the subgroup subspaces used by the coefficients.
+Empty role coordinates add no subgroup factors; physical role
 bindings remain explicit in the source schedule. Reload preserves exact scalars
 and the original copy order. Normal reuse verifies the stored artifact; full
 verification reconstructs the canonical map for comparison. Read-only caches
@@ -45,9 +48,13 @@ the reference, and the explicit analytical adjoint uses its established
 product-rule traversal. Performance depends on the selected catalogue and
 batch size; native dispatch alone does not guarantee faster force training.
 
-The coordinate convention is
-`normalized_role_subduction_paired_angular_paths_v1`. Historical saved maps
-retain their original convention and weights. The flat monomial export helper
+New normalized-path artifacts use
+`canonical_split_role_paired_angular_paths_v2`. Historical saved maps carrying
+`normalized_role_subduction_paired_angular_paths_v1` retain their original
+coefficient arrays, convention and weights. Loading them does not regenerate
+coefficients with the new convention. Comparing an old coefficient table with
+a newly constructed table requires the explicit copy-space transformation;
+equal dimensions do not identify equal coordinates. The flat monomial export helper
 accepts legacy polynomial artifacts; shared-path artifacts retain their
 factorized schedule and use `evaluate_covariant_cauchy` or the application
 runtime. Generic ordered-role Cauchy artifacts still require migration to

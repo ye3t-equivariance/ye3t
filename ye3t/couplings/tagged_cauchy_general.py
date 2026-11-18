@@ -22,6 +22,7 @@ from threading import RLock
 from ye3t.core.cg import cg_exact_integer
 from ye3t.cache.artifacts import YE3TArtifactStore, ArtifactCacheMiss
 from ye3t.exact_scalars import ExactRadical, exact_scalar
+from ye3t.couplings.source_image_gram import _divide_exact, _ExactSourceImageGram
 from ye3t.couplings.lifted_cauchy_scalar import (
     _exact_scalar_from_payload, _exact_scalar_payload, _freeze_json, _stable_hash,
 )
@@ -33,7 +34,8 @@ from ye3t.couplings.orthogonal_shifted_jacobi import (
 )
 from ye3t.couplings.chebyshev_c2 import CHEBYSHEV_C2_SOURCE_FAMILY, chebyshev_c2_radial_product
 from ye3t.couplings.tagged_cauchy import (
-    _free_moment_descriptor_row, normalize_role_bindings, tag_support_report,
+    _free_moment_descriptor_row, _partition_mobius, _set_partitions,
+    normalize_role_bindings, tag_support_report,
 )
 
 
@@ -144,30 +146,13 @@ def _lower_physical_moments(free_row):
     return result
 
 
-def _divide_exact(left, right):
-    try:
-        return left / right
-    except ValueError:
-        # General algebraic pivots can contain more than one independent root.
-        # This is exact field division, never floating rank selection.
-        import sympy as sp
-        # SymPy's radsimp rationalizes numeric radical denominators; cancel
-        # alone can leave an inverse of a sum that ExactRadical cannot parse.
-        # https://docs.sympy.org/latest/modules/simplify/simplify.html#sympy.simplify.radsimp.radsimp
-        expression = sp.radsimp(left._sympy_() / right._sympy_(),
-                                symbolic=False, max_terms=len(right.terms))
-        quotient = exact_scalar(sp.expand(expression))
-        if quotient * right != left:
-            raise ArithmeticError("Exact radical pivot division failed.")
-        return quotient
-
-
 class _ExactImagePivots:
     """Append physical rows while preserving exact elimination witnesses.
 
     Each new row is reduced once against earlier pivots. Feature rows remain
     the original compiler coordinates, with the same first-independent-row
-    ordering as batch elimination. Reconstruction is checked on every append.
+    ordering as batch elimination. Explicit diagnostics verify reconstruction;
+    ordinary construction does not re-expand each row after reducing it.
     This state belongs to one compilation; it is never shared across requests.
     """
 
@@ -205,24 +190,33 @@ class _ExactImagePivots:
                 row_coordinates,
             )
             reconstruction = {feature_index: ExactRadical.rational(1)}
-        difference = dict(original)
-        for feature_index, coefficient in reconstruction.items():
-            for key, value in self.feature_rows[feature_index].items():
-                _add_exact(difference, key, -coefficient * value)
-        if difference:
-            raise RuntimeError("Exact physical-image reconstruction failed.")
         self.reconstructions.append(reconstruction)
 
+    def validate_reconstruction(self, raw_rows):
+        """Check the exact witness explicitly, without altering image coordinates."""
+        if len(raw_rows) != len(self.reconstructions):
+            raise ValueError("Physical-image reconstruction row count differs.")
+        for raw, reconstruction in zip(raw_rows, self.reconstructions):
+            difference = {key: exact_scalar(value) for key, value in raw.items() if value}
+            for feature_index, coefficient in reconstruction.items():
+                for key, value in self.feature_rows[feature_index].items():
+                    _add_exact(difference, key, -coefficient * value)
+            if difference:
+                raise RuntimeError("Exact physical-image reconstruction failed.")
+        return True
 
-def _exact_pivot_image(raw_rows):
+
+def _exact_pivot_image(raw_rows, *, validate_reconstruction=False):
     """Return original independent rows and their exact reconstruction map."""
     image = _ExactImagePivots()
     for row in raw_rows:
         image.append(row)
+    if validate_reconstruction:
+        image.validate_reconstruction(raw_rows)
     return tuple(image.selected), tuple(image.reconstructions)
 
 
-def _physical_image_rows(compiled, role_bindings):
+def _physical_image_rows(compiled, role_bindings, *, source_profile="B"):
     """Apply the exact source map to supported compiler Cauchy coordinates."""
     normalized = normalize_role_bindings(role_bindings, compiled.payload["role_dimension"])
     support = tag_support_report(compiled, role_bindings)
@@ -230,6 +224,19 @@ def _physical_image_rows(compiled, role_bindings):
     rows = []
     for index in support["supported_indices"]:
         raw = _free_moment_descriptor_row(compiled.payload["descriptors"][index], channels, normalized)
+        if source_profile == "A":
+            # After summing the singleton tags, Profile A is the ordered,
+            # fully distinct N-occurrence symmetric source. The existing
+            # Mobius identity supplies its exact inclusive-moment expansion.
+            distinct = {}
+            for moments, coefficient in raw.items():
+                if any(len(moment) != 1 for moment in moments):
+                    raise ValueError("Profile A starts from primitive moment factors.")
+                for partition in _set_partitions(tuple(range(len(moments)))):
+                    key = tuple(sorted(tuple(sorted(source for index in block for source in moments[index]))
+                                       for block in partition))
+                    _add_exact(distinct, key, exact_scalar(coefficient)*_partition_mobius(partition))
+            raw = distinct
         rows.append(_lower_physical_moments(raw))
     return tuple(rows), tuple(support["supported_indices"])
 
@@ -273,11 +280,76 @@ def _general_request(catalogue, species):
                "max_features_per_rank", "selected_basis_coordinates_by_rank",
                "resource_limits", "angular_basis_backend", "max_tag_set_partitions",
                "intermediate_selection", "eta_max_per_rank", "retained_max_per_rank",
-               "chemical_patterns_by_rank"}
+               "chemical_patterns_by_rank", "source_profile",
+               "source_contents_by_rank", "additional_source_contents_by_rank",
+               "generated_ranks"}
     if set(catalogue) - allowed:
         raise ValueError(f"Unknown tagged catalogue options: {sorted(set(catalogue)-allowed)}")
+    profile = catalogue.get("source_profile", "inclusive_moments")
+    aliases = {"inclusive_moments": "B", "distinct_occurrences": "A", "A": "A", "B": "B"}
+    if not isinstance(profile, str) or profile not in aliases:
+        raise ValueError("source_profile must be inclusive_moments or distinct_occurrences (A/B aliases are accepted).")
+    if "source_profile" in catalogue:
+        catalogue["source_profile"] = aliases[profile]
+    if catalogue.get("source_profile") == "B":
+        catalogue.pop("source_profile")  # Preserve the existing inclusive request identity.
     from ye3t.representation_config import _bounded_rank_map
     ranks = tuple(sorted(int(value) for value in catalogue["nmax_per_rank"]))
+    if "generated_ranks" in catalogue:
+        generated = tuple(catalogue["generated_ranks"])
+        if (any(isinstance(rank, bool) or not isinstance(rank, int) for rank in generated)
+                or len(set(generated)) != len(generated) or not set(generated) <= set(ranks)):
+            raise ValueError("generated_ranks must be distinct configured ranks.")
+        catalogue["generated_ranks"] = tuple(sorted(generated))
+    for field in ("source_contents_by_rank", "additional_source_contents_by_rank"):
+        if field not in catalogue:
+            continue
+        from ye3t.couplings.catalogue_inputs import normalize_explicit_labels
+        supplied = catalogue[field]
+        if not isinstance(supplied, dict):
+            raise TypeError(f"{field} must be a rank-keyed mapping.")
+        normalized = {}
+        for key, rows in supplied.items():
+            rank = int(key)
+            if rank not in ranks or str(rank) in normalized or not isinstance(rows, (tuple, list)) or not rows:
+                raise ValueError(f"{field} must select configured ranks with nonempty content lists.")
+            records = []
+            for row in rows:
+                if (not isinstance(row, dict) or not {"channels", "block_sizes"} <= set(row)
+                        or set(row) - {"channels", "block_sizes", "tag_counts", "intermediates"}):
+                    raise ValueError("Source contents need channels, block_sizes and optional tag_counts/intermediates.")
+                sizes = tuple(row["block_sizes"])
+                channels = tuple(row["channels"])
+                if (len(sizes) != len(channels) or not sizes or sum(sizes) != rank
+                        or any(isinstance(size, bool) or not isinstance(size, int) or size < 1 for size in sizes)):
+                    raise ValueError("Source content block_sizes must be positive and sum to its rank.")
+                if any(not isinstance(channel, dict) or
+                       set(channel) - {"neighbor_species", "radial_channel", "l", "source_family_id"}
+                       or not {"neighbor_species", "radial_channel", "l"} <= set(channel)
+                       or channel.get("source_family_id", ORTHOGONAL_SHIFTED_JACOBI_SOURCE_FAMILY) != ORTHOGONAL_SHIFTED_JACOBI_SOURCE_FAMILY
+                       for channel in channels):
+                    raise ValueError("Explicit tagged content requires the configured shifted-Jacobi channels.")
+                factors = [channel for channel, size in zip(channels, sizes, strict=True) for _ in range(size)]
+                aligned = {"center": species[0],
+                           "chemical": [channel["neighbor_species"] for channel in factors],
+                           "radial": [channel["radial_channel"] for channel in factors],
+                           "angular": [channel["l"] for channel in factors],
+                           **{name: row[name] for name in ("tag_counts", "intermediates") if name in row}}
+                value, = normalize_explicit_labels([aligned], species=species,
+                    source_family_id=ORTHOGONAL_SHIFTED_JACOBI_SOURCE_FAMILY)
+                if len(value["channels"]) != len(channels):
+                    raise ValueError("Explicit source contents must use maximal repeated complete-channel blocks.")
+                if sum(aligned["angular"]) % 2:
+                    raise ValueError("Explicit scalar tagged contents must have even total angular degree.")
+                eta = len({(channel["neighbor_species"], channel["radial_channel"]) for channel in channels})
+                if eta > int(_rank_value(catalogue.get("eta_max_per_rank", {}), rank, rank)):
+                    raise ValueError("Explicit source content exceeds eta_max_per_rank.")
+                if any(tag > int(_rank_value(catalogue.get("retained_max_per_rank", {}), rank, rank))
+                       for tag in value.get("tag_counts", ())):
+                    raise ValueError("Explicit source content exceeds retained_max_per_rank.")
+                records.append({name: item for name, item in value.items() if name not in {"center", "rank"}})
+            normalized[str(rank)] = records
+        catalogue[field] = normalized
     if "chemical_patterns_by_rank" in catalogue:
         chemical = {}
         for key, rows in catalogue["chemical_patterns_by_rank"].items():
@@ -337,8 +409,11 @@ def _content_records(request):
         limit = int(_rank_value(catalogue.get("max_records_per_rank", 256), rank))
         if limit < 1:
             raise ValueError("max_records_per_rank must be positive.")
+        explicit = _rank_value(catalogue.get("source_contents_by_rank", {}), rank)
+        additional = _rank_value(catalogue.get("additional_source_contents_by_rank", {}), rank, ())
+        generated = rank in catalogue.get("generated_ranks", tuple(map(int, nmaxs))) and explicit is None
         streams = []
-        for sizes in _rank_value(partitions, rank, ()):
+        for sizes in _rank_value(partitions, rank, ()) if generated else ():
             sizes = tuple(int(value) for value in sizes)
             if not sizes or min(sizes) < 1 or sum(sizes) != rank:
                 raise ValueError("A complete-channel partition must sum to its rank.")
@@ -362,6 +437,10 @@ def _content_records(request):
                 emitted += 1
                 if emitted == limit:
                     break
+        for record in tuple(explicit or ()) + tuple(additional):
+            yield {**record, "tensor_order": rank, "explicit_input": True,
+                   "angular_pattern": tuple(sorted(channel["l"] for channel, size in
+                       zip(record["channels"], record["block_sizes"], strict=True) for _ in range(size)))}
 
 
 def _partition_contents(channels, sizes, pattern, *, eta_max=None, chemical_patterns=None):
@@ -385,12 +464,13 @@ def _partition_contents(channels, sizes, pattern, *, eta_max=None, chemical_patt
         yield identity, indices, sizes, angular
 
 
-def _general_count(request):
+def _general_count(request, *, _legacy=False):
     from ye3t.couplings import count
     from ye3t.couplings.lifted_cauchy_scalar import lifted_cauchy_fixed_content_scalar_request
     from ye3t.couplings.tagged_cauchy_image import TaggedCauchyImageMultiplicityReport
-    cache_key = _stable_hash(_freeze_json(request))
-    if cache_key in _GENERAL_COUNT_CACHE:
+    cache_key = (_stable_hash(_freeze_json(request)), bool(_legacy))
+    store = YE3TArtifactStore()
+    if cache_key in _GENERAL_COUNT_CACHE and store.verify != "full" and store.mode != "rebuild":
         _GENERAL_COUNT_CACHE.move_to_end(cache_key)
         return copy.deepcopy(_GENERAL_COUNT_CACHE[cache_key])
     catalogue = request["catalogue"]
@@ -404,19 +484,44 @@ def _general_count(request):
     if partition_budget < 1:
         raise ValueError("max_tag_set_partitions must be positive.")
     labels = []
+    explicit_selection = any(name in catalogue for name in (
+        "source_contents_by_rank", "additional_source_contents_by_rank"))
+    seen_coordinates = set()
+    explicit_representation = None
+    if explicit_selection and "intermediate_selection" in catalogue:
+        from ye3t.couplings.tagged_cauchy_carriers import _catalogue_intermediate_representation
+        explicit_representation = _catalogue_intermediate_representation({
+            **catalogue, "ranks": sorted(int(n) for n in catalogue["nmax_per_rank"])})
     components = []
     for record in _content_records(request):
+        admitted = False
+        if explicit_selection:
+            blocks = sorted(zip(record["block_sizes"], record["channels"], strict=True),
+                            key=lambda item: (-item[0], item[1]["l"],
+                                              item[1]["neighbor_species"], item[1]["radial_channel"]))
+            sizes, channels = zip(*blocks)
+            record = {**record, "block_sizes": sizes, "channels": channels}
         sizes = tuple(record["block_sizes"])
         rank = sum(sizes)
         retained_max = _rank_value(catalogue.get("retained_max_per_rank", {}), rank, rank)
-        for tag_count in _rank_value(catalogue.get("tag_counts_by_rank", {}), rank, (0, 1, 2)):
+        tag_counts = record.get("tag_counts", _rank_value(catalogue.get("tag_counts_by_rank", {}), rank, (0, 1, 2)))
+        if len({int(s) for s in tag_counts}) != len(tag_counts):
+            raise ValueError("Tag counts must be distinct within each rank.")
+        if catalogue.get("source_profile", "B") == "A":
+            if any(int(s) < 0 for s in tag_counts):
+                raise ValueError("Tag counts must be nonnegative.")
+            # Full scalar pooling maps every admitted singleton-tag split to
+            # the same symmetric target. Count and construct that target once.
+            tag_counts = (0,) if any(int(s) <= min(rank, retained_max) for s in tag_counts) else ()
+        for tag_count in tag_counts:
             tag_count = int(tag_count)
             if tag_count < 0:
                 raise ValueError("Tag counts must be nonnegative.")
             if tag_count > rank or tag_count > retained_max:
                 continue
             bell = [1]
-            for order in range(1, tag_count + 1):
+            partition_order = rank if catalogue.get("source_profile", "B") == "A" else tag_count
+            for order in range(1, partition_order + 1):
                 bell.append(sum(comb(order - 1, index) * bell[index]
                                 for index in range(order)))
             if bell[-1] > partition_budget:
@@ -438,11 +543,39 @@ def _general_count(request):
             component = len(components)
             components.append({"request": parent, "tag_count": tag_count,
                                "tensor_order": rank, "angular_pattern": record.get("angular_pattern")})
-            for label in report.labels:
+            local_labels = report.labels
+            if "intermediates" in record:
+                from ye3t.couplings.tagged_cauchy_carriers import _catalogue_intermediate_representation
+                selected_rep = _catalogue_intermediate_representation({**catalogue, "ranks": [rank],
+                    "nmax_per_rank": {rank: _rank_value(catalogue["nmax_per_rank"], rank)},
+                    "lmax_per_rank": {rank: max(record["angular_pattern"])},
+                    "intermediate_selection": record["intermediates"]})
+                records = [label.to_dict() for label in local_labels]
+                selected_rows = selected_rep.select_intermediate_inventory(records)
+                selected_keys = {_stable_hash(_freeze_json(label)) for label in selected_rows}
+                local_labels = tuple(label for label in local_labels
+                                     if _stable_hash(_freeze_json(label.to_dict())) in selected_keys)
+            if explicit_representation is not None:
+                selected_rows = explicit_representation.select_intermediate_inventory(
+                    label.to_dict() for label in local_labels)
+                selected_keys = {_stable_hash(_freeze_json(label)) for label in selected_rows}
+                local_labels = tuple(label for label in local_labels
+                                     if _stable_hash(_freeze_json(label.to_dict())) in selected_keys)
+            admitted = admitted or bool(local_labels)
+            for label in local_labels:
                 body = {"component_index": component, "tag_count": tag_count,
                         "tensor_order": rank, "label": label.to_dict()}
                 identity = {key: value for key, value in body.items() if key != "component_index"}
-                labels.append({**body, "coordinate_id": "tagged:"+_stable_hash(_freeze_json(identity))})
+                coordinate = "tagged:"+_stable_hash(_freeze_json(identity))
+                if not explicit_selection or coordinate not in seen_coordinates:
+                    labels.append({**body, "coordinate_id": coordinate})
+                    if explicit_selection:
+                        seen_coordinates.add(coordinate)
+        if record.get("explicit_input") and not admitted:
+            raise ValueError(
+                f"Explicit rank-{rank} content has no admissible scalar coupling path "
+                "under its angular, tag and intermediate selections; adjust the content "
+                "or inspect the compiler inventory with unrestricted intermediates.")
     if "intermediate_selection" in catalogue:
         from ye3t.couplings.tagged_cauchy_carriers import _catalogue_intermediate_representation
         configured = {**catalogue, "ranks": sorted(int(n) for n in catalogue["nmax_per_rank"])}
@@ -450,24 +583,160 @@ def _general_count(request):
         selected = {id(label) for label in representation.select_intermediate_inventory(
             record["label"] for record in labels)}
         labels = [record for record in labels if id(record["label"]) in selected]
+    if catalogue.get("max_features_per_rank") == "all":
+        # Resolve the finite upper bound from the shared formal inventory.
+        # Application previews and materialization then use the same request.
+        raw_counts = {int(rank): 0 for rank in catalogue["nmax_per_rank"]}
+        for record in labels:
+            raw_counts[record["tensor_order"]] += 1
+        request = _general_request({**catalogue,
+            "max_features_per_rank": {rank: max(1, value) for rank, value in raw_counts.items()}},
+            request["species"])
+        catalogue = request["catalogue"]
+    inventory = None
+    if not _legacy:
+        from .fixed_tag_stars import _general_analytical_selection
+        inventory = _general_analytical_selection(request, labels)
+        if inventory is None:
+            inventory = _general_source_image_inventory(request, labels, components)
+    source_work = bool(inventory and inventory["coefficient_materialization_performed"])
     body = {"request_hash": request["request_hash"], "labels": labels}
+    if inventory is not None:
+        body["independent_inventory"] = inventory
     report = TaggedCauchyImageMultiplicityReport(
         request=_freeze_json(request), labels=tuple(labels), raw_label_count=len(labels),
-        image_dimension_upper_bound=len(labels), exact_image_dimension=None,
-        resource_report={"components": tuple(components), "coefficient_materialization_performed": False},
-        schema="ye3t_tagged_cauchy_general_report_v1", convention_hash=_stable_hash(_freeze_json(body)),
-        validation_report={"passed": True, "physical_image_dimension_deferred_to_compile": True},
+        image_dimension_upper_bound=len(labels),
+        exact_image_dimension=None if inventory is None else inventory["exact_image_dimension"],
+        resource_report={"components": tuple(components), "coefficient_materialization_performed": source_work,
+                         **({"independent_inventory": inventory} if inventory is not None else {})},
+        schema=("ye3t_tagged_cauchy_general_report_v1" if inventory is None else
+                "ye3t_tagged_cauchy_general_report_v3" if source_work else
+                "ye3t_tagged_cauchy_general_report_v2"),
+        convention_hash=_stable_hash(_freeze_json(body)),
+        validation_report={"passed": True, "physical_image_dimension_deferred_to_compile": inventory is None},
         provenance={"api": "ye3t.couplings.count", "labels": "lifted_cauchy_fixed_content_scalar_request"})
-    _GENERAL_COUNT_CACHE[cache_key] = copy.deepcopy(report)
-    if len(_GENERAL_COUNT_CACHE) > 4:
+    cached_report = copy.deepcopy(report)
+    _GENERAL_COUNT_CACHE[cache_key] = cached_report
+    _GENERAL_COUNT_CACHE[(_stable_hash(_freeze_json(request)), bool(_legacy))] = cached_report
+    while len(_GENERAL_COUNT_CACHE) > 4:
         _GENERAL_COUNT_CACHE.popitem(last=False)
     return report
+
+
+def _general_source_image_inventory(request, labels, components):
+    """Persist the exact selected pooled image before evaluator compilation.
+
+    All outputs here have L=0 and even parity, so each column is already one
+    multiplicity coordinate. Cross-rank relations stay in the same image
+    calculation. Jacobi/Racah local normal forms are independent on freely
+    varying finite occurrence sets; ambient product degrees are untruncated.
+    """
+    store = YE3TArtifactStore()
+    built = []
+
+    def build():
+        result = _build_general_source_image_inventory(request, labels, components)
+        built.append(result)
+        return result
+
+    def validate(payload):
+        inventory = payload["inventory"]
+        if (inventory["rule"] != "exact_source_image_ldl_v1"
+                or inventory["exact_image_dimension"] != len(inventory["independent_coordinate_ids"])
+                or len(set(inventory["independent_coordinate_ids"])) != inventory["exact_image_dimension"]
+                or not set(inventory["independent_coordinate_ids"]) <= {row["coordinate_id"] for row in labels}):
+            raise ValueError("Cached source-image inventory is inconsistent.")
+        if store.verify == "full" and not built and _freeze_json(payload) != _freeze_json(build()):
+            raise ValueError("Cached source-image inventory differs from exact reconstruction.")
+
+    result = store.resolve("tagged_source_image_plan", "tagged_source_image_plan_v1",
+        {"request": request, "coordinate_ids": tuple(row["coordinate_id"] for row in labels)},
+        builder=build, validator=validate,
+        certificate={"passed": True, "checks": {"independent_target_normal_forms": True,
+            "exact_source_image_ldl": True, "selection_preserved": True}},
+        required_certificate_checks=("independent_target_normal_forms", "exact_source_image_ldl", "selection_preserved"),
+        producer={"source_image_revision": 1})
+    return {**result["payload"]["inventory"], "source_image_plan_hash": result["payload_hash"]}
+
+
+def _build_general_source_image_inventory(request, labels, components):
+    """Exact ordered finite-image selection; no evaluator schedule is built."""
+    catalogue = request["catalogue"]
+    maximum_cells = int(catalogue.get("resource_limits", {}).get("maximum_loader_symbolic_cells", 40000000))
+    image = _ExactSourceImageGram(maximum_cells=maximum_cells)
+    named = {int(rank): tuple(values) for rank, values in
+             catalogue.get("selected_basis_coordinates_by_rank", {}).items()}
+    known = {}
+    for record in labels:
+        known.setdefault(record["tensor_order"], set()).add(record["coordinate_id"])
+    if any(value not in known.get(rank, ()) for rank, values in named.items() for value in values):
+        raise ValueError("A selected basis coordinate is absent from its requested rank's compiler inventory.")
+    source_records, independent, counts, capped_ranks = [], [], {}, []
+    invalid_count = 0
+    for rank in sorted(known):
+        cap = int(_rank_value(catalogue.get("max_features_per_rank", 256), rank))
+        if cap < 1:
+            raise ValueError("max_features_per_rank must be positive.")
+        groups = {}
+        for record in labels:
+            if record["tensor_order"] != rank or (rank in named and record["coordinate_id"] not in named[rank]):
+                continue
+            if not _supported_label(record):
+                invalid_count += 1
+                continue
+            groups.setdefault(record["component_index"], []).append(record)
+        for records in groups.values():
+            records.sort(key=lambda item: (not any(len(kappa)>1 for kappa in item["label"]["block_kappas"]),
+                sum(item["label"]["block_Lambdas"]), item["coordinate_id"]))
+        rank_start = len(independent)
+        while groups and len(independent)-rank_start < cap:
+            for component_index in tuple(groups):
+                record = groups[component_index].pop(0)
+                if not groups[component_index]:
+                    del groups[component_index]
+                parent = dict(components[component_index]["request"])
+                parent.pop("family_ids", None)
+                parent["manual_labels"] = (record["label"],)
+                _artifact, row = _compiled_general_coordinate(parent, record["tag_count"],
+                    source_profile=catalogue.get("source_profile", "B"))
+                source_records.append(record)
+                if image.append(row):
+                    independent.append(record["coordinate_id"])
+                if len(independent)-rank_start >= cap:
+                    break
+        if groups:
+            capped_ranks.append(rank)
+        if rank in named and not set(named[rank]) <= set(independent):
+            raise ValueError("Named coordinates are zero/dependent or exceed the rank cap.")
+        counts[str(rank)] = len(independent)-rank_start
+
+    def coefficients(row):
+        return tuple({"feature_index": index, "coefficient": _exact_scalar_payload(value)}
+                     for index, value in sorted(row.items()))
+
+    inventory = {"rule": "exact_source_image_ldl_v1",
+        "independent_coordinate_ids": tuple(independent), "exact_image_dimension": len(independent),
+        "count_by_rank": counts, "source_profile": catalogue.get("source_profile", "B"),
+        "readout": "pooled_scalar", "actual_sector": {"L": 0, "parity": "even"},
+        "coefficient_materialization_performed": True, "row_reduction_performed": False,
+        "exact_source_factorization_performed": True, "target_metric": "independent_moment_coefficient_identity_v1",
+        "selection_policy": "ascending_rank_round_robin_independent_prefix_v1",
+        "cap_reached_ranks": tuple(capped_ranks), "inadmissible_source_count": invalid_count,
+        "source_reconstruction": tuple({"coordinate_id": record["coordinate_id"],
+            "image_coordinates": coefficients(row)} for record, row in zip(source_records, image.reconstructions))}
+    return {"inventory": inventory, "exact_ldl": {
+        "source_pivots": tuple(image.selected), "lower": tuple(coefficients(row) for row in image.lower),
+        "diagonal": tuple(_exact_scalar_payload(value) for value in image.diagonal)},
+        "retained_exact_coefficient_cells": image.cells}
 
 
 def _general_plan(report):
     from ye3t.couplings.tagged_cauchy_image import TaggedCauchyImageCompilerPlan
     steps = ("compile_cauchy_coordinates", "exact_species_radial_angular_products",
              "distinct_tag_mobius", "exact_sparse_pivots", "real_forward_and_adjoint")
+    if "independent_inventory" in report.resource_report:
+        steps = ("compile_planned_independent_coordinates", "exact_species_radial_angular_products",
+                 "distinct_tag_mobius", "real_forward_and_adjoint")
     body = {"report_hash": report.convention_hash, "materialization_steps": steps}
     return TaggedCauchyImageCompilerPlan(
         report=report, materialization_steps=steps, schema="ye3t_tagged_cauchy_general_plan_v1",
@@ -508,7 +777,7 @@ def _supported_label(record):
     return _tag_species(record) is not None
 
 
-def _compiled_general_coordinate(parent, tag_count):
+def _compiled_general_coordinate(parent, tag_count, *, source_profile="B"):
     """Reuse one canonical coupling and its exact physical lowering.
 
     This key excludes catalogue order and feature caps: extending a catalogue
@@ -521,7 +790,7 @@ def _compiled_general_coordinate(parent, tag_count):
 
     def build():
         compiled = compile(make_plan(count(parent)))
-        rows, supported = _physical_image_rows(compiled, bindings)
+        rows, supported = _physical_image_rows(compiled, bindings, source_profile=source_profile)
         if supported != (0,):
             raise RuntimeError("Selected Cauchy coordinate lost its physical tag support.")
         return {"parent": compiled.to_dict(), "row": _moment_term_records(rows[0])}
@@ -533,7 +802,8 @@ def _compiled_general_coordinate(parent, tag_count):
             raise ValueError("Tagged coordinate differs from independent compilation.")
 
     result = store.resolve("tagged_image_coordinate", "tagged_image_coordinate_v1",
-        {"parent": parent, "bindings": bindings}, builder=build, validator=validate,
+        {"parent": parent, "bindings": bindings,
+         **({"source_profile": source_profile} if source_profile != "B" else {})}, builder=build, validator=validate,
         certificate={"passed": True, "checks": {"canonical_compile": True, "physical_support": True}},
         required_certificate_checks=("canonical_compile", "physical_support"),
         producer={"compiler_revision": 1})
@@ -604,6 +874,38 @@ def _general_compile(plan):
 def _general_compile_uncached(plan):
     from ye3t.couplings.tagged_cauchy_image import CompiledTaggedCauchyImage
     report = plan.report
+    inventory = report.resource_report.get("independent_inventory")
+    if inventory is not None:
+        available = {row["coordinate_id"]: row for row in report.labels}
+        rows, labels, parents = [], [], {}
+        for coordinate in inventory["independent_coordinate_ids"]:
+            record = available[coordinate]
+            parent = dict(report.resource_report["components"][record["component_index"]]["request"])
+            parent.pop("family_ids", None)
+            parent["manual_labels"] = (record["label"],)
+            artifact, row = _compiled_general_coordinate(parent, record["tag_count"],
+                source_profile=report.request["catalogue"].get("source_profile", "B"))
+            if not row:
+                raise ArithmeticError("A planned independent coordinate evaluated to zero.")
+            rows.append(row)
+            labels.append({**record, "parent_artifact_hash": artifact["self_hash"]})
+            parents[artifact["self_hash"]] = artifact
+        if len(rows) != report.exact_image_dimension:
+            raise ArithmeticError("Planned and materialized independent inventories differ.")
+        if not rows:
+            raise ValueError("The selected catalogue has zero physical image.")
+        selected = tuple(range(len(rows)))
+        reconstruction = tuple({index: ExactRadical.rational(1)} for index in selected)
+        payload = _general_payload(rows, labels, selected, reconstruction, parents, inventory=inventory)
+        validation = {"passed": True, "scope": _general_validation_scope(inventory), "exact_image_dimension": len(rows)}
+        provenance = {"api": "ye3t.couplings.compile", "coefficient_compiler": "tagged_cauchy_general"}
+        body = {"schema": "ye3t_linear_tagged_cauchy_image_v4", "plan": plan.to_dict(),
+                "payload": _freeze_json(payload), "validation_report": validation, "provenance": provenance}
+        compiled = CompiledTaggedCauchyImage(plan=plan, payload=payload, self_hash=_stable_hash(_freeze_json(body)),
+                                            validation_report=validation, provenance=provenance)
+        compiled._own_identity()
+        object.__setattr__(compiled, "_identity_verified", True)
+        return compiled
     catalogue = report.request["catalogue"]
     raw_rows, raw_labels = [], []
     image = _ExactImagePivots()
@@ -675,11 +977,37 @@ def _general_compile_uncached(plan):
     provenance = {"api": "ye3t.couplings.compile", "coefficient_compiler": "tagged_cauchy_general"}
     body = {"schema": "ye3t_linear_tagged_cauchy_image_v4", "plan": plan.to_dict(),
             "payload": _freeze_json(payload), "validation_report": validation, "provenance": provenance}
-    return CompiledTaggedCauchyImage(plan=plan, payload=payload, self_hash=_stable_hash(_freeze_json(body)),
-                                    validation_report=validation, provenance=provenance)
+    compiled = CompiledTaggedCauchyImage(plan=plan, payload=payload, self_hash=_stable_hash(_freeze_json(body)),
+                                        validation_report=validation, provenance=provenance)
+    compiled._own_identity()
+    object.__setattr__(compiled, "_identity_verified", True)
+    return compiled
 
 
-def _general_payload(raw_rows, raw_labels, selected, reconstruction, parent_artifacts):
+def _general_validation_scope(inventory):
+    if inventory is None:
+        return "general_exact_physical_pivots"
+    return ("planned_exact_source_image" if inventory["rule"] == "exact_source_image_ldl_v1"
+            else "analytical_physical_inventory")
+
+
+def _general_physical_certificate(inventory=None):
+    if inventory is None:
+        return dict(_GENERAL_PHYSICAL_CERTIFICATE)
+    result = {**_GENERAL_PHYSICAL_CERTIFICATE,
+            "cross_rank_dependence_policy": "analytical_selected_catalogue_v1",
+            "rank_decision": "analytical_inventory_before_coefficients",
+            "inventory_rule": inventory["rule"]}
+    if inventory["rule"] == "exact_source_image_ldl_v1":
+        result.update(cross_rank_dependence_policy="ascending_rank_global_exact_source_image_v1",
+                      rank_decision="exact_source_image_ldl_before_evaluator_materialization",
+                      source_image_plan_hash=inventory["source_image_plan_hash"])
+    if inventory["source_profile"] == "A":
+        result["independence_argument"] = "distinct_occurrence_tensor_evaluation_and_body_order_v1"
+    return result
+
+
+def _general_payload(raw_rows, raw_labels, selected, reconstruction, parent_artifacts, *, inventory=None):
     from ye3t.couplings.lifted_cauchy_scalar import _compile_real_form
     from ye3t.couplings.tagged_cauchy_image import (
         _compile_moment_schedule, _compile_tagged_cauchy_real_schedule_core, _moment_term_records,
@@ -693,12 +1021,12 @@ def _general_payload(raw_rows, raw_labels, selected, reconstruction, parent_arti
             {key: value for key, value in schedule.items() if key != "schedule_hash"}))
         schedules.append(schedule)
     generators = sorted({generator for row in image_rows for monomial in row for generator in monomial})
-    inventory = []
+    source_inventory = []
     bases = sorted({generator[:5] for generator in generators})
     for species, family, support, degree, angular_l in bases:
         def fraction_payload(value):
             return {"numerator": value.numerator, "denominator": value.denominator}
-        inventory.append({
+        source_inventory.append({
             "source_key": {"neighbor_species": species, "source_family_id": family,
                            "support_id": support, "q": degree, "l": angular_l},
             "shifted_jacobi_power_coefficients": tuple(fraction_payload(value) for value in
@@ -706,7 +1034,7 @@ def _general_payload(raw_rows, raw_labels, selected, reconstruction, parent_arti
             "normalization_squared": fraction_payload(shifted_jacobi_normalization_squared(degree, angular_l))})
     algebra = {"schema": "ye3t_selected_exact_source_products_v1",
                "source_family_id": ORTHOGONAL_SHIFTED_JACOBI_SOURCE_FAMILY,
-               "source_inventory": tuple(inventory),
+               "source_inventory": tuple(source_inventory),
                "normalized_support": {"support_id": "pair_normalized_cutoff_v1",
                     "exact_zero_distance_force_policy": "reject_before_direction_evaluation_v1"}}
     algebra["record_hash"] = _stable_hash(_freeze_json(algebra))
@@ -729,7 +1057,8 @@ def _general_payload(raw_rows, raw_labels, selected, reconstruction, parent_arti
         "image_rows": tuple(raw_records[index] for index in selected),
         "moment_schedules": tuple(schedules),
         "real_forms": tuple(_compile_real_form(angular_l) for angular_l in sorted({base[4] for base in bases})),
-        "certificate": dict(_GENERAL_PHYSICAL_CERTIFICATE),
+        "certificate": _general_physical_certificate(inventory),
+        **({"independent_inventory": inventory} if inventory is not None else {}),
     }
     payload["catalogue_hash"] = _stable_hash(_freeze_json(payload))
     core = _compile_tagged_cauchy_real_schedule_core(payload)
@@ -745,20 +1074,25 @@ def _validate_general_integrity(value):
     records and numerical schedules. Hashes detect corruption, not malicious
     authorship. Explicit certificate/full diagnostics remain separate modes.
     """
-    if value.self_hash != value._content_hash():
+    if getattr(value, "_integrity_accepted", False):
+        return True
+    if not getattr(value, "_identity_verified", False) and value.self_hash != value._content_hash():
         raise ValueError("General tagged artifact hash mismatch.")
     payload = value.payload
     core = payload.get("real_schedule_core", {})
     count = len(payload.get("image_coordinate_provenance", ()))
     if (payload.get("schema") != "ye3t_general_tagged_physical_image_v1"
             or payload.get("coordinate_policy") != "exact_physical_pivots_v1"
-            or payload.get("certificate") != _GENERAL_PHYSICAL_CERTIFICATE
+            or payload.get("certificate") != _general_physical_certificate(value.plan.report.resource_report.get("independent_inventory"))
             or core.get("core_schema") != "ye3t_tagged_cauchy_real_schedule_core_v1"
             or core.get("coefficient_encoding") != "exact_algebraic_plus_binary64_v1"
             or int(core.get("feature_count", -1)) != count
             or not core.get("certificate", {}).get("passed")
             or value.validation_report.get("passed") is not True):
         raise ValueError("Unsupported or incomplete stored tagged compiler schedule.")
+    value._own_identity()
+    object.__setattr__(value, "_identity_verified", True)
+    object.__setattr__(value, "_integrity_accepted", True)
     return True
 
 
@@ -783,12 +1117,43 @@ def _validate_general_certificate(value):
     request = report.request
     if _freeze_json(request) != _freeze_json(_general_request(request["catalogue"], request["species"])):
         raise ValueError("General tagged request contract changed.")
-    if report.schema != "ye3t_tagged_cauchy_general_report_v1" or (
+    inventory = report.resource_report.get("independent_inventory")
+    source_work = bool(inventory and inventory["rule"] == "exact_source_image_ldl_v1")
+    expected_schema = ("ye3t_tagged_cauchy_general_report_v1" if inventory is None else
+        "ye3t_tagged_cauchy_general_report_v3" if source_work else "ye3t_tagged_cauchy_general_report_v2")
+    report_body = {"request_hash": request["request_hash"], "labels": report.labels}
+    if inventory is not None:
+        report_body["independent_inventory"] = inventory
+        ids = inventory.get("independent_coordinate_ids", ())
+        if (len(ids) != len(set(ids)) or len(ids) != inventory.get("exact_image_dimension")
+                or not set(ids) <= {label["coordinate_id"] for label in report.labels}
+                or inventory.get("coefficient_materialization_performed") is not source_work
+                or inventory.get("row_reduction_performed") is not False):
+            raise ValueError("General tagged independent inventory changed.")
+        if source_work:
+            if (inventory.get("exact_source_factorization_performed") is not True
+                    or inventory.get("actual_sector") != {"L": 0, "parity": "even"}
+                    or len(inventory.get("source_image_plan_hash", "")) != 64):
+                raise ValueError("General tagged source-image planning evidence changed.")
+            known_ids = {label["coordinate_id"] for label in report.labels}
+            source_ids = set()
+            for relation in inventory["source_reconstruction"]:
+                coordinate = relation["coordinate_id"]
+                terms = relation["image_coordinates"]
+                indices = [term["feature_index"] for term in terms]
+                if (coordinate not in known_ids or coordinate in source_ids
+                        or len(set(indices)) != len(indices)
+                        or any(not 0 <= index < len(ids) for index in indices)):
+                    raise ValueError("General tagged source reconstruction indices changed.")
+                source_ids.add(coordinate)
+            if not set(ids) <= source_ids:
+                raise ValueError("General tagged source reconstruction omits an independent coordinate.")
+    if report.schema != expected_schema or (
         report.raw_label_count != len(report.labels)
         or report.image_dimension_upper_bound != len(report.labels)
-        or report.exact_image_dimension is not None
-        or report.convention_hash != _stable_hash(_freeze_json({"request_hash": request["request_hash"], "labels": report.labels}))
-        or report.validation_report != {"passed": True, "physical_image_dimension_deferred_to_compile": True}
+        or report.exact_image_dimension != (None if inventory is None else inventory["exact_image_dimension"])
+        or report.convention_hash != _stable_hash(_freeze_json(report_body))
+        or report.validation_report != {"passed": True, "physical_image_dimension_deferred_to_compile": inventory is None}
         or report.provenance != {"api": "ye3t.couplings.count", "labels": "lifted_cauchy_fixed_content_scalar_request"}
     ):
         raise ValueError("General tagged report certificate changed.")
@@ -797,8 +1162,11 @@ def _validate_general_certificate(value):
     if value.plan.to_dict() != _general_plan(report).to_dict():
         raise ValueError("General tagged plan certificate changed.")
     components = report.resource_report["components"]
-    if set(report.resource_report) != {"components", "coefficient_materialization_performed"} or (
-        report.resource_report["coefficient_materialization_performed"] is not False
+    expected_resources = {"components", "coefficient_materialization_performed"}
+    if inventory is not None:
+        expected_resources.add("independent_inventory")
+    if set(report.resource_report) != expected_resources or (
+        report.resource_report["coefficient_materialization_performed"] is not source_work
         or len({label["coordinate_id"] for label in report.labels}) != len(report.labels)
     ):
         raise ValueError("General tagged report inventory changed.")
@@ -812,6 +1180,8 @@ def _validate_general_certificate(value):
         ):
             raise ValueError("General tagged coordinate identity changed.")
     payload = value.payload
+    if _freeze_json(payload.get("independent_inventory")) != _freeze_json(inventory):
+        raise ValueError("General tagged payload differs from its planned inventory.")
     if payload.get("schema") != "ye3t_general_tagged_physical_image_v1" or (
         payload.get("coordinate_policy") != "exact_physical_pivots_v1"
         or payload.get("physical_image_lowered") is not True
@@ -858,7 +1228,7 @@ def _validate_general_certificate(value):
     for form in payload["real_forms"]:
         _validate_real_form(form)
     certificate = payload.get("certificate", {})
-    if certificate != _GENERAL_PHYSICAL_CERTIFICATE:
+    if certificate != _general_physical_certificate(inventory):
         raise ValueError("General tagged physical-image certificate is missing or unsupported.")
     raw = payload["raw_labels"]
     if len({item["coordinate_id"] for item in raw}) != len(raw):
@@ -878,7 +1248,12 @@ def _validate_general_certificate(value):
             raise ValueError("General tagged reconstruction index changed.")
         for term in row:
             _validate_exact_scalar_payload(term["coefficient"])
-    if value.validation_report != {"passed": True, "scope": "general_exact_physical_pivots",
+    if inventory is not None and (
+            count != report.exact_image_dimension or tuple(item["coordinate_id"] for item in
+                payload["image_coordinate_provenance"]) != tuple(inventory["independent_coordinate_ids"])):
+        raise ValueError("Materialized independent coordinates differ from the planning inventory.")
+    scope = _general_validation_scope(inventory)
+    if value.validation_report != {"passed": True, "scope": scope,
                                    "exact_image_dimension": count} or value.provenance != {
             "api": "ye3t.couplings.compile", "coefficient_compiler": "tagged_cauchy_general"}:
         raise ValueError("General tagged validation/provenance contract changed.")
@@ -932,7 +1307,7 @@ def _validate_general(value):
         body = {key: item for key, item in request.items() if key != "request_hash"}
         if request["request_hash"] != _stable_hash(_freeze_json(body)):
             raise ValueError("General tagged request hash mismatch.")
-        expected = _general_count(request)
+        expected = _general_count(request, _legacy=value.schema == "ye3t_tagged_cauchy_general_report_v1")
         if value.convention_hash != expected.convention_hash or value.to_dict() != expected.to_dict():
             raise ValueError("General tagged count report changed.")
     elif isinstance(value, TaggedCauchyImageCompilerPlan):
@@ -1007,7 +1382,8 @@ def _replay_general_artifact(value):
             raise ValueError("General tagged parent coordinate binding changed.")
         tag_count = record["tag_count"]
         bindings = tuple(("edge", index) for index in range(tag_count)) + (("density", 0),)
-        rows, supported = _physical_image_rows(parent, bindings)
+        rows, supported = _physical_image_rows(parent, bindings,
+            source_profile=value.plan.report.request["catalogue"].get("source_profile", "B"))
         if supported != (0,):
             raise ValueError("General tagged coordinate has invalid tag support.")
         raw_rows.append(rows[0])
@@ -1024,14 +1400,17 @@ def _replay_general_artifact(value):
             coordinates[index] = _exact_scalar_from_payload(term["coefficient"])
         reconstruction.append(coordinates)
     reconstruction = tuple(reconstruction)
-    canonical_selected, canonical_reconstruction = _exact_pivot_image(raw_rows)
+    canonical_selected, canonical_reconstruction = _exact_pivot_image(
+        raw_rows, validate_reconstruction=True)
     if selected != canonical_selected or reconstruction != canonical_reconstruction:
         raise ValueError("Exact physical-image reconstruction differs from canonical pivots.")
+    inventory = value.plan.report.resource_report.get("independent_inventory")
     expected = _general_payload(raw_rows, payload["raw_labels"], selected, reconstruction,
-                                payload["parent_artifacts"])
+                                payload["parent_artifacts"], inventory=inventory)
     if _freeze_json(payload) != _freeze_json(expected):
         raise ValueError("General tagged physical lowering or reconstruction certificate changed.")
-    if value.validation_report != {"passed": True, "scope": "general_exact_physical_pivots",
+    scope = _general_validation_scope(inventory)
+    if value.validation_report != {"passed": True, "scope": scope,
                                    "exact_image_dimension": len(selected)} or value.provenance != {
             "api": "ye3t.couplings.compile", "coefficient_compiler": "tagged_cauchy_general"}:
         raise ValueError("General tagged validation/provenance contract changed.")

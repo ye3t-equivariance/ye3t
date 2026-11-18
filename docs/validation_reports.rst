@@ -23,8 +23,34 @@ Typical fields include:
    Hash of normalization, carrier, target, and backend metadata.
 
 ``residuals`` / ``rank_gap`` / ``singular_values``
-   Numeric-backend diagnostics when a numeric nullspace or subduction backend
-   is used.
+   Explicit diagnostic fields, particularly for the historical nullspace
+   reference. Numerical production construction uses the selected tableau
+   projector and its known copy count; it does not discover a floating-point
+   rank or solve generator equations.
+
+Production and diagnostic execution
+-----------------------------------
+
+``count`` and ``plan`` determine admissible representations, multiplicities and
+intermediate labels before coefficients are materialized. Production builders
+apply qualified constructive algorithms. Input, shape, arithmetic-failure and
+storage-integrity checks remain enabled. Independent projector, intertwining,
+orthogonality and source-value comparisons run in development tests or explicit
+diagnostics. They are not repeated on every build or cache hit.
+
+``YE3T_CACHE_VERIFY=full`` explicitly requests reconstruction diagnostics for
+the shared coefficient artifacts. Ordinary cache reuse checks storage integrity
+and conventions, then uses the saved coordinates. A construction report can
+record a mathematical property implied by its algorithm without claiming a
+fresh measured residual. Bounded tagged-image reports identify that case using
+their ``verification`` field; source-value witnesses are returned separately by
+the explicit diagnostics.
+
+Numerical values remain floating-point values throughout numerical materialization
+and storage. Analytical reference construction retains exact scalars. Canonical
+seed recipes can be prepared with rational arithmetic, stored globally and reused
+by the numerical constructor. Recipe preparation and numerical evaluation are
+separate measured costs.
 
 ``valid_labels_from``
    Source of truth for label validity, usually ``ye3t.couplings.count`` or a
@@ -50,8 +76,9 @@ bounded single-angular-path ordinary-density case with distinct content; use
 
 Common failure modes:
 
-- A numeric coefficient table is not valid just because it exists; check its
-  validation report.
+- Use coefficient tables produced by the qualified compiler and preserve their
+  convention and input identity. Use explicit diagnostics when auditing a new
+  implementation or arithmetic regime.
 - A label printed by an old compact tuple is not necessarily valid until a
   current report accepts it.
 - Do not call report dictionaries certificates unless the object is a true

@@ -20,7 +20,7 @@ from itertools import product
 
 from ye3t._record import recordclass
 from ye3t.core.subtree_dag import cg_exact
-from ye3t.exact_scalars import ExactRadical, exact_scalar
+from ye3t.exact_scalars import ExactRadical, exact_scalar, _exact_matrix_product
 
 
 def _sympy():
@@ -212,7 +212,7 @@ def _young_factor_restriction_table(left_parts, right_parts, target_parts):
 
 @lru_cache(maxsize=512)
 def _local_young_subduction_template(left_signature, right_signature, target_signature):
-    """Cache carrier maps and the identity-coset reduced-channel solve."""
+    """Cache carrier maps and their known identity-coset adjoint scale."""
 
     from .young_sectors import _permutation_irrep_from_signature
 
@@ -270,9 +270,12 @@ def _local_young_subduction_template(left_signature, right_signature, target_sig
             entries.append(row)
         matrices.append(_sympy().Matrix(entries))
     identity = matrices[0]
-    if identity.rank() != len(rho_labels):
-        raise ArithmeticError("The identity-coset Young restriction does not resolve every LR copy.")
-    left_inverse = (identity.T * identity).inv() * identity.T
+    # Each normalized split matrix S_q has S_q^T S_r = delta(q,r) I_child.
+    # Frobenius placement multiplies it by sqrt(f_parent/(index*f_child)).
+    # Flattening its identity-coset block therefore gives G = f_parent/index I.
+    # Independent factors multiply both the dimensions and subgroup indices.
+    # No coefficient rank discovery, expanded Gram matrix or inverse is needed.
+    left_inverse = _sympy().Rational(len(coset_labels), int(target.dim)) * identity.T
     return rows, tuple(matrices), left_inverse
 
 
@@ -541,9 +544,7 @@ def _homogeneous_reduced_map(left_size, right_size, angular_l,
                     ]
                     for (target_tableau,), (left_tableau,), (right_tableau,) in rows
                 ])
-                coefficients = left_inverse * channel
-                if young_matrices[0] * coefficients != channel:
-                    raise ArithmeticError("Homogeneous Young/angular fusion fails exact subduction.")
+                coefficients = _exact_matrix_product(left_inverse, channel)
                 for rho, value in enumerate(coefficients):
                     if value != 0:
                         reduced[(target_copy, left_copy, right_copy, rho)] = value

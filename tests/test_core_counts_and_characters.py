@@ -864,6 +864,7 @@ def test_factorized_young_subduction_matches_direct_orbit_for_mixed_carriers(
 
 def test_local_factorized_subduction_resolves_repeated_lr_copies():
     from sympy import eye
+    from ye3t.exact_scalars import _exact_matrix_product
 
     from ye3t import permutation_irrep_for_character
     from ye3t.representations.factorized_product_images import _local_young_subduction_template
@@ -879,7 +880,9 @@ def test_local_factorized_subduction_resolves_repeated_lr_copies():
     )
     assert len(matrices) == 20
     assert matrices[0].cols == 2
-    assert left_inverse * matrices[0] == eye(2)
+    # Compare exact algebraic values, including sums of radicals in canonical
+    # copy coordinates; SymPy structural equality is not algebraic equality.
+    assert _exact_matrix_product(left_inverse, matrices[0]) == eye(2)
 
 
 def test_local_factorized_product_map_with_two_lr_copies_matches_direct_orbit():
@@ -2131,7 +2134,7 @@ def test_young_orthogonal_coupling_uses_tableau_basis_not_gram_schmidt():
     trivial = young_orthogonal_induced_coupling(Partition((1,)), Partition((1,)), Partition((2,)))
 
     assert sign.provenance == "young_orthogonal_tableau"
-    assert sign.codepath == "specht_intertwiner_nullspace_no_gram_schmidt"
+    assert sign.codepath == "canonical_binary_projector_subduction"
     assert trivial.codepath == "constructive_trivial_symmetric_orbit_sum"
     assert sign.multiplicity == 1
     assert sign.induced_dim == 2
@@ -2432,7 +2435,7 @@ def test_nary_nontrivial_subduction_coefficients_validate_for_three_factors():
     tensor = young_orthogonal_nary_subduction(factors, target, bracketing="balanced")
     report = validate_young_orthogonal_nary_subduction(tensor)
 
-    assert tensor.codepath == "subduction_graph_propagation_exact"
+    assert tensor.codepath == "canonical_binary_split_composition_v3"
     assert tensor.coefficient_backend == "subduction_graph"
     assert tensor.bracketing == "balanced"
     assert tensor.induced_dim == 6
@@ -2477,6 +2480,7 @@ def test_nary_subduction_graph_matches_oracle_projector_for_three_factors():
 def test_nary_subduction_graph_validates_binary_multiplicity_two_case():
     """Regression for a multiplicity-bearing subduction graph component."""
     sp = pytest.importorskip("sympy")
+    from ye3t.exact_scalars import _exact_matrix_product
     from ye3t import (
         Partition,
         validate_young_orthogonal_nary_subduction,
@@ -2491,26 +2495,27 @@ def test_nary_subduction_graph_validates_binary_multiplicity_two_case():
     graph_matrix = graph.coefficient_matrix()
     oracle_matrix = oracle.coefficient_matrix()
 
-    assert graph.codepath == "subduction_graph_propagation_exact"
+    assert graph.codepath == "canonical_binary_split_composition_v3"
     assert graph.induced_dim == 80
     assert graph.target_dim == 16
     assert graph.multiplicity == 2
     assert report.passed
-    assert sp.simplify(graph_matrix * graph_matrix.T - oracle_matrix * oracle_matrix.T) == sp.zeros(
-        graph_matrix.rows,
-        graph_matrix.rows,
-    )
+    # Retain the independent oracle and the complete exact projector equality.
+    # Canonical copy rotations introduce radical sums; generic expression
+    # simplification of their expanded 80x80 projector can recurse indefinitely.
+    assert _exact_matrix_product(graph_matrix, graph_matrix.T) == _exact_matrix_product(
+        oracle_matrix, oracle_matrix.T)
 
 
-def test_subduction_graph_backend_static_path_avoids_nullspace_and_oracle():
+def test_canonical_split_backend_static_path_avoids_nullspace_and_oracle():
     """The constructive helper must not silently call the oracle path."""
     import inspect
     from ye3t.representations import young_orthogonal as yo
 
     names = (
-        "_constructive_subduction_graph_restricted_intertwiner_basis",
-        "_subduction_graph_solution_vectors",
-        "_component_solution_vectors_by_propagation",
+        "_projector_binary_split_matrices",
+        "_canonical_split_matrices",
+        "_expand_normalized_split_matrices",
     )
     source = "\n".join(inspect.getsource(getattr(yo, name)) for name in names)
     lowered = source.lower()

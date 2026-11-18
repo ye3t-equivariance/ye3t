@@ -95,6 +95,97 @@ def test_integrity_load_never_reconstructs_or_checks_exact_coefficients(artifact
     with pytest.raises(ValueError, match="hash mismatch"):
         CompiledTaggedCauchyImage.from_dict(corrupt, compiler_validation="integrity")
 
+
+def test_accepted_identity_is_read_only_and_exports_remain_isolated(artifact, monkeypatch):
+    import ye3t.couplings.tagged_cauchy_image as image
+    compiled = CompiledTaggedCauchyImage.from_dict(artifact, compiler_validation="integrity")
+    exported = compiled.to_dict()
+    assert exported == artifact
+    exported["plan"]["report"]["request"]["unrelated_export_change"] = True
+    assert "unrelated_export_change" not in compiled.plan.report.request
+
+    with monkeypatch.context() as local:
+        def forbidden(*args, **kwargs):
+            pytest.fail("Hashing an existing canonical plan must not copy its coefficient records")
+        local.setattr(image, "_freeze_json", forbidden)
+        assert compiled._content_hash() == artifact["self_hash"]
+        compiled.validate(compiler_validation="integrity")
+    with pytest.raises(TypeError, match="read-only"):
+        compiled.plan.report.request["uncommitted_nested_mutation"] = True
+    with pytest.raises(TypeError, match="read-only"):
+        compiled.payload["real_schedule_core"]["terms"][0]["coefficient"] += 1
+    assert compiled.validate(compiler_validation="integrity") is compiled
+
+
+def test_integrity_load_hashes_once_and_reuses_owned_schedule(artifact, monkeypatch):
+    import ye3t.couplings.tagged_cauchy_image as image
+    calls = []
+    hashed = image._tagged_artifact_content_hash
+    def observe(body, expected):
+        calls.append(expected)
+        return hashed(body, expected)
+    monkeypatch.setattr(image, "_tagged_artifact_content_hash", observe)
+    compiled = CompiledTaggedCauchyImage.from_dict(artifact, compiler_validation="integrity")
+    assert calls == [artifact["self_hash"]]
+    first = tagged_cauchy_real_schedule(compiled, "integrity", _copy=False)
+    for _ in range(3):
+        compiled.validate(compiler_validation="integrity")
+        assert tagged_cauchy_real_schedule(compiled, "integrity", _copy=False) is first
+    assert calls == [artifact["self_hash"]]
+    assert first["terms"] is compiled.payload["real_schedule_core"]["terms"]
+    exported = tagged_cauchy_real_schedule(compiled, "integrity")
+    exported["terms"][0]["coefficient"] += 1
+    assert exported["terms"][0] != first["terms"][0]
+
+
+def test_new_record_cannot_inherit_another_records_acceptance(artifact):
+    from ye3t._record import record_replace
+    compiled = CompiledTaggedCauchyImage.from_dict(artifact, compiler_validation="integrity")
+    payload = compiled.to_dict()["payload"]
+    payload["real_schedule_core"]["terms"][0]["coefficient"] += 1
+    changed = record_replace(compiled, payload=payload)
+    with pytest.raises(ValueError, match="hash mismatch"):
+        changed.validate(compiler_validation="integrity")
+
+
+def test_copying_an_accepted_owner_cannot_reintroduce_mutability(artifact):
+    compiled = CompiledTaggedCauchyImage.from_dict(artifact, compiler_validation="integrity")
+    copied = copy.deepcopy(compiled)
+    assert copied.payload is compiled.payload
+    assert copied._content_hash() == compiled.self_hash
+    with pytest.raises(TypeError, match="read-only"):
+        copied.payload["real_schedule_core"]["terms"][0]["coefficient"] += 1
+    compiled.payload.__init__({"replacement": True})
+    assert "replacement" not in compiled.payload
+
+
+@pytest.mark.parametrize("operation", [
+    lambda value: value.update(changed=True),
+    lambda value: value.setdefault("changed", True),
+    lambda value: value.clear(),
+    lambda value: value.pop("schema"),
+    lambda value: value.popitem(),
+    lambda value: value.__ior__({"changed": True}),
+    lambda value: value.__delitem__("schema"),
+])
+def test_owned_mapping_rejects_mutators(artifact, operation):
+    compiled = CompiledTaggedCauchyImage.from_dict(artifact, compiler_validation="integrity")
+    with pytest.raises(TypeError, match="read-only"):
+        operation(compiled.payload)
+
+
+def test_trusted_constructor_does_not_rehash_its_output(artifact, monkeypatch):
+    import ye3t.couplings.tagged_cauchy_image as image
+    monkeypatch.setenv("YE3T_CACHE_MODE", "off")
+    def forbidden(*args, **kwargs):
+        pytest.fail("Trusted construction must reuse its freshly computed identity")
+    monkeypatch.setattr(image, "_tagged_artifact_content_hash", forbidden)
+    constructed = compile(plan(count(artifact["plan"]["report"]["request"])))
+    assert constructed.self_hash == artifact["self_hash"]
+    constructed.validate(compiler_validation="integrity")
+    with pytest.raises(TypeError, match="read-only"):
+        constructed.payload["unexpected"] = True
+
 def _check_rehashed_exact_adjoint(artifact):
     # Fully rehash the modified executable: binary64 must still match exact data.
     corrupt = copy.deepcopy(artifact)

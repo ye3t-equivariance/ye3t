@@ -109,7 +109,7 @@ def test_public_dispatch_uses_shared_projector_and_preserves_fast_paths(monkeypa
     kron.exact_kronecker_intertwiners.cache_clear()
     monkeypatch.setattr(kron, "_exact_kronecker_intertwiners_general", forbidden)
     monkeypatch.setattr(young, "_reference_binary_split_matrices", forbidden)
-    monkeypatch.setattr(young, "_constructive_subduction_graph_restricted_intertwiner_basis", forbidden)
+    monkeypatch.setattr(young, "_reference_subgroup_intertwiner_basis", forbidden)
     assert kron.exact_kronecker_intertwiners((3,2), (3,1,1), (3,1,1))["gauge"] == p.TABLEAU_PROJECTOR_COPY_CONVENTION
     assert young._binary_split_matrices is young._projector_binary_split_matrices
     assert len(young._binary_split_matrices((2,1), (2,1), (3,2,1))) == 2

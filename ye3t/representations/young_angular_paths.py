@@ -11,6 +11,7 @@ Only the ordinary symmetric-group formulas are used. Independent implementation.
 """
 from fractions import Fraction
 from functools import lru_cache
+from ye3t.cache._bounded import _bounded_coefficient_cache
 
 from ye3t.core.cg import cg_exact
 from ye3t.exact_scalars import ExactRadical, exact_scalar
@@ -375,7 +376,7 @@ def _normalize(vector):
     return {key: value/root for key, value in vector.items()}
 
 
-@lru_cache(maxsize=32)
+@_bounded_coefficient_cache(maxsize=32)
 def young_angular_path_basis(size, ell, partition, output_L):
     """Reuse exact reduced maps across sources through the common artifact store.
 
@@ -580,12 +581,12 @@ def _path_schedule(basis, size, ell, partition, output_L):
             "copy_gauge": "young_branching_normalized_cg_paths_v1"}
 
 
-@lru_cache(maxsize=128)
+@_bounded_coefficient_cache(maxsize=128)
 def occupation_young_vectors(occupation, partition):
     """Normalized subgroup-invariant columns inside a Young representation.
 
     An occupation defines the subgroup product S_mu. These vectors reuse
-    YE3T's exact normalized subgroup constructor, in its existing copy order.
+    YE3T's canonical adjacent-pair split constructor, in its actual tree order.
     They are the identity-coset part of the role embedding after removing
     sqrt(f_kappa / orbit_size). No role-word orbit is materialized.
     """
@@ -607,7 +608,7 @@ def occupation_young_vectors(occupation, partition):
     # Empty role coordinates contribute no factors to the abstract subgroup.
     # Physical role labels remain in the caller's occupation binding.
     request = dict(subgroup_partitions=children, parent_partition=tuple(partition),
-                   convention="normalized_occupation_subgroup_copy_order_v1")
+                   convention="normalized_occupation_canonical_split_v2")
 
     def build():
         columns = _construct_occupation_young_vectors(children, partition, int(count))
@@ -637,39 +638,42 @@ def occupation_young_vectors(occupation, partition):
                            or not 0 <= tableau < dimension or not 0 <= index < len(payload["scalars"])
                            for tableau, index in column)):
                 raise ValueError("Cached occupation coordinates have invalid tableau/scalar indices")
-        columns = decode(payload)
-        if any(_inner(dict(a), dict(b)) != int(i == j)
-               for i, a in enumerate(columns) for j, b in enumerate(columns)):
-            raise ValueError("Cached occupation copies are not exactly normalized")
-        if store.verify == "full" and columns != _construct_occupation_young_vectors(
-                children, partition, int(count)):
-            raise ValueError("Cached occupation copy order differs from the canonical constructor")
+        if store.verify == "full":
+            columns = decode(payload)
+            if any(_inner(dict(a), dict(b)) != int(i == j)
+                   for i, a in enumerate(columns) for j, b in enumerate(columns)):
+                raise ValueError("Cached occupation copies are not exactly normalized")
+            if columns != _construct_occupation_young_vectors(children, partition, int(count)):
+                raise ValueError("Cached occupation copy order differs from the canonical constructor")
         return True
 
     result = store.resolve("occupation_young_vectors", "ye3t_exact_occupation_vectors_v1", request,
         builder=build, validator=validate,
         certificate={"passed": True, "checks": {"canonical_normalized_subgroup": True}},
         required_certificate_checks=("canonical_normalized_subgroup",),
-        producer={"compiler_revision": 1})
+        producer={"compiler_revision": 2})
     return decode(result["payload"])
 
 
 def _construct_occupation_young_vectors(children, partition, count):
-    """The existing exact subgroup constructor, retaining its normalized copy order."""
-    from .young_orthogonal import _constructive_subduction_graph_restricted_intertwiner_basis
+    """Invariant columns of the shared isometric general split basis.
 
-    blocks = _constructive_subduction_graph_restricted_intertwiner_basis(
-        children, partition, expected_multiplicity=int(count))
+    Each row-child has dimension one. No coset expansion, solve, metric, or
+    second normalization is needed. Exact arithmetic is retained because these
+    coordinates also enter symbolic physical-product identities.
+    """
+    from .young_orthogonal import _canonical_split_matrices
+
+    blocks = _canonical_split_matrices(tuple(children), tuple(partition))
+    if len(blocks) != count:
+        raise ArithmeticError("Occupation split multiplicity differs from its plan")
     vectors = []
     for block in blocks:
-        if block.rows != 1:
+        if block.cols != 1:
             raise ArithmeticError("Symmetric occupation subgroup has a nonscalar child")
-        row = {t: exact_scalar(block[0, t]) for t in range(block.cols) if block[0, t]}
-        vectors.append(_normalize(row))
-    if any(_inner(a, b) != int(i == j) for i, a in enumerate(vectors)
-           for j, b in enumerate(vectors)):
-        raise ArithmeticError("Occupation subduction copies are not orthonormal")
-    return tuple(tuple(sorted(vector.items())) for vector in vectors)
+        vectors.append(tuple((t, exact_scalar(block[t, 0]))
+                             for t in range(block.rows) if block[t, 0]))
+    return tuple(vectors)
 
 
 def paired_occupation_path_basis(occupation, ell, partition, output_L):
@@ -709,12 +713,12 @@ def paired_occupation_path_schedule(occupation, ell, partition, output_L):
     schedule["mixing"] = tuple((p, c, value*scale) for p, c, value in schedule["mixing"])
     schedule["factor_roles"] = tuple(role for role, n in enumerate(occupation) for _ in range(n))
     schedule["occupation"] = tuple(occupation)
-    schedule["copy_gauge"] = "normalized_role_subduction_paired_angular_paths_v1"
+    schedule["copy_gauge"] = "canonical_split_role_paired_angular_paths_v2"
     schedule["parent_partition"] = (size,)
     return schedule
 
 
-@lru_cache(maxsize=2048)
+@_bounded_coefficient_cache(maxsize=2048)
 def permuted_occupation_vector(occupation, partition, copy, permutation):
     """Alphabet action on a normalized occupation multiplicity coordinate.
 

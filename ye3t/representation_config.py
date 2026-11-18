@@ -39,6 +39,10 @@ def _integer_key_map(value, name):
 
 
 def _rank_map(value, ranks, name, minimum):
+    if isinstance(value, (tuple, list)):
+        if len(value) != len(ranks):
+            raise ValueError(f"{name} must provide one value for each of ranks {ranks!r}.")
+        value = dict(zip(ranks, value, strict=True))
     entries = {rank: _integer(number, name) for rank, number in _integer_key_map(value, name).items()}
     if set(entries) != set(ranks):
         raise ValueError(f"{name} must have exactly ranks {ranks!r}.")

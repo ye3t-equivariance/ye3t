@@ -54,6 +54,29 @@ angular-momentum sector.
    >>> report.require_label(labels[0], target_L=0) is not None
    True
 
+Explicit physical contents and shared coordinates
+------------------------------------------------
+
+The scalar tagged catalogue request accepts ``additional_source_contents_by_rank``
+and ``generated_ranks`` to combine selected complete channels with generated
+contents. A complete channel retains its chemical identity, radial index,
+angular degree and source family. ``ye3t.couplings.catalogue_inputs`` supplies
+the shared aligned-input normalization used by the application resolvers.
+Counts, valid intermediate paths and physical independence still come from
+``count``, ``plan`` and ``compile``. Exact pooled image counts report whether
+source-coefficient preparation occurred; the abstract count examples above
+have a different, coefficient-free counting boundary.
+
+For already compiled scalar physical images, ``source.coordinates_in(target)``
+returns a sparse exact matrix K satisfying ``F_source = F_target @ K.T``.
+The method reuses matching IDs and stored source relations, then the existing
+exact source-image operation where required. It rejects a missing target span
+and persists successful maps under the two compiler identities. It changes no
+rotation/permutation coupling normalization. Atomistic root-chemistry masks
+and numerical fitting/readout conversion remain in the application packages.
+The editable root-specific workflow is documented in YE3T Methods' standardized
+linear fitting guide and ``examples/quickstart/explicit_catalogue_descriptors.py``.
+
 Generalized Characters And Change Of Group
 ------------------------------------------
 

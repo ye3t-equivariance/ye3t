@@ -10,7 +10,8 @@ from ye3t.global_coupler import _indexed_angular_paths
 from .factorized_typed import _cg_tree_payload
 
 
-CONVENTION = "normalized_role_subduction_paired_angular_paths_v1"
+CONVENTION = "canonical_split_role_paired_angular_paths_v2"
+LEGACY_CONVENTION = "normalized_role_subduction_paired_angular_paths_v1"
 
 
 def compile_cauchy_paths(report):

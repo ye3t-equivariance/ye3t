@@ -32,7 +32,6 @@ from .generalized_irreps import Partition
 from .numeric_subduction import (
     _default_numeric_subduction_cache_dir,
     _torch_young_irrep_matrix_numeric,
-    numeric_subduction_nullspace,
 )
 from .young_orthogonal import (
     YoungOrthogonalCoupledVector,

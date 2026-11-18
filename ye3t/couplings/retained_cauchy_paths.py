@@ -8,7 +8,7 @@ from collections import Counter
 
 from ye3t.representations.generalized_irreps import Partition
 from . import lifted_cauchy_scalar as scalar
-from .cauchy_paths import CONVENTION, _role_path_analysis
+from .cauchy_paths import CONVENTION, LEGACY_CONVENTION, _role_path_analysis
 from .covariant_cauchy import covariant_cauchy_request, covariant_cauchy_count, compile_covariant_cauchy
 from .shell_role_restriction import _singleton_role_restriction
 
@@ -38,7 +38,7 @@ def _occupation_families(coupling):
     return base, families
 
 
-def retained_cauchy_count(request, *, _with_bases=False):
+def retained_cauchy_count(request, *, _with_bases=False, _coordinate_convention=CONVENTION):
     from .tagged_cauchy_carriers import _tag_partitions
     from .chebyshev_c2 import CHEBYSHEV_C2_SOURCE_FAMILY
     from .orthogonal_shifted_jacobi import ORTHOGONAL_SHIFTED_JACOBI_SOURCE_FAMILY
@@ -61,7 +61,7 @@ def retained_cauchy_count(request, *, _with_bases=False):
                         "tag_character": (1 if partition == ((tags,) if tags else ()) else
                                           -1 if partition == (1,)*tags else None),
                         "tag_role_copy": copy, "role_family_id": family_id,
-                        "convention_id": CONVENTION}
+                        "convention_id": _coordinate_convention}
                     if not tags:
                         original = base[int(family["input_coordinates"][0])]
                         label.update({key: original[key] for key in
@@ -101,7 +101,7 @@ def retained_cauchy_count(request, *, _with_bases=False):
         "formal_free_source_image_rank": len(labels), "physical_image_rank": len(labels) if physical else None,
         "source_independence": ("independent_polynomial_radial_angular_family" if physical
                                 else "requires_bound_source_family_independence"),
-        "copy_inventory": tuple(inventory), "copy_convention": CONVENTION,
+        "copy_inventory": tuple(inventory), "copy_convention": _coordinate_convention,
         "angular_coefficient_materialization": "not_requested",
         "physical_image_scope": "singleton_distinct_tags_independent_free_" + request["density_context"] + "_moments",
         "provenance": "ye3t.couplings.count"}
@@ -180,7 +180,11 @@ def validate_retained_cauchy_paths(payload, *, exact_reconstruction=False):
     request = _request(payload)
     if request.get("angular_basis_backend") != "normalized_cg_paths_v1":
         raise ValueError("Normalized retained sources require their explicit coefficient convention")
-    report = retained_cauchy_count(request)
+    convention = payload["request"]["convention_id"]
+    if convention not in {CONVENTION, LEGACY_CONVENTION}:
+        raise ValueError("Unknown retained source coordinate convention")
+    request["convention_id"] = convention
+    report = retained_cauchy_count(request, _coordinate_convention=convention)
     if (scalar._freeze_json(tuple(row["label"] for row in payload["descriptors"])) != scalar._freeze_json(report["labels"])
             or payload["component_count"] != report["component_count"]
             or payload["multiplet_count"] != report["multiplet_count"]
@@ -190,6 +194,9 @@ def validate_retained_cauchy_paths(payload, *, exact_reconstruction=False):
     if (scalar._stable_record_hash({key: value for key, value in schedule.items() if key != "self_hash"})
             != schedule.get("self_hash") or schedule["output_dimension"] != report["component_count"]):
         raise ValueError("Normalized retained source schedule is inconsistent")
-    if exact_reconstruction and compile_retained_cauchy_paths(request)["self_hash"] != payload["self_hash"]:
-        raise ValueError("Normalized retained source differs from exact shared construction")
+    if exact_reconstruction:
+        if convention != CONVENTION:
+            raise ValueError("Historical retained coordinates require their historical reference for reconstruction")
+        if compile_retained_cauchy_paths(request)["self_hash"] != payload["self_hash"]:
+            raise ValueError("Normalized retained source differs from exact shared construction")
     return True

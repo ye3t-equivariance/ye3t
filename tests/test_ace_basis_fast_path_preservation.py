@@ -109,7 +109,7 @@ def test_alpha_formula_used_for_low_rank_as_well_as_large(monkeypatch):
     assert decomposition.alpha_by_L_R == real_formula(decomposition.symmetric_power_decompositions)
 
 
-def test_factorized_schedule_iterator_matches_all_by_l_constructor():
+def test_factorized_schedule_iterator_matches_all_by_l_constructor(monkeypatch):
     """Streaming materialization preserves all-by-L schedule counts."""
     from ye3t.core.couplings import (
         generate_factorized_coefficient_schedules_by_L,
@@ -148,6 +148,24 @@ def test_factorized_schedule_iterator_matches_all_by_l_constructor():
     )
 
     assert iter_rows == dict_rows
+
+    # Normalized array/list/iterator inputs reuse the same selected schedules.
+    # A warm call must not reconstruct labels or coefficient blocks.
+    import numpy as np
+    from ye3t.core import couplings
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("warm ACE lookup reconstructed coefficient schedules")
+
+    monkeypatch.setattr(couplings, "iter_factorized_coefficient_schedules_by_L", forbidden)
+    monkeypatch.setattr(couplings, "_low_rank_factorized_schedules_by_L", forbidden)
+    for channels, angular in (
+        (list(n_in), np.asarray(l_in, dtype=np.int64)),
+        (iter(n_in), iter(l_in)),
+    ):
+        assert generate_factorized_coefficient_schedules_by_L(
+            channels, angular, constructor_backend="cpp",
+        ) is schedules_by_l
 
 
 def test_low_memory_cpp_factorized_constructor_matches_default_cpp():

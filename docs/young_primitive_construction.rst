@@ -122,11 +122,11 @@ Tests cover:
 ``littlewood_richardson_tableaux`` and
 ``littlewood_richardson_coefficient`` provide an independent exact
 finite-rank multiplicity-label route for one subgroup-adapted merge
-``S_a x S_b -> S_{a+b}``.  The coupling constructor checks that the LR
-coefficient agrees with the character inner product and the exact
-Young-orthogonal intertwiner dimension before returning a tensor.  This
-implements LR multiplicity labeling and validation; it does not yet derive
-normalized subduction coefficient matrices directly from LR tableaux.
+``S_a x S_b -> S_{a+b}``. Counts and labels precede coefficient materialization.
+Independent character and projector comparisons qualify the algorithms in
+tests and explicit diagnostics. Production does not repeat those proofs at
+each construction. LR tableaux identify multiplicities; the shared selected
+tableau projector constructs the normalized coefficient entries.
 
 ``littlewood_richardson_chain_labels`` extends this multiplicity-label route
 to an arbitrary number of subgroup factors using a left-associated chain of
@@ -140,16 +140,18 @@ This n-ary trivial-sector path is constructive.
 ``young_orthogonal_nary_subduction`` materializes n-ary subgroup-adapted
 coefficient matrices in the direct induced basis for trivial and nontrivial
 Specht sectors.  It supports ``bracketing="balanced"``, ``"left"``, and
-``"right"`` for the attached LR-chain labels.  The default
-``coefficient_backend="subduction_graph"`` constructs nontrivial finite-rank
-coefficients from exact Young-subgroup generator constraints by deterministic
-component propagation and exact multiplicity-space normalization.  It raises
-if propagation cannot resolve the requested finite case; it does not silently
-fall back to the oracle.  ``coefficient_backend="intertwiner_oracle"`` keeps
-the older exact symbolic intertwiner/nullspace path available for reference
-validation only.  LR chains provide bracketing-aware multiplicity labels, but
-they are not claimed to be a closed formula for normalized coefficient
-entries.  ``validate_young_orthogonal_nary_subduction_coherence`` checks
+``"right"`` for actual subgroup-adapted coefficient coordinates. Balanced
+construction pairs adjacent children and carries an odd child to the next
+level. Named intermediate labels identify those constructed subgroup spaces.
+The retained public spelling ``coefficient_backend="subduction_graph"`` now
+selects the shared constructive projector and tableau-transport algorithm;
+``"matrix_units"`` forwards to the same implementation. Neither dispatch solves
+generator equations. Versioned orthonormal binary maps compose through the
+tree without expanded-space renormalization.
+``coefficient_backend="intertwiner_oracle"`` keeps the older exact symbolic
+intertwiner/nullspace path available for reference validation only. Its arbitrary
+copy indices must not be interpreted as selected intermediate subgroup subspaces.
+``validate_young_orthogonal_nary_subduction_coherence`` checks
 associativity/coherence across bracketings by comparing the projectors
 ``C C^T`` onto the target isotypic subspace and the orthogonality of the
 recoupling overlap matrices.  Coherence in this sense means that different
@@ -160,9 +162,13 @@ same check over enumerated small-rank cases; current tests exercise this
 through rank 4.
 
 The fused runtime reuses exact lowered coordinate maps from the generalized
-composer and coalesces them by canonical target label. The subduction-graph
-backend is tested on small finite-rank cases, including a binary
-multiplicity-two case. Its production performance has not been measured.
+composer and coalesces them by canonical target label. Numerical production
+uses the same projector/transport schedules and local copy convention, with
+FP64 values retained as numerical arrays. Small discrete seed recipes can be
+prepared exactly and reused from the shared persistent cache. The analytical
+constructor and the independent equation solver remain distinct references.
+Performance evidence must identify the measured constructor, size, cold/warm
+boundary and convention; a reference solver timing is not a production timing.
 
 Balanced Message-Passing Reference Schedules
 --------------------------------------------

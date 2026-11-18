@@ -56,13 +56,14 @@ def test_global_metadata_does_not_invent_unmeasured_residuals():
         mapped.projector_validation["orthonormality_error"])
 
 
-def test_legacy_numeric_copy_coordinates_require_explicit_conversion(tmp_path):
+def test_legacy_numeric_copy_coordinates_require_explicit_conversion():
+    import json
+    from pathlib import Path
     import torch
+    fixture = json.loads((Path(__file__).parent / "fixtures/specht_numeric_pre_canonical_v1.json").read_text())
     exact = specht.build_young_subgroup_specht_coupling(((1,),)*3, (2,1), bracketing="right")
-    legacy = specht.build_cached_young_subgroup_specht_coupling(
-        ((1,),)*3, (2,1), bracketing="right", cache_dir=tmp_path)
     canonical = specht._numeric_coefficients_from_coupling(exact)
-    historical = specht._numeric_coefficients_from_coupling(legacy)
+    historical = torch.tensor(fixture["coordinates"], dtype=torch.float64)
     overlap = historical.T @ canonical
     assert not torch.allclose(canonical, historical, rtol=1e-12, atol=1e-12)
     torch.testing.assert_close(historical @ overlap, canonical, rtol=1e-12, atol=1e-12)

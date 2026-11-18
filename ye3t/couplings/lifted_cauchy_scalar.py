@@ -5351,11 +5351,17 @@ def _role_schur_pivot_metadata(role_dimension, size, partition):
     chooses the same words as E00.columnspace(); sorting all pivot words
     reproduces the original whole-state lexicographic copy order.
     """
+    role_dimension, size = int(role_dimension), int(size)
+    partition = tuple(int(value) for value in partition)
+    if partition == (size,):
+        # Sym^size has one copy per occupation. Its first projected word is
+        # the sorted word itself, so the historical lexicographic copy order
+        # follows directly without any projected-column independence test.
+        return tuple((word, _role_content_vector(word, role_dimension))
+                     for word in combinations_with_replacement(range(role_dimension), size))
     from ye3t.couplings.tagged_cauchy import kostka_number
     from sympy.utilities.iterables import multiset_permutations
 
-    role_dimension, size = int(role_dimension), int(size)
-    partition = tuple(int(value) for value in partition)
     dimension = int(Partition(partition).dimension)
     generators = coset_adjacent_transposition_generators(partition, size)
     pivots = []
